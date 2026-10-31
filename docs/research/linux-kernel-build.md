@@ -816,3 +816,16 @@ Two notes for whoever uses this:
   covers running and runnable both. The program count and SpringBoard's pid are the reliable parts.
 - the heartbeat is `hb=N` (seconds), off by default; it is in the same file as the frame pacing, and
   the two together are how the display questions in this document were answered.
+
+### 20a. `sb_delay` does not fix the stalls
+
+The tree has a boot argument for exactly this shape of problem -- `sb_delay=N`, "SpringBoard starts a
+few seconds late where the kernel's boot-args say so" -- on the theory that a system shell starting
+before its dependencies then waits forever. Tried with `sb_delay=60`:
+
+| | frames |
+|---|---|
+| `sb_delay=60` at 5 minutes | **0** |
+
+so a late SpringBoard is not the answer either. The stalls stay what addendum 20 measures them to be:
+the user space is alive and doing nothing, and the piece that does nothing is the one that would draw.
