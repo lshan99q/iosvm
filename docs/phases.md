@@ -100,7 +100,9 @@ Status 2026-10-31: **the data path is proven end to end on Linux, except one pie
 | Get the IPSW | **done** — `iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw`, 6,165,698,198 bytes, the exact size upstream's unpacker refuses to run without, downloaded from Apple's public CDN |
 | Extract it on Linux | **done** — `tools/unpack-ipsw.sh --apply`, 51 s, 48 MB of firmware and 7.2 GB of images; no Mac, no key service, this repository's first run against a real IPSW |
 | Read the system volume | **done** — 7-Zip 23.01 opens `096-04088-077.dmg` and yields the APFS volume `SydneyF20F66.D22D221OS.apfs` and its full Darwin tree (`Applications`, `System`, `usr`, `private`, `Library`, …) |
-| Turn that tree into `system.apfs` | **done** — 4.7 GB container, `apfsck` clean (details below) |
+| Turn that tree into `system.apfs` | **done** — 4.7 GB container, `apfsck` clean |
+| Get the dyld shared cache out | **done** — from the OS cryptex, with the kernel's own APFS reader (details below) |
+| Compose the volume the userland expects | **done** — 6.0 GB: root + cryptex + cache, `apfsck` clean |
 
 The writer was not research: upstream ships one in its `apfs/` tool directory, MIT-licensed, and
 `tools/apfs/` now carries `apfs.py` and `mkapfs.py` verbatim with an attribution header and a `NOTICE`
@@ -120,8 +122,30 @@ Measured on the real archive: **179,361 files, 136,413 directories, 2,324 symbol
 1,187,306 data blocks — 15,735 compressed into resource forks, 155,371 in their attribute — into a
 4.7 GB container in 125 s.** `apfsck: clean`; the volume reads back as `System.apfs`.
 
-So the data half of M1 is finished. What remains is the guest half: a kernel that mounts this volume
-and an init that executes from it — code to write, not questions to answer.
+### The cryptex, and why 7-Zip could not do it alone
+
+launchd does not run without the **dyld shared cache**, which on a device lives in a second volume --
+the OS cryptex -- grafted at `/System/Cryptexes/OS`. Two things had to be solved:
+
+- **Reading it.** 7-Zip extracts 2.5 GB of the 2.7 GB cryptex and refuses 984 files with
+  `Unsupported Method`: those are stored with APFS compression it does not implement, and they include
+  a `dyld_shared_cache_arm64` for DriverKit. The kernel's own `apfs_lib` does implement it, so the
+  HakiOS tree's `apfs-tool` (which is that code compiled for the host) is used to write back **exactly
+  those 984 files, and only those**. `make-images.sh` parses 7-Zip's log and does this automatically
+  when `APFS_TOOL` is set; without it, it says the cache may be incomplete instead of pretending.
+- **Placing it.** `/System/Cryptexes/OS` in the boot volume is a **symbolic link** to
+  `../../private/preboot/Cryptexes/OS`, so the cryptex is copied to the link's *target*, and the image
+  keeps the layout the userland expects.
+
+The cache itself is the real thing: 44 files, 3.1 GB, every one carrying `dyld_v1   arm64` —
+`dyld_shared_cache_arm64` plus numbered subcaches, `.dylddata`, `.dyldlinkedit` and `.symbols`.
+
+Result on the real archive: **182,786 files, 137,049 directories, 2,326 symbolic links, 1,505,081 data
+blocks into a 6.0 GB container in 261 s**, `apfsck: clean`, volume reads back as `System.apfs`, and the
+image contains `/sbin/launchd` and `private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld`.
+
+So the data half of M1 is finished — the image now holds everything launchd needs to start. What
+remains is the guest half: a kernel that mounts this volume and an init that executes from it.
 
 Unknowns
 1. What minimum set of device-tree nodes satisfies the platform expert? No published answer.

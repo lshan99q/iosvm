@@ -28,6 +28,7 @@ BUILD=build/images
 ROOT_TREE=$BUILD/rootfs
 COMPRESS=1
 VOLUME=System
+CRYPTEX=1
 
 usage() {
 	sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'
@@ -36,6 +37,7 @@ usage() {
 Options:
   --apply             write the image (default: dry run)
   --no-compress       store files uncompressed (default: zlib per 64 KiB, as Darwin does)
+  --no-cryptex        leave out the OS cryptex and its dyld shared cache (a volume that cannot boot)
   --firmware DIR      unpacked firmware (default: firmware)
   --raw DIR           disk images from unpack-ipsw (default: userland-raw)
   --out DIR           output directory (default: userland)
@@ -51,6 +53,7 @@ while [ $# -gt 0 ]; do
 	case $1 in
 		--apply) APPLY=1 ;;
 		--no-compress) COMPRESS=0 ;;
+		--no-cryptex) CRYPTEX=0 ;;
 		--firmware) FW=${2:?}; shift ;;
 		--raw) RAW=${2:?}; shift ;;
 		--out) OUT=${2:?}; shift ;;
@@ -141,6 +144,69 @@ else
 	say "reusing the extracted tree at $ROOT_TREE"
 fi
 say "  tree: $(find "$ROOT_TREE" -mindepth 1 | wc -l) entries, $(du -sh "$ROOT_TREE" | cut -f1)"
+# The OS cryptex: on a device it is a second volume grafted at /System/Cryptexes/OS. It carries the
+# dyld shared cache -- which dyld looks in before the root's own paths -- and the libraries that live
+# outside the cache. Without it the shell tools run and launchd does not.
+if [ "$CRYPTEX" = 1 ]; then
+	ck_dmg=$(python3 - "$FW/BuildManifest.plist" "$RAW" <<'CKPROBE'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+man = d["BuildIdentities"][0]["Manifest"]
+if "Cryptex1,SystemOS" in man:
+    print(sys.argv[2] + "/" + man["Cryptex1,SystemOS"]["Info"]["Path"])
+CKPROBE
+)
+	if [ -n "$ck_dmg" ] && [ -f "$ck_dmg" ]; then
+		CK_TREE=$BUILD/cryptex
+		if [ ! -d "$CK_TREE/System" ]; then
+			say "extracting the OS cryptex (7-Zip cannot read its decmpfs-compressed files; the kernel's own reader fills those in) …"
+			rm -rf "$CK_TREE"
+			mkdir -p "$CK_TREE"
+			set +e
+			7z x -y -o"$CK_TREE" "$ck_dmg" >"$BUILD/cryptex.log" 2>&1
+			set -e
+			# Files 7-Zip reports as "Unsupported Method" are stored with APFS compression it does not
+			# implement. The kernel's apfs_lib does, so when apfs-tool has been built it writes back
+			# exactly those files, and only those.
+			sed -n 's/^ERROR: Unsupported Method : //p' "$BUILD/cryptex.log" | sort -u >"$BUILD/cryptex-unsupported.txt"
+			n=$(grep -c . "$BUILD/cryptex-unsupported.txt" || true)
+			if [ "$n" != 0 ]; then
+				if [ -n "${APFS_TOOL:-}" ] && [ -x "$APFS_TOOL" ]; then
+					say "  reading $n compressed file(s) with the kernel's APFS reader"
+					while IFS= read -r rel; do
+						[ -n "$rel" ] || continue
+						mkdir -p "$CK_TREE/$(dirname "$rel")"
+						"$APFS_TOOL" cat "$ck_dmg" "/$rel" >"$CK_TREE/$rel" || say "  could not read $rel"
+					done <"$BUILD/cryptex-unsupported.txt"
+				else
+					say "  WARNING: $n file(s) are unreadable by 7-Zip and APFS_TOOL is unset."
+					say "           Build the kernel tree's apfs-tool and pass APFS_TOOL=<path>;"
+					say "           without it the image may have an incomplete dyld shared cache."
+				fi
+			fi
+			sed -n 's|^ERROR: Dangerous symbolic link path was ignored : \(.*\) : \(.*\)$|\1\t\2|p' \
+				"$BUILD/cryptex.log" | while IFS=$'\t' read -r link target; do
+				[ -n "$link" ] || continue
+				mkdir -p "$(dirname "$CK_TREE/$link")"
+				ln -sfn "$target" "$CK_TREE/$link"
+			done
+		else
+			say "reusing the cryptex tree at $CK_TREE"
+		fi
+		# /System/Cryptexes/OS is a symbolic link on the boot volume -- it points at
+		# ../../private/preboot/Cryptexes/OS, where the cryptex volume is grafted on a device. Copy to
+		# the target, not to the link, so the layout the userland expects is preserved.
+		ck_dest=$ROOT_TREE/private/preboot/Cryptexes/OS
+		mkdir -p "$ck_dest"
+		cp -a "$CK_TREE/." "$ck_dest/"
+		say "  cryptex: $(find "$CK_TREE" -mindepth 1 | wc -l) entries into /private/preboot/Cryptexes/OS"
+		say "           (/System/Cryptexes/OS in the image is a link to it, as on a device)"
+	else
+		say "  WARNING: the manifest names no Cryptex1,SystemOS image, or it is not in $RAW/ — this"
+		say "           image will have no dyld shared cache, and launchd will not start from it."
+	fi
+fi
+
 
 # 2. The container.
 say "building $OUT/system.apfs …"
