@@ -663,3 +663,22 @@ exists when the Adreno GPU does (`HakiosGPUStart()` is called from the Adreno dr
 Adreno and no firmware for one, so the honest rendering path here is `softpipe` on the guest's CPUs.
 What was optimised is what exists: cores, translation cache, and the display pacing that was silently
 throwing every frame away.
+
+## Addendum 17: how often it works
+
+The home screen is not obtainable on every boot. Of the runs made with the same command in this
+session, several reached it and several did not, and the ones that did not share a signature: the
+guest log stops a couple of minutes in (no SpringBoard restart, no panic, `lsd` last seen busy), and
+the display driver never reports a frame, so the panel keeps the boot logo.
+
+| run | reached the home screen |
+|---|---|
+| `run62` (fb_beat=1) | no -- one swap, and now we know why |
+| `run63` (fb_beat=0) | **yes** -- `docs/demo/home-screen.png` |
+| `run66`, `run67` (fb_beat=0) | no: the log stops ~2 min in, no frames reported |
+
+The honest statement is: the path is found and demonstrated, and it is not yet reliable. What would
+make it reliable is the next question -- whether the stall is SpringBoard waiting on a service, the
+window server's restart cycle their own notes describe, or something about starting the painter from
+stage0 before the system -- and it is measurable the same way the other questions in this document
+were: with the driver's own trace and the process table, both of which are now known to work.
