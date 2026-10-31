@@ -682,3 +682,27 @@ make it reliable is the next question -- whether the stall is SpringBoard waitin
 window server's restart cycle their own notes describe, or something about starting the painter from
 stage0 before the system -- and it is measurable the same way the other questions in this document
 were: with the driver's own trace and the process table, both of which are now known to work.
+
+### 17a. What the stalled boots are waiting for: `lsd`
+
+The process table taken from inside a stalled boot (the painter's reporter, addendum 12's trick) puts
+a name on it:
+
+```
+  PID TTY           TIME CMD
+    9 ??         0:11.62 /System/Library/CoreServices/SpringBoard.app/SpringBoard
+   13 ??         0:18.59 /usr/libexec/backboardd
+   25 ??         1:36.70 /usr/libexec/lsd
+process lsd[25] thread 327 caught burning CPU! It used more than 50% CPU over 180 seconds
+```
+
+`lsd` -- Launch Services -- has spent more processor time than every other daemon together, and the
+watchdog has caught it. It is the daemon that registers the applications, and SpringBoard lays out
+the home screen only after that registration is done, so while `lsd` works there is no UI to draw,
+and the panel keeps whatever was last there.
+
+This is *not* the discriminator between a boot that reaches the screen and one that does not: the
+successful boot in addendum 15 carries the same "burning CPU" line and the same failed lookups for
+`com.apple.mobileactivationd`. What differs is only whether `lsd` finishes in time. That is why the
+honest procedure for now is `qemu/wait-for-ui.sh`: boot, wait for the display driver to report
+frames, and if it never does, boot again.
