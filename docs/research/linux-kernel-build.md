@@ -412,7 +412,7 @@ Five things had to be right, and each was found by its own failure. With them, a
 | `/sbin/launchd.darwin` | missing from the built sysroot | present, 525,088 bytes |
 | dyld shared cache | only at `/System/Cryptexes/OS/...` | that **and** `/System/Library/Caches/com.apple.dyld/` (a symlink, not a copy) |
 | the cache is usable | `no dyld cache` on every load | dyld finds it; that error is gone |
-| `com.hakios.demo` job | runs init again with `rc.jobs`; that init ends in `reboot(RB_HALT)` and takes the machine down at 15 s | not in the image |
+| `com.hakios.demo` job | runs init again with `rc.jobs`; that init ends in `reboot(RB_HALT)` | not in the image -- **but see the correction below: this was not what halted the boot** |
 | how init finds its image | only from `argv[0]`; the kernel's first exec passes no argv, so `base` stayed "" and `/etc/rc` was looked for in the wrong tree | `stat("/redwood/etc/rc")` as well |
 
 The last one is the subtle one, and it explains a whole afternoon of quiet boots:
@@ -531,3 +531,15 @@ What is measured, and what is inferred:
 The next question is therefore narrow and named: **what makes a user domain leave on-demand-only
 mode** -- on Darwin, the bootstrapping of the user session -- and why it happens with the reference
 image and not with this one.
+
+### Correction: the demo job was not what halted the boot
+
+The table above first said the `com.hakios.demo` job took the machine down at fifteen seconds. That
+attribution was wrong, and removing the job proved it: the halt was still there afterwards, at the
+same fifteen seconds, with the same `=== init: done ===` before it. The halt came from **process 1's
+own init**, whose `rc` could not be read because of the `argv[0]` fall-through fixed in the same
+change -- `in_image("/etc/rc")` resolved to `/etc/rc` and the read failed silently.
+
+The demo job is still left out of the image, because a job that halts the machine when it does run is
+not one to keep, and because it turned out never to have run at all in these configurations: the user
+domain is in on-demand-only mode (addendum 13), and its `RunAtLoad` never fires.
