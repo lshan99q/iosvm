@@ -733,3 +733,25 @@ Two things in the script are the lessons of this whole session:
   script boots again rather than pretending they do not happen.
 
 `docs/state-of-the-port.md` is the one-page summary this all adds up to.
+
+### 17b. What a boot that reaches the screen does and a stalled one does not
+
+Comparing the programs launchd reports starting, from the two boots in addenda 15 and 17:
+
+| | reached the screen (`run63`) | stalled (`run68`) |
+|---|---|---|
+| programs launched | 27 | 22 |
+| `slug`: in the stalled boot only | -- | -- |
+| **in the boot that worked only** | `Spotlight`, `ContextService`, `pkd`, plus the two jobs of ours that were in the image then | -- |
+
+`Spotlight` being launched is SpringBoard prewarming, i.e. what happens *after* it lays out the home
+screen; `pkd` (plug-in kit) and `ContextService` are the plug-in machinery behind the widgets. They do
+not cause the difference, they are its symptom -- but they are a usable signal: a boot in which
+`Successfully spawned Spotlight` never appears is not going to show a screen, and `qemu/wait-for-ui.sh`
+takes advantage of exactly that, rebooting when the guest's own log stops growing rather than waiting
+out a boot that is already lost.
+
+What is still not known is why SpringBoard stops at that point in some boots. The process table taken
+from a stalled boot does not show it waiting on anything: every daemon it depends on is alive, and
+`lsd` has spent the same processor time in both (`1:36` stalled, `1:35` successful). The log simply
+stops.
