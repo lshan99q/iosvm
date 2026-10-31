@@ -543,3 +543,35 @@ change -- `in_image("/etc/rc")` resolved to `/etc/rc` and the read failed silent
 The demo job is still left out of the image, because a job that halts the machine when it does run is
 not one to keep, and because it turned out never to have run at all in these configurations: the user
 domain is in on-demand-only mode (addendum 13), and its `RunAtLoad` never fires.
+
+## Addendum 14: the machine was running on one core, and nobody said so
+
+Every timing in this session before this point was measured on **one** processor while the QEMU
+command line said four. The two settings are separate:
+
+| setting | what it does |
+|---|---|
+| `QEMU_SMP=4` | tells QEMU to build a machine with four cores |
+| `CMDLINE="cpus=4"` | tells **the kernel** to start them (`xnuloader/loader.c` puts `cpus=1` in the boot line unless the payload asks for more) |
+
+With only the first, the kernel brings up the core it booted on and nothing else, and the log says so
+in a line that is easy to read past:
+
+```
+GenericARMPE: the slower cores started too: 1 processors running
+```
+
+With both:
+
+```
+GenericARMPE: 4 of 4 processors are running
+GenericARMPE: the slower cores started too: 4 processors running
+```
+
+The effect on wall-clock time is what one would expect once measured: the guest clock used to run
+about eight times slower than the host's, and with four cores it runs close to the host's. Everything
+in this document that says "slow" was measured on one core.
+
+This matters more here than it would elsewhere, because the renderer is `softpipe`: a rasterizer in
+plain C, on the guest's own processors, drawing a 1125x2436 panel. One core is the difference between
+a screen that never changes and a screen that does.
