@@ -67,8 +67,8 @@ ROOT_DOCS = {"Makefile", ".gitignore", ".gitattributes", ".clang-format", ".pre-
 PLANNED_PREFIX = {
     "docs/zh/": "archive: quotes the original document names it was written under",
     "guest/": "M2: the guest plugin",
-    "host/": "M2: vkbridge",
-    "proto/": "M2: the transport protocol",
+    "host/": "submodule: fetched by make submodule, absent in a bare clone",
+    "proto/": "submodule: fetched by make submodule, absent in a bare clone",
     "hw/": "M2: the QEMU device",
     "tests/": "M2: protocol units and fake-gpu",
     "qemu/": "M2: the fork is not vendored yet",

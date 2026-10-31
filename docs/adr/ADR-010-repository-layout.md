@@ -92,7 +92,9 @@ Rules:
 
 ## Follow-up
 
-- `tools/sync-components.sh` (M2): fetch and check out the pinned components, and report a
-  component whose `main` is ahead of the pin.
+- ~~`tools/sync-components.sh`~~ — written, and `make submodule` runs it. It has already earned its
+  keep: its first version read a pin with `git rev-parse`, which prints an unresolvable argument to
+  stdout instead of failing, and reported `HEAD:proto` as a commit. Fixed by `--verify --quiet` with
+  the index as a fallback.
 - The main repository's CI gains a job that builds each component at the pin once per day, so a
   pin that no longer compiles is noticed without a PR.

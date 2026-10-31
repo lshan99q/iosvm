@@ -56,7 +56,9 @@ Step 5 is the one that does not exist. `make run`, `make host`, `make guest`, `m
 upstream, not here: a self-compiled XNU reaches BSD initialisation in 6.4 s of emulated boot on the
 reference host (`docs/m0-host-report.md`).
 
-What works today, exactly: `make test-open`, `make provenance`, `make style`, `make doctor`,
+What works today, exactly: `make test-open` (compliance plus the 49 protocol cases when `proto/`
+is fetched), `make proto`, `make test-gpu` (eight probe checks on lavapipe), `make provenance`,
+`make style`, `make doctor`,
 `tools/unpack-ipsw.sh` (verified end to end against a synthetic IPSW), `tools/check-frame.py`
 (verified both ways), the CI gate on every push, and — the interesting one — this:
 
@@ -83,8 +85,13 @@ GPU can work on the backend; neither needs a Mac or an iPhone.
 | Repository | What | Builds with | Gate |
 |---|---|---|---|
 | `iosvm` (this one) | docs, ADRs, tools, the compliance gate, the plan | python3, make | `make test-open` |
-| `iosvm-proto` | the wire protocol: packed structs, ring, codec, strict fake GPU | a C compiler | `make test` |
-| `iosvm-vkbridge` | the host Vulkan backend: object tables, replay, fences, probe | C++20 + Vulkan | `make test` on lavapipe |
+| `iosvm-proto` → `proto/` | the wire protocol: packed structs, ring, codec, strict fake GPU | a C compiler | `make proto` |
+| `iosvm-vkbridge` → `host/vkbridge/` | the host Vulkan backend: object tables, replay, fences, probe | C++20 + Vulkan | `make test-gpu` |
+
+```sh
+make submodule     # fetch both components at their pinned commits, and report drift
+make components    # build and test both
+```
 
 `hw/` and `guest/` stay in this repository until they need their own toolchain (ADR-010 §rules).
 

@@ -25,7 +25,7 @@ BUILD   := build
 VKBRIDGE := $(BUILD)/host/vkbridge/vkbridge
 PROBE   := $(BUILD)/guest/iosvm-probe
 
-.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check
+.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check proto components
 
 help: ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -40,9 +40,8 @@ doctor: ## report what this machine lacks, and what to install
 
 test-open: provenance ## every check that needs no Apple file (the contributor gate)
 	@ran=0; \
-	if [ -f tests/unit/run.sh ]; then tests/unit/run.sh; ran=$$((ran+1)); else echo "  protocol units: none yet (M2)"; fi; \
-	if [ -f tests/fake-gpu/run.sh ]; then tests/fake-gpu/run.sh; ran=$$((ran+1)); else echo "  fake-gpu: none yet (M2)"; fi; \
-	echo "test-open: provenance clean, $$ran test suite(s) run"
+	if [ -f proto/Makefile ]; then echo "== protocol (proto/ submodule) =="; $(MAKE) -s -C proto test >/dev/null && echo "  proto: pass" || { echo "  proto: FAIL"; exit 1; }; ran=$$((ran+1)); else echo "  proto/: not fetched (make submodule) — skipped"; fi; \
+	echo "test-open: provenance clean, $$ran component suite(s) run"
 
 provenance: ## no Apple artifacts, no undeclared binaries, no credentials
 	@$(PYTHON) tools/provenance-check.py --root .
@@ -62,17 +61,20 @@ fmt: ## format C/C++/ObjC in place
 test: test-open ## everything, including the parts that need a GPU
 	@$(MAKE) test-gpu
 
-test-gpu: ## vkbridge + probe against lavapipe (no Apple file needed, needs a Vulkan driver)
-	@echo "test-gpu: FAILS BY DESIGN — not implemented until M2 (docs/phases.md)" >&2
-	@exit 1
+test-gpu: ## build the backend and run its probe on lavapipe (no Apple file, no real GPU needed)
+	@test -f host/vkbridge/Makefile || { echo "host/vkbridge is not fetched: run make submodule" >&2; exit 2; }
+	$(MAKE) -C host/vkbridge
+	@mkdir -p $(BUILD)
+	VK_ICD_FILENAMES="$${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}" \
+		host/vkbridge/build/vkbridge-probe --screenshot $(BUILD)/screenshot.png
 
 # ---------------------------------------------------------------------------
 # Host side
 # ---------------------------------------------------------------------------
 
-host: ## build host/vkbridge
-	@echo "host: FAILS BY DESIGN — host/vkbridge is M2 (docs/phases.md)" >&2
-	@exit 1
+host: ## build the host Vulkan backend (host/vkbridge submodule)
+	@test -f host/vkbridge/Makefile || { echo "host/vkbridge is not fetched: run make submodule" >&2; exit 2; }
+	$(MAKE) -C host/vkbridge
 
 # ---------------------------------------------------------------------------
 # Guest side (needs the iPhoneOS SDK, so: a Mac — see ADR-009)
@@ -86,12 +88,17 @@ guest: ## build guest/metal-plugin
 # QEMU fork
 # ---------------------------------------------------------------------------
 
-submodule: ## fetch the QEMU fork (not vendored yet)
-	@if [ ! -f .gitmodules ]; then \
-		echo "submodule: no .gitmodules — the QEMU fork is not vendored yet (M2, docs/phases.md)" >&2; \
-		exit 1; \
-	fi
+submodule: ## fetch the pinned component repositories (ADR-010)
 	git submodule update --init --recursive
+	@tools/sync-components.sh --check
+
+components: submodule ## build and test every pinned component
+	$(MAKE) -C proto test
+	$(MAKE) -C host/vkbridge test
+
+proto: ## build and test the protocol library (proto/ submodule)
+	@test -f proto/Makefile || { echo "proto/ is not fetched: run make submodule" >&2; exit 2; }
+	$(MAKE) -C proto test
 
 qemu: ## build QEMU with hw/virtio-iosvm-gpu
 	@echo "qemu: FAILS BY DESIGN — neither the fork nor hw/virtio-iosvm-gpu exists yet (M2)" >&2

@@ -69,7 +69,8 @@ for path in "${paths[@]}"; do
 				drift=1
 				continue
 			fi
-			pin=$(git rev-parse "HEAD:$path" 2>/dev/null || echo "?")
+			pin=$(git rev-parse --verify --quiet "HEAD:$path^{commit}" 2>/dev/null \
+				|| git ls-files -s -- "$path" | awk '{print $2}')
 			head=$(git -C "$path" rev-parse HEAD 2>/dev/null || echo "?")
 			if [ "$pin" != "$head" ]; then
 				say "  $path: work tree is at ${head:0:12}, pinned at ${pin:0:12} (run: git submodule update)"
@@ -79,7 +80,8 @@ for path in "${paths[@]}"; do
 			fi
 			;;
 		update)
-			pin=$(git rev-parse "HEAD:$path" 2>/dev/null || echo "?")
+			pin=$(git rev-parse --verify --quiet "HEAD:$path^{commit}" 2>/dev/null \
+				|| git ls-files -s -- "$path" | awk '{print $2}')
 			if ! git -C "$path" fetch -q origin 2>/dev/null; then
 				say "  $path: FETCH FAILED (offline?)"
 				drift=1

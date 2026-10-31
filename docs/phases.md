@@ -119,11 +119,13 @@ boundary and produce byte-identical results on the host GPU. ⭐ This milestone 
 if M3 never lands.
 
 Deliverables
-- [ ] `proto/iosvm_gpu.h` v0.1 frozen (ring, op set, fence semantics)
-- [ ] `host/vkbridge`: object tables, replay, fences, running against **lavapipe** in CI
+- [x] `proto/iosvm_gpu.h` v0.1 (ring, op set, fence semantics) — in `iosvm-proto`, pinned as `proto/`
+- [x] `host/vkbridge`: object tables, replay, fences — in `iosvm-vkbridge`, pinned as `host/vkbridge/`;
+      8/8 probe checks on lavapipe and on a V100, and the 512 KiB blit is byte-identical
 - [ ] `hw/virtio-iosvm-gpu`: doorbell → vkbridge
 - [ ] `guest/metal-plugin`: `MTLDevice`, `MTLCommandQueue`, `MTLCommandBuffer`,
-      `MTLBlitCommandEncoder` only
+      `MTLBlitCommandEncoder` only — **the only part of M2 still open**, and the only one that needs
+      a Mac (`ci/mac.md`)
 - [ ] `iosvm-probe`, one line per check
 - [ ] `tests/fake-gpu`: strict in-process interpreter (out of bounds, unknown opcode, fence
       reordering → fail)

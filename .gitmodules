@@ -1,0 +1,6 @@
+[submodule "proto"]
+	path = proto
+	url = https://github.com/lshan99q/iosvm-proto.git
+[submodule "host/vkbridge"]
+	path = host/vkbridge
+	url = https://github.com/lshan99q/iosvm-vkbridge.git
