@@ -874,3 +874,23 @@ icon -- and capturing before and after.
 of it so far landed on a stalled boot (the script retries, and each attempt is minutes), so what is
 recorded here is the mechanism, not a result. The coordinates are the third column of the fourth row
 of icons in `docs/demo/home-screen.png`, which is where Settings sits.
+
+## Addendum 23: the A/B that asks whether our own hook is the cause
+
+The stall has been blamed on nothing so far, and one candidate has never been ruled out: **the painter
+this port runs from stage0** (`patches/0002`). It runs before `init`, allocates a frame's worth of
+memory and calls the display's `show()` -- if anything of ours could leave the display driver in a
+state where the presenter later waits, that is it.
+
+The test is a rebuild without it (`userland/src/stage0.c` restored to upstream, system image rebuilt
+with `SYSTEM=1`) and then five boots of the same command, counting the ones whose panel shows the
+system:
+
+| image | boots | reached the screen |
+|---|---|---|
+| with the stage0 painter (the one that produced every capture in this document) | many, informally | about one in three |
+| **without it** | 5, `qemu/wait-for-ui.sh` with `NO_FRAMES_BY=84` | see the tally when it finishes |
+
+A boot is counted as lost by the script itself: no frame reported by seven minutes, or no growth in
+the guest's log for two minutes. That is the same criterion the procedure uses, applied five times in
+a row, which is the only way an informal "about one in three" can become a number.
