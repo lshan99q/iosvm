@@ -575,3 +575,47 @@ in this document that says "slow" was measured on one core.
 This matters more here than it would elsewhere, because the renderer is `softpipe`: a rasterizer in
 plain C, on the guest's own processors, drawing a 1125x2436 panel. One core is the difference between
 a screen that never changes and a screen that does.
+
+## Addendum 15: the home screen
+
+`docs/demo/home-screen.png` is the iOS home screen: the clock at 2:12, the Weather and Calendar
+widgets, twenty application icons, the Search capsule and the dock. It is drawn by SpringBoard on
+this machine, through CoreAnimation, through Mesa's `softpipe`, into the panel the host captures.
+Nobody put it there but Darwin.
+
+### What was actually blocking it
+
+The compositor had been drawing all along. The display driver's queue, though, was never drained:
+
+```c
+/* iokit/Kernel/MiniIOMobileFramebuffer.cpp, show() */
+if (gOnTheBeat) { ... clock_delay_until(next); ... }
+```
+
+`fb_beat` defaults to **1** -- each frame waits for the next refresh boundary. With the software
+renderer on QEMU a frame arrives far from where that phase estimate expects it, the wait swallows the
+budget, the swap queue fills, and `present()` drops what comes next ("the GPU has stopped answering:
+the frame before is waiting for it"). On the panel that looks exactly like a system that draws nothing:
+one swap, the boot logo, forever.
+
+The measurement that found it is the driver's own trace (`fbtrace` defaults to 3 lines per selector):
+
+| with `fb_beat=1` (default) | with `fb_beat=0` |
+|---|---|
+| `swap 1` only, ever | `swap 1 … 8` and continuing |
+| screen: 13,161 bytes, the boot logo | screen: 337,968 bytes, the home screen |
+
+One boot argument, no kernel change: `CMDLINE="cpus=4 fb_beat=0"`.
+
+### What the system shows, in order
+
+| guest time | what is on the panel |
+|---|---|
+| 0-30 s | black, then the kernel's own band (addendum 5) |
+| ~1 min | our painter's picture (addendum 7), then Apple's boot logo |
+| ~6 min | the logo is dismissed (`didFinishFirstBoot`), a spinner |
+| ~8 min | the home screen above |
+
+Note that the app icons' *content* is drawn (camera, photos, mail, maps) while the two big widgets
+(Weather, Calendar) are white rectangles: a widget's content comes from an extension process, and on
+this machine those extensions are not running. The screen is real; the widgets are the honest gap.
