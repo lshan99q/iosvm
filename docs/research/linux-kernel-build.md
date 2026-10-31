@@ -829,3 +829,25 @@ before its dependencies then waits forever. Tried with `sb_delay=60`:
 
 so a late SpringBoard is not the answer either. The stalls stay what addendum 20 measures them to be:
 the user space is alive and doing nothing, and the piece that does nothing is the one that would draw.
+
+## Addendum 21: `chronod` runs, and the widgets stay white
+
+The home screen's Weather and Calendar widgets are white rectangles, and the launchd log asks for
+`com.apple.chronoservices` on every boot and does not find it. That service belongs to `chronod`, a
+stock job this image did not load, so it was added to the list (`CHRONOD=1`, on by default now):
+
+```
+com.apple.xpc.launchd| (user/501/com.apple.chronod) <Notice>: service state: spawning
+```
+
+It starts. The widgets are still white -- `docs/demo/home-screen-with-chronod.png`, clock 3:35, a
+later boot than any other capture here, so this is not an old frame.
+
+So the missing piece is not the daemon: `chronod` hosts widget *extensions*, and an extension is a
+plug-in inside an application bundle, launched through the app's registration and the plug-in kit.
+That machinery (`pkd`, which only appears in boots that reach the screen, `ContextService`, and the
+registration `lsd` spends minutes on) is where the widget content comes from, and it is a different
+problem from the one this port has been solving.
+
+Recorded as a negative result with its evidence, which is worth as much as a positive one here: it
+rules out the cheapest explanation and names the next one.
