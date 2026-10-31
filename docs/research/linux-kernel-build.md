@@ -315,3 +315,33 @@ Patches: `0001` (display brings up the service), `0002` (stage0 runs a painter f
 What is still true: this is **our** picture, not the system's. SpringBoard still cannot draw, because
 it needs Metal and the Metal device here is a stub. But the floor is now under the *user-space*
 layer too, which it was not before -- and that is the layer a Metal device would have to live in.
+
+## Addendum 8: what stands between the panel and the system UI
+
+The panel is lit and a user-space program of ours can paint it (addenda 5 and 7). The system UI is
+still not there, and the measurement says why, in two parts:
+
+**The Metal device is a stub, and nothing currently loads it.** `HakiosMetal.bundle` builds (108,784
+bytes) and is in the RAM disk at `/lib/HakiosMetal.bundle`, reachable through the system volume's
+`/System/Library/Extensions` symlink. But no Metal call in the boot log appears -- the counter of
+"asked and not implemented" stays at zero -- because nothing in the boot reaches a
+`MTLCreateSystemDefaultDevice()` that would load it.
+
+**Asking the kernel for it stops the boot.** With `CMDLINE="metal=1"`, the boot no longer spawns a
+single process: the log ends with the accelerator naming the plug-in and no launchd activity at all.
+Without `metal=1` the same image spawns 60 to 90 processes including SpringBoard. So the Metal path
+is not "not yet drawn" -- it is "does not survive start-up", and that has to be fixed before any
+question about what the UI would look like.
+
+That reorders the work honestly:
+
+| step | state |
+|---|---|
+| boot user space (no Metal) | works |
+| paint the panel (kernel, user space) | works |
+| start up with Metal enabled | **fails, zero processes** |
+| a Metal device SpringBoard could composite with | not implemented (the bundle is scaffolding) |
+| the UI on screen | needs the two above |
+
+The next piece of work is therefore not rendering: it is finding out why `metal=1` stops the boot
+before launchd, which is a much narrower question -- one boot flag, one code path in the accelerator.
