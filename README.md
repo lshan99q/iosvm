@@ -56,8 +56,8 @@ Step 5 is the one that does not exist. `make run`, `make host`, `make guest`, `m
 upstream, not here: a self-compiled XNU reaches BSD initialisation in 6.4 s of emulated boot on the
 reference host (`docs/m0-host-report.md`).
 
-What works today, exactly: `make test-open` (compliance plus the 49 protocol cases when `proto/`
-is fetched), `make proto`, `make test-gpu` (eight probe checks on lavapipe), `make provenance`,
+What works today, exactly: `make test-open` (compliance plus the protocol cases when `proto/` is
+fetched), `make proto`, `make test-gpu` (eight probe checks on lavapipe), `make provenance`,
 `make style`, `make doctor`,
 `tools/unpack-ipsw.sh` (verified end to end against a synthetic IPSW), `tools/check-frame.py`
 (verified both ways), the CI gate on every push, and — the interesting one — this:
@@ -70,6 +70,16 @@ make qemu-open-check HAKIOS=~/src/hakios
 #   [ok] MAC Framework   [ok] BSD half reached pid 1 (expected panic on launchd)
 #   qemu-open: PASS
 ```
+
+Two dependencies are pinned as submodules and are not in a bare clone: `proto/` (the wire protocol,
+testable with a C compiler alone) and `host/vkbridge/` (the Vulkan backend). `make submodule`
+fetches both at their commits; `make components` builds and tests them.
+
+An adversarial review of the backend found that its probe alone **does not prove the GPU did the
+work** — a patched copy with a host `memcpy` still printed every check as `[ok]`. The bytes are
+right and the code does use `vkCmdCopyBuffer`; the proof is what is missing, and a device-side
+oracle is in flight. `docs/phases.md` records the same thing, because a claim that survives in
+only one document is still a claim.
 
 It takes about eight seconds of wall clock on a 2014 Xeon: the kernel reaches the interrupt
 controller at 6.3 s of emulated boot and the expected `launchd` panic ends the run. The kernel is

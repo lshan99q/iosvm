@@ -147,12 +147,18 @@ ssh -p 2222 root@127.0.0.1 'iosvm-probe'
 
 Exit condition: probe green on lavapipe **and** on a real GPU.
 
-Status 2026-10-31: **two of the three halves are real and measured.** `iosvm-proto` (pinned as
-`proto/`) passes 49 cases with no GPU and no Apple file. `iosvm-vkbridge` (pinned as
-`host/vkbridge/`) passes eight probe checks on **lavapipe and on a Tesla V100**, and the 512 KiB
-blit goes through `vkCmdCopyBuffer`/`vkCmdFillBuffer` rather than a memcpy — the byte comparison
-would be worthless otherwise. Copy time including submit and fence: 0.07 ms on lavapipe,
-0.30 ms on the V100, n=50. The two devices produce byte-identical screenshots.
+Status 2026-10-31: **two of the three halves exist, one of them needs a correction.** `iosvm-proto`
+(pinned as `proto/`) passes its cases with no GPU and no Apple file. `iosvm-vkbridge` (pinned as
+`host/vkbridge/`) passes eight probe checks on **lavapipe and on a Tesla V100**, and its blit does
+go through `vkCmdCopyBuffer`/`vkCmdFillBuffer`.
+
+But an adversarial review showed the probe **proves less than this document first claimed**: a copy
+of the repository with the blit replaced by a host `memcpy` still printed all eight `[ok]` lines.
+The bytes are right; the mechanism is not established by the comparison. The fix in flight is a
+device-side oracle (a shader the host cannot emulate writing a checksum the host then verifies),
+plus an assertion that the blitted buffers are not host-visible. Until that lands, the honest
+statement is: *the result is correct on two devices, and the code at `src/replay.cpp` does use the
+device — but the probe alone does not prove it.*
 
 What is left is the guest: `guest/metal-plugin` and the QEMU device that carries the ring. That
 is also the only part of M2 that needs a Mac (`ci/mac.md`).
@@ -245,3 +251,19 @@ Recorded so they are not quietly added:
 The blog cadence is a survival strategy for the one-person-project risk R6 ("builder runs out of
 steam", `docs/zh/engineering.md` §7): M2's probe output is a publishable result on its own — "the
 first open VM to push a Metal command stream to a host GPU".
+
+## Review findings that changed the plan
+
+Two adversarial reviews (2026-10-31) were run over the components the day they were written, and
+both found something that mattered:
+
+| Where | Finding | Consequence |
+|---|---|---|
+| `iosvm-proto` | An **empty ring after a wrap could refuse a record that fits**, permanently: counters were indices in `[0,size)`, so any record larger than the tail gap was rejected even with the whole body free | The ring representation is being changed to cumulative offsets with an explicit padding skip. A protocol that can wedge on a legal sequence is not shippable |
+| `iosvm-vkbridge` | The probe **could not tell a GPU blit from a host memcpy** — a patched copy printed 8/8 | A device-side oracle is being added, and the claim in this document was corrected above rather than left standing |
+| `iosvm-vkbridge` | The screenshot's error path destroyed a fence, image and command buffer that were still in flight | Fixed with a wait-idle before cleanup |
+| both | Several tests could not fail (mutation-tested): a wrap case that never wrapped, an ordering assertion fed already-sorted values, a "refuses and changes nothing" case that skipped the field that changed | Each is being replaced with one that fails when the property is removed |
+
+The lesson is the same one ADR-008 taught: a check that has never been seen to fail is not evidence.
+Both reviews ran the "delete the guard and see if the suite notices" experiment, which is now the
+standard this project holds its own tests to.
