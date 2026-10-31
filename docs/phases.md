@@ -147,6 +147,16 @@ ssh -p 2222 root@127.0.0.1 'iosvm-probe'
 
 Exit condition: probe green on lavapipe **and** on a real GPU.
 
+Status 2026-10-31: **two of the three halves are real and measured.** `iosvm-proto` (pinned as
+`proto/`) passes 49 cases with no GPU and no Apple file. `iosvm-vkbridge` (pinned as
+`host/vkbridge/`) passes eight probe checks on **lavapipe and on a Tesla V100**, and the 512 KiB
+blit goes through `vkCmdCopyBuffer`/`vkCmdFillBuffer` rather than a memcpy — the byte comparison
+would be worthless otherwise. Copy time including submit and fence: 0.07 ms on lavapipe,
+0.30 ms on the V100, n=50. The two devices produce byte-identical screenshots.
+
+What is left is the guest: `guest/metal-plugin` and the QEMU device that carries the ring. That
+is also the only part of M2 that needs a Mac (`ci/mac.md`).
+
 Unknowns
 1. Does CoreAnimation present through `MTLBlitCommandEncoder` at all? If it uses a private path,
    a green probe can still be irrelevant to the desktop — which is why M2 ends with a
