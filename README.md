@@ -58,7 +58,21 @@ reference host (`docs/m0-host-report.md`).
 
 What works today, exactly: `make test-open`, `make provenance`, `make style`, `make doctor`,
 `tools/unpack-ipsw.sh` (verified end to end against a synthetic IPSW), `tools/check-frame.py`
-(verified both ways), and the CI gate on every push.
+(verified both ways), the CI gate on every push, and — the interesting one — this:
+
+```sh
+# an open-source XNU reaching BSD initialisation under QEMU, no Apple file anywhere.
+# needs a checkout of the upstream tree that builds it: make qemu-open-check HAKIOS=~/src/hakios
+make qemu-open-check HAKIOS=~/src/hakios
+#   [ok] loader banner   [ok] kernel banner   [ok] paged memory
+#   [ok] MAC Framework   [ok] BSD half reached pid 1 (expected panic on launchd)
+#   qemu-open: PASS
+```
+
+It takes about eight seconds of wall clock on a 2014 Xeon: the kernel reaches the interrupt
+controller at 6.3 s of emulated boot and the expected `launchd` panic ends the run. The kernel is
+the upstream project's build, not ours — `tools/qemu-open.sh` says so, and that distinction is
+the point of the exercise.
 
 ## What lives where — planned layout
 

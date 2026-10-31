@@ -101,7 +101,18 @@ in this repository.
 
 ## Reproduce
 
-The commands above reference the upstream tree, not this repository, because M0 has no boot
-harness of its own yet. `tools/qemu-open.sh` is the intended owner of this report: when it lands it
-regenerates this file. `tools/doctor.sh --json` reports the host, not boot timings, and does not
-own this report.
+The hand-run commands above are now a script with an assertion mode. This is the whole reproduction:
+
+```sh
+git clone --depth 1 https://github.com/oosexgang/hakios-xnu-kernel.git ~/src/hakios
+make qemu-open-check HAKIOS=~/src/hakios
+```
+
+It prints the five markers and `qemu-open: PASS`, and exits 1 naming the first missing marker if
+the boot regresses. Measured on this host: 6.3 s of emulated boot to the interrupt controller,
+7.8 s wall clock for the whole run (the expected `launchd` panic ends it under `-no-reboot`).
+
+`.github/workflows/upstream-boot.yml` runs the same check weekly at a **pinned upstream commit**,
+so an upstream change cannot break a pull request but does show up on Monday. `tools/doctor.sh
+--json` reports the host, not boot timings, and does not own this report; `tools/qemu-open.sh`
+does.

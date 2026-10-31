@@ -13,6 +13,8 @@ SHELL   := /bin/bash
 
 JOBS    ?= $(shell nproc)
 PYTHON  ?= python3
+HAKIOS  ?=
+SECONDS_RUN ?= 120
 
 # The guest firmware is the contributor's own. Nothing here downloads it.
 IPSW    ?=
@@ -23,7 +25,7 @@ BUILD   := build
 VKBRIDGE := $(BUILD)/host/vkbridge/vkbridge
 PROBE   := $(BUILD)/guest/iosvm-probe
 
-.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images
+.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check
 
 help: ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -94,6 +96,19 @@ submodule: ## fetch the QEMU fork (not vendored yet)
 qemu: ## build QEMU with hw/virtio-iosvm-gpu
 	@echo "qemu: FAILS BY DESIGN — neither the fork nor hw/virtio-iosvm-gpu exists yet (M2)" >&2
 	@exit 1
+
+# ---------------------------------------------------------------------------
+# The boot smoke test that needs no IPSW: an open-source XNU under QEMU.
+# It needs an upstream checkout because the kernel binary is 16 MB and cannot live here.
+# ---------------------------------------------------------------------------
+
+qemu-open: ## boot an open-source XNU under QEMU and show the log (needs HAKIOS=dir)
+	@test -n "$(HAKIOS)" || { echo "give HAKIOS=/path/to/upstream/checkout (see tools/qemu-open.sh --help)"; exit 2; }
+	tools/qemu-open.sh --hakios "$(HAKIOS)" --seconds "$(SECONDS_RUN)"
+
+qemu-open-check: ## assert the boot markers (CI-able; exit 0 means BSD init was reached)
+	@test -n "$(HAKIOS)" || { echo "give HAKIOS=/path/to/upstream/checkout (see tools/qemu-open.sh --help)"; exit 2; }
+	tools/qemu-open.sh --hakios "$(HAKIOS)" --seconds "$(SECONDS_RUN)" --check
 
 # ---------------------------------------------------------------------------
 # The guest that needs an IPSW — the contributor's own, never fetched

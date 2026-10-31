@@ -1,0 +1,64 @@
+name: upstream-boot
+
+# Boots an open-source XNU under QEMU and asserts the boot markers. No Apple content, no IPSW.
+#
+# Why this is not part of linux-ci: it depends on an external repository's built kernel, so it must
+# be pinned and must not be able to break a pull request. It runs here, weekly, and on demand —
+# and when it fails, the upstream pin is the first thing to look at.
+#
+# The kernel comes from the upstream project's `prebuilt/`, at the commit below. Our repository
+# commits no kernel and downloads none: the checkout is the contributor-equivalent.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"        # Mondays, 04:17 UTC
+  push:
+    branches: [main]
+    paths:
+      - "tools/qemu-open.sh"
+      - ".github/workflows/upstream-boot.yml"
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: https://github.com/oosexgang/hakios-xnu-kernel.git
+  UPSTREAM_SHA: a3384e031eb1e605cf37adaefc19991f04f6274b
+
+jobs:
+  boot:
+    name: open-source XNU reaches BSD init
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and aarch64 UEFI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-efi-aarch64
+
+      - name: Fetch the upstream kernel at the pin
+        run: |
+          git init -q upstream && cd upstream
+          git remote add origin "$UPSTREAM_REPO"
+          git fetch -q --depth 1 origin "$UPSTREAM_SHA"
+          git checkout -q FETCH_HEAD
+          test -f prebuilt/hakios-kernel
+          test -f prebuilt/loader.efi
+          test -f prebuilt/userland/hello
+          echo "upstream: $(git rev-parse HEAD)"
+
+      - name: Boot it
+        run: make qemu-open-check HAKIOS="$PWD/upstream" SECONDS_RUN=180
+
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-open-log
+          path: build/qemu-open/logs/qemu.log
+          if-no-files-found: warn
+          retention-days: 7

@@ -32,6 +32,7 @@ Deliverables — `[x]` means it exists and was exercised on 2026-10-31, not that
 - [x] `tools/unpack-ipsw.sh`: IPSW → `firmware/` + `userland-raw/` (Linux only, ADR-009)
 - [ ] `tools/make-images.sh`: builds `userland/system.apfs` — **blocked**: needs the APFS writer (M1)
 - [ ] `qemu/` submodule pinned — **not vendored yet** (M2); `make submodule` fails rather than lie
+- [x] `tools/qemu-open.sh` + `make qemu-open-check`: a boot smoke test with no Apple file
 - [ ] `make run` reaches a root shell — **not built yet** (M0 tail)
 - [x] README states what the contributor must supply and what they must not commit
 - [x] `docs/m0-host-report.md` — measured; regenerating it from a script is `tools/qemu-open.sh`
@@ -56,7 +57,10 @@ Unknowns
 1. Whether the QEMU fork builds cleanly on Ubuntu 24.04 with gcc 13 (upstream documents macOS).
 2. Whether the pinned XNU release and the contributor's IPSW agree on user-space ABI.
 
-Status 2026-10-31: the upstream boot is **reproduced on the host** — HakiOS's prebuilt kernel
+Status 2026-10-31: the boot is now a **script, not an anecdote** —
+`make qemu-open-check HAKIOS=~/src/hakios` asserts five markers and passes in ~8 s
+(`tools/qemu-open.sh`, pinned upstream commit in `.github/workflows/upstream-boot.yml`). The
+upstream boot is **reproduced on the host** — HakiOS's prebuilt kernel
 (`xnu-8796.121.2`, built by that project from XNU source) reaches BSD initialisation in 6.4 s of
 emulated boot and then panics on `launchd`, because the test ramdisk carries no user space
 (`docs/m0-host-report.md`). Building that kernel here failed for lack of the theos toolchain, so
