@@ -8,9 +8,10 @@ The result is recorded here in full, including what was wrong with this project'
 because the value of a review is what happens to the findings afterwards — and because the same
 class of mistake appeared twice in one day.
 
-Status key: **fixed** — changed and verified in the repository; **in flight** — a fix is being
-written in the same day's work; **accepted** — judged not worth changing, with the reasoning
-recorded. Nothing here is left as "known but unowned".
+Status key: **fixed** — changed, verified, and pinned in the main repository by a submodule commit;
+**accepted** — judged not worth changing, with the reasoning recorded. Nothing here was left as
+"known but unowned", and every "fixed" was re-run by the coordinator against the reviewer's own
+reproducer before the status changed.
 
 ---
 
@@ -29,7 +30,11 @@ The one-line "fix" the reviewer warned against would publish `head == tail` and 
 like an empty ring. The representation had to change: counters became **cumulative offsets** with an
 explicit padding marker, so an empty ring can always accept a record that fits.
 
-Status: **fixed** — see `include/iosvm_ring.h` for the current invariants.
+Status: **fixed** — `iosvm-proto` 863ad43. Counters are cumulative offsets modulo the largest
+multiple of the body size that fits in `uint32_t` (`P = floor(2^32/size)*size`), so a counter wrap
+leaves `counter % size` unchanged; an empty ring pads and restarts instead of refusing. Both of the
+reviewer's reproducers now pass: the wedge probe prints `no wedge`, and the under-filled reservation
+is delivered once instead of forever.
 
 ### IMPORTANT — `WRITE`'s inline length was never checked against the envelope
 
@@ -38,7 +43,7 @@ Status: **fixed** — see `include/iosvm_ring.h` for the current invariants.
 host written to the documentation ("the returned payload length always equals what the opcode
 requires") would over-read.
 
-Status: **fixed**.
+Status: **fixed** — `iosvm-proto` 863ad43.
 
 ### MINOR — length arithmetic before validation
 
@@ -46,7 +51,7 @@ The truncation test formed `payload_len + 16` first, which wraps on ILP32 and tu
 a BOUNDS (with one test failing on a 32-bit host). Fixed by comparing against `len - hdr` after
 `len >= hdr`, and the precedence of TRUNCATED over BAD_ALIGN is now documented.
 
-Status: **fixed**.
+Status: **fixed** — `iosvm-proto` 863ad43 (compare before adding, and the precedence is documented).
 
 ### MINOR — four tests that could not fail
 
@@ -60,8 +65,9 @@ stays green:
 | "refused command mutates nothing" | nothing changes | the sequence counter does change; the case never looked at it |
 | "neighbouring bytes are untouched" | no overrun | only checked the 16 bytes *before* the write, so a trailing overrun was invisible |
 
-Status: **fixed** — replaced with cases that fail when the property is removed, including the wedge
-reproducer and a wrap with unconsumed data.
+Status: **fixed** — 14 ring cases, including a 40-byte padding wrap, a wrap with unconsumed data, the
+counter wrap at `P`, and the wedge reproducer. A 1M-step differential fuzz (500,567 records, 57,815
+padding skips, five body sizes, three of them not powers of two) found no corruption.
 
 ### MINOR — documentation that contradicted the code
 
@@ -73,14 +79,15 @@ reproducer and a wrap with unconsumed data.
   `init()`.
 - `BLIT_FILL`'s value was documented "native byte order" but written little-endian.
 
-Status: **fixed** (all four say what the code does).
+Status: **fixed** — all four now say what the code does.
 
 ### MINOR — UBSan did not gate
 
 `-fsanitize=undefined` without `-fno-sanitize-recover` prints and exits 0, so a UBSan regression
 passed CI while ASan failures aborted.
 
-Status: **fixed**.
+Status: **fixed** — `-fno-sanitize-recover=all`, proven with a two-line signed-overflow program that
+exits 0 without the flag and 1 with it.
 
 ### NIT
 
@@ -121,15 +128,19 @@ writes a checksum word the host then verifies. A host-side implementation cannot
 UMA driver (lavapipe) the memory-type check is unavailable, which makes the oracle the *only*
 evidence there — so it is not optional.
 
-Status: **in flight**. The memory-type assertion that already landed is a partial fix and is known to
-be insufficient on UMA.
+Status: **fixed** — `iosvm-vkbridge` b72bb8c. Each of `blit_copy`, `blit_fill` and `screenshot` now
+takes an attestation buffer and a nonce; a compute shader recorded into the same command buffer reads
+the data that was operated on and writes a nonce-derived checksum the host never touches. On a device
+with a non-host-visible device-local heap the working buffers must also land in it; on a UMA driver
+the probe prints one `[info]` line and lets the oracle carry the proof. Both of the reviewer's cheats
+fail now: on the V100 the memory-type assertion catches it, on lavapipe the oracle does.
 
 ### IMPORTANT — the screenshot had the same weakness
 
 GPU output was compared against a CPU model that a CPU implementation would return. Same oracle
 needed.
 
-Status: **in flight**.
+Status: **fixed** — same commit; the frame is read back through the device and its checksum attested.
 
 ### IMPORTANT — ordering assertions that could not fail
 
@@ -137,16 +148,16 @@ Status: **in flight**.
 checked 40 submissions and a counter, not distinct command buffers. The unit tests test the detector,
 not the queue — which is legitimate, but the probe line implied otherwise.
 
-Status: **in flight** (poll `vkGetFenceStatus` across unwaited batches and assert the observed
-signaling order is a permutation, or remove the line).
+Status: **fixed** — the ordering is now observed by polling unwaited batches and asserting the signal
+order is a permutation of them.
 
 ### IMPORTANT — the screenshot error path destroyed in-flight objects
 
 After a successful `vkQueueSubmit`, a failing fence wait (timeout, device lost) let the cleanup
 destroy the pending `VkFence`, the command buffer, the image and its memory **while still in use**.
 
-Status: **fixed** — wait idle (checked) before cleanup on post-submit errors; on device loss, leak
-rather than destroy in-flight handles.
+Status: **fixed** — wait idle (checked) before cleanup on post-submit errors; on device loss, prefer
+leaking to destroying in-flight handles.
 
 ### MINOR
 
@@ -162,7 +173,9 @@ rather than destroy in-flight handles.
   `vkCmdFillBuffer` sizes, not for `vkCmdCopyBuffer` sizes.
 - CI used the deprecated `VK_ICD_FILENAMES` with a Mesa-version-specific ICD filename.
 
-Status: **in flight** (all of the above are in the same change as the oracle).
+Status: **fixed** — the PNG is decoded and its pixels compared; fences are reaped after their wait; a
+misconfigured ICD is an error while an absent device is a skip; the README describes what the probe
+does and does not establish; and the deprecated `VK_ICD_FILENAMES` is replaced by `VK_DRIVER_FILES`.
 
 ### What held up
 
