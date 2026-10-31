@@ -500,3 +500,34 @@ different build of the same library and is the work after this.
 
 What this is not: it is the *boot logo*, not the home screen. The drawing pipeline works end to end;
 how far SpringBoard gets from here is a separate question, measured below.
+
+## Addendum 13: the screen stops at the boot logo, and the one line that explains it
+
+With the GL path in place the compositor draws (addendum 12), and the frames stop at the boot logo.
+Sampling the screen every two minutes for twenty minutes gives the same 13,161-byte picture: the
+Apple mark on black. SpringBoard has spawned (`Successfully spawned SpringBoard[7]`) and does not
+crash, and it logs nothing at all.
+
+The line that explains both facts is launchd's, about *our own* job and about many of its own:
+
+```
+com.apple.xpc.launchd| (user/501) <Notice>: pending spawn, domain in on-demand-only mode: com.iosvm.ps
+```
+
+**The user domain is in on-demand-only mode**, so a job with `RunAtLoad` is scheduled and not run:
+`WILL_SPAWN`, `service state: spawn scheduled`, and then nothing. SpringBoard is *in* that domain, and
+the services it waits for are too, which is why the screen holds at the boot logo while everything
+looks healthy in the log.
+
+What is measured, and what is inferred:
+
+| measured | inferred |
+|---|---|
+| 15-45 jobs spawned depending on the list; the user domain says on-demand-only | the domain never transitions to normal mode |
+| SpringBoard spawns, does not exit, logs nothing | it is waiting for services in that domain |
+| backboardd keeps drawing the BootUI overlay | the window server is healthy; the layer to composite never arrives |
+| the same jobs *did* run in earlier runs of the reference image (60-90 processes) | the transition happens in that configuration and not this one |
+
+The next question is therefore narrow and named: **what makes a user domain leave on-demand-only
+mode** -- on Darwin, the bootstrapping of the user session -- and why it happens with the reference
+image and not with this one.

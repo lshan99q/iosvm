@@ -177,5 +177,20 @@ int main(int argc, char **argv)
      * delays the whole system. Nothing else writes the panel on a machine without a GPU, so the
      * picture is still there for whoever looks next. */
     tell("fill_panel: the picture is on the panel\n");
+    /* A look at the user space from inside it, with nobody's permission needed: a child that waits
+     * for the system to settle and then prints the process table on the same console. The launchd
+     * job that was meant to do this never got past xpcproxy, and the question it was asked -- what
+     * is actually running when the screen stays on the boot logo -- is still the one worth asking. */
+    if (fork() == 0) {
+        char *ps_argv[] = { "/bin/ps", "-A", NULL };
+        char *ps_envp[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", NULL };
+
+        for (int i = 0; i < 900; i++) {        /* 180 s, in the same 200 ms steps */
+            usleep(200000);
+        }
+        execve(ps_argv[0], ps_argv, ps_envp);
+        tell("fill_panel: cannot run %s\n", ps_argv[0]);
+        _exit(1);
+    }
     return 0;
 }
