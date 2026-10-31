@@ -48,6 +48,7 @@ PLANNED = {
     "docs/demo/m1-frame.png": "M1: the acceptance capture",
     "docs/demo/demo.mp4": "M4: released as an attachment, not committed",
     "tools/scratch/": "git-ignored scratch space (docs/zh/work-rules.md)",
+    "tools/sync-components.sh": "M2 follow-up named in ADR-010",
 }
 
 # Archived design documents quote the filenames they were written under, and paths from the
@@ -167,7 +168,14 @@ def main() -> int:
         print(f"check-links: {root} is not a git work tree", file=sys.stderr)
         return 2
 
-    docs = [f for f in tracked(root) if f.endswith(".md")] + [f for f in ("Makefile",) if (root / f).exists()]
+    untracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
+        capture_output=True, check=False,
+    ).stdout
+    extra = [p for p in untracked.decode("utf-8", "surrogateescape").split("\0") if p.endswith(".md")]
+    docs = sorted({f for f in tracked(root) if f.endswith(".md")} | set(extra))
+    if (root / "Makefile").exists():
+        docs.append("Makefile")
     # Look on disk, not in the index: an ADR written in this same change must count.
     adrs = {p.name for p in (root / "docs/adr").glob("ADR-*.md")}
 

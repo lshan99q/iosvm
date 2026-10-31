@@ -72,6 +72,13 @@ Darwin userland is a different test and needs the contributor's own IPSW (Test 2
    `edk2-aarch64` and `AAVMF` ship the padded one.
 2. `qemu/run.sh` looks for `QEMU_VARS`; with only `qemu-efi-aarch64` installed there is none to
    copy. An all-zero 64 MiB `vars.fd` works.
+3. `-drive file=fat:rw:...,if=virtio` needs `efi-virtio.rom`, which GitHub's runner image does not
+   ship: the first CI run died with `failed to find romfile "efi-virtio.rom"` after 0.1 s. The fix
+   is `if=none` plus `-device virtio-blk-pci,drive=esp0,romfile=` — the option belongs on the
+   device, and an empty value means "no option ROM", which is fine because the UEFI firmware has
+   its own virtio driver. Found by running the workflow for real instead of trusting that YAML
+   which parses will run; the FAIL path of `tools/qemu-open.sh` prints the log tail, which is how
+   the cause was visible at all.
 
 ## Test 2 — Darwin userland in QEMU (not run, needs an IPSW)
 

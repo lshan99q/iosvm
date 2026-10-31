@@ -125,6 +125,9 @@ say "  payload.bin $(stat -c %s "$WORK/payload.bin") bytes"
 
 # --- run -------------------------------------------------------------------------------------
 
+# The ESP is a virtio-blk device with its option ROM disabled: GitHub's runner image does not ship
+# efi-virtio.rom, and nothing here needs to boot from that ROM — the UEFI firmware has its own
+# virtio driver. The romfile option belongs on the device, not on -drive.
 LOG=$WORK/logs/qemu.log
 say
 say "booting for ${SECONDS_RUN}s (the window is closed: serial only) …"
@@ -135,7 +138,8 @@ timeout --signal=TERM "$SECONDS_RUN" qemu-system-aarch64 \
 	-accel tcg,tb-size=384 \
 	-drive if=pflash,format=raw,readonly=on,file="$WORK/efi.fd" \
 	-drive if=pflash,format=raw,file="$WORK/vars.fd" \
-	-drive file=fat:rw:"$WORK/esp",format=raw,if=virtio \
+	-drive file=fat:rw:"$WORK/esp",format=raw,if=none,id=esp0 \
+	-device virtio-blk-pci,drive=esp0,romfile= \
 	-device loader,file="$WORK/payload.bin",addr=0xF0000000,force-raw=on \
 	-display none -serial stdio -monitor none -no-reboot \
 	>"$LOG" 2>&1
@@ -181,7 +185,9 @@ if [ "$CHECK" = 1 ]; then
 		exit 0
 	fi
 	say "qemu-open: FAIL — see the log above; the first missing marker is the one to chase" >&2
-	grep -nE "panic|error|failed|not found" "$LOG" | head -10 >&2 || true
+	say "  --- last lines of $LOG ---" >&2
+	tail -n 6 "$LOG" | sed 's/^/  /' >&2 || true
+	grep -nE "panic|rror|failed|not found" "$LOG" | head -5 >&2 || true
 	exit 1
 fi
 
