@@ -1,6 +1,7 @@
 # Apple content, images and firmware — never committed
 firmware/
 userland/
+userland-raw/
 *.ipsw
 *.dmg
 bootkc

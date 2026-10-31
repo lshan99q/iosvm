@@ -54,6 +54,8 @@ MAGIC = (
 )
 
 # 5. Credential shapes. Deliberately narrow: a false positive costs a maintainer one review.
+SHA_RE = re.compile(rb"[0-9a-f]{40}")
+
 SECRET = (
     (re.compile(rb"gh[pousr]_[A-Za-z0-9]{36,}"), "GitHub token"),
     (re.compile(rb"github_pat_[A-Za-z0-9_]{50,}"), "GitHub fine-grained token"),
@@ -133,8 +135,9 @@ def scan(root: Path, report: Report, allow_binaries: set[str]) -> None:
             continue
 
         # 1. Apple-derived directories.
-        if rel.startswith(("firmware/", "userland/")):
-            report.fail(rel, "tracked under firmware/ or userland/ (Apple-derived, never committed)")
+        if rel.startswith(("firmware/", "userland/", "userland-raw/")):
+            report.fail(rel, "tracked under firmware/, userland/ or userland-raw/ "
+                           "(Apple-derived, never committed)")
             continue
 
         # 2. Forbidden extensions.
@@ -210,7 +213,8 @@ def scan_history(root: Path, report: Report) -> int:
 
     commits = 0
     for raw in proc.stdout.split(b"\n"):
-        if len(raw) == 40 and not raw.startswith((b"+", b"-", b"@", b" ")):
+        # `--format=%H` emits bare 40-hex lines; anything else is diff content.
+        if SHA_RE.fullmatch(raw):
             commits += 1
             continue
         if not raw.startswith((b"+", b"-")) or raw.startswith((b"+++", b"---")):

@@ -18,15 +18,17 @@ set -euo pipefail
 PROG=${0##*/}
 APPLY=0
 FW=firmware
+RAW=userland-raw
 OUT=userland
 
 usage() {
-	sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 Options:
   --apply             write the images (default: dry run)
-  --firmware DIR      input directory (default: firmware)
+  --firmware DIR      firmware input directory (default: firmware)
+  --raw DIR           disk image input directory (default: userland-raw)
   --out DIR           output directory (default: userland)
   -h, --help          this text
 EOF
@@ -38,6 +40,7 @@ while [ $# -gt 0 ]; do
 	case $1 in
 		--apply) APPLY=1 ;;
 		--firmware) FW=${2:?}; shift ;;
+		--raw) RAW=${2:?}; shift ;;
 		--out) OUT=${2:?}; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; exit 2 ;;
@@ -51,16 +54,20 @@ done
 say() { printf '%s\n' "$*"; }
 
 say "IOSVM make-images"
-say "  input     $FW"
+say "  firmware  $FW"
+say "  raw       $RAW"
 say "  output    $OUT/system.apfs, $OUT/data.apfs"
 say "  mode      $([ "$APPLY" = 1 ] && echo 'APPLY' || echo 'dry run (pass --apply to write)')"
 say
 
-mapfile -t dmgs < <(find "$FW" -maxdepth 1 -name '*.dmg' -printf '%f\n' | sort)
+# unpack-ipsw.sh puts the .dmg containers in $RAW; accept them in $FW too for older checkouts.
+src_dir=$RAW
+[ -d "$src_dir" ] || src_dir=$FW
+mapfile -t dmgs < <(find "$src_dir" -maxdepth 1 -name '*.dmg' -printf '%f\n' 2>/dev/null | sort)
 if [ "${#dmgs[@]}" -eq 0 ]; then
-	die "no .dmg in $FW/ — the unpack produced nothing usable"
+	die "no .dmg in $RAW/ or $FW/ — run tools/unpack-ipsw.sh --apply with your own IPSW first"
 fi
-say "disk images found in $FW/:"
+say "disk images found in $src_dir/:"
 printf '  %s\n' "${dmgs[@]}"
 say
 

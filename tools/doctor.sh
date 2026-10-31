@@ -14,7 +14,7 @@ set -euo pipefail
 JSON=0
 case "${1:-}" in
 	--json) JSON=1 ;;
-	-h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-h|--help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	"") ;;
 	*) echo "doctor.sh: unknown argument: $1" >&2; exit 2 ;;
 esac
@@ -28,7 +28,10 @@ rows=()
 need() {
 	local level=$1 name=$2 cmd=$3 hint=${4:-}
 	if command -v "$cmd" >/dev/null 2>&1 || eval "$cmd" >/dev/null 2>&1; then
-		rows+=("ok|$name|$(command -v "${cmd%% *}" 2>/dev/null || echo present)|")
+		case "$cmd" in
+			test\ *) rows+=("ok|$name|present|") ;;
+			*)        rows+=("ok|$name|$(command -v "${cmd%% *}" 2>/dev/null || echo present)|") ;;
+		esac
 		ok=$((ok + 1))
 	else
 		rows+=("$level|$name|$hint|")

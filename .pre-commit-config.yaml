@@ -21,7 +21,7 @@ repos:
 
       - id: forbidden-paths
         name: firmware/ and userland/ are git-ignored and must never be staged
-        entry: bash -c 'f=$(git diff --cached --name-only --diff-filter=ACM | grep -E "^(firmware|userland)/" || true); if [ -n "$f" ]; then echo "refusing to commit Apple-derived files:"; echo "$f"; exit 1; fi'
+        entry: bash -c 'f=$(git diff --cached --name-only --diff-filter=ACM | grep -E "^(firmware|userland|userland-raw)/" || true); if [ -n "$f" ]; then echo "refusing to commit Apple-derived files:"; echo "$f"; exit 1; fi'
         language: system
         pass_filenames: false
         always_run: true

@@ -20,17 +20,15 @@ set -euo pipefail
 PROG=${0##*/}
 IPSW=
 APPLY=0
-KEEP=0
 OUT_FW=firmware
 OUT_RAW=userland-raw
 
 usage() {
-	sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 Options:
   --apply             actually write (without it, this is a dry run)
-  --keep-raw          keep the extracted .dmg files after unpacking them
   --firmware DIR      firmware output directory (default: firmware)
   --raw DIR           intermediate output directory (default: userland-raw)
   -h, --help          this text
@@ -49,7 +47,6 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit "${2:-1}"; }
 while [ $# -gt 0 ]; do
 	case $1 in
 		--apply) APPLY=1 ;;
-		--keep-raw) KEEP=1 ;;
 		--firmware) OUT_FW=${2:?--firmware needs a directory}; shift ;;
 		--raw) OUT_RAW=${2:?--raw needs a directory}; shift ;;
 		-h|--help) usage; exit 0 ;;
@@ -73,8 +70,10 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' ||
 	die "python3 $pyver is too old (need 3.10+)" 2
 
 # 7-Zip < 23 does not read APFS, and it leaves files empty instead of failing. Refuse early.
-sevenz=$(7z 2>/dev/null | head -1)
-sevenz_major=$(printf '%s' "$sevenz" | sed -n 's/.* \([0-9][0-9]*\)\.[0-9][0-9]*.*/\1/p' | head -1)
+# `7z` with no arguments prints a blank line before the banner on some builds; `7z i` does not.
+sevenz=$(7z i 2>/dev/null | sed -n '/7-Zip/p' | head -1)
+[ -n "$sevenz" ] || sevenz=$(7z i 2>/dev/null | head -1)
+sevenz_major=$(printf '%s' "$sevenz" | sed -n 's/.*[^0-9]\([0-9][0-9]*\)\.[0-9][0-9]*.*/\1/p' | head -1)
 [ -n "$sevenz_major" ] || die "cannot read the 7-Zip version from: $sevenz" 2
 if [ "$sevenz_major" -lt 23 ]; then
 	die "7-Zip $sevenz_major is too old: APFS needs 23 or newer, and older versions silently
@@ -136,9 +135,9 @@ if [ "$APPLY" = 1 ]; then
 	mkdir -p "$OUT_FW" "$OUT_RAW"
 
 	# Members we want verbatim.
-	python3 - "$IPSW" "$OUT_FW" <<'PY'
+	python3 - "$IPSW" "$OUT_FW" "$OUT_RAW" <<'PY'
 import sys, zipfile, os
-ipsw, out = sys.argv[1], sys.argv[2]
+ipsw, out_fw, out_raw = sys.argv[1], sys.argv[2], sys.argv[3]
 WANT = ("BuildManifest.plist", "Restore.plist")
 with zipfile.ZipFile(ipsw) as z:
     for name in z.namelist():
@@ -148,8 +147,8 @@ with zipfile.ZipFile(ipsw) as z:
                 or (name.startswith("Firmware/") and name.endswith((".im4p", ".im4m"))))
         if not keep:
             continue
-        dst = os.path.join(out if not name.endswith(".dmg") else ".",
-                           os.path.basename(name))
+        base = os.path.basename(name)
+        dst = os.path.join(out_raw if name.endswith(".dmg") else out_fw, base)
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
         with z.open(name) as src, open(dst, "wb") as f:
             while chunk := src.read(1 << 20):

@@ -18,7 +18,7 @@ MON=logs/mon.sock
 PPM_DIR=
 KEEP_PPM=0
 
-usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
