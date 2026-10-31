@@ -436,3 +436,67 @@ backboardd[12] [BootUI] systemShellChangedWithPrimary: bundleIdentifier: com.app
 Also worth recording: `com.apple.SpringBoard.plist` logs one complaint that does not stop it --
 `Unknown key for plist importer (key: HighPriorityIO type: bool)` -- launchd ignores the key and
 spawns the job anyway.
+
+## Addendum 11: the system draws -- the boot logo, and what made it possible
+
+`docs/demo/system-ui-first.png` is the iOS boot logo on the guest's panel: 1125x2436, a white Apple
+mark on black, drawn by **the system itself** -- backboardd's BootUI overlay, through CoreAnimation,
+through our OpenGL ES stand-in, through Mesa's `softpipe` rasterizer, into the framebuffer the host
+captures. It is the first frame in this project that no code of ours drew.
+
+The chain, and what each link needed:
+
+| link | what it needed |
+|---|---|
+| backboardd's compositor asks CoreAnimation to draw | the window server has a display it accepts |
+| CoreAnimation picks a renderer | `userland/src/inject.c:opengl_es()` loads `/redwood/lib/libhakios.gl.dylib`; with no `gl=` boot argument it decides by asking whether a `HakiosGPU` service exists -- and patch 0001 above is what makes that service exist on this machine |
+| OpenGL ES 3.1 | Mesa 25.0.7 built for arm64-darwin by `tools/mk-mesa.sh` (14,805,208 bytes, 1296 `gl*` functions, `softpipe`), behind `eagl.c` |
+| pixels reach the panel | the same framebuffer path proven in addenda 5 and 7 |
+
+The log says it in its own words:
+
+```
+hakios-gl: 8 of 8 methods of EAGLContext are ours; OpenGL ES by Mesa, off-screen (OSMesa)
+hakios-gl: an OpenGL ES 3 context for CoreAnimation, by Mesa, off-screen (OSMesa):
+           OpenGL ES 3.1 Mesa 25.0.7; softpipe; shaders Op...
+```
+
+Two notes worth keeping:
+
+- **the softpipe path is what makes this possible on QEMU at all.** It is a rasterizer in plain C: no
+  GPU, no Adreno, no firmware. The GPU-accelerated path (`gpu=1`, `freedreno` through the kernel's
+  GPU service) is a different build of the same library and is still ahead.
+- **this is the boot logo, not the home screen.** The UI drawing pipeline works end to end; how far
+  SpringBoard gets from here is the next thing to measure, and the frames to look at are the ones
+  taken over the following minutes.
+
+## Addendum 12: the system draws -- the boot logo
+
+`docs/demo/system-ui-first.png` is the iOS boot logo on the guest's panel: 1125x2436, black, with
+Apple's white mark in the middle. Nobody drew it from outside: it is backboardd's BootUI overlay,
+drawn by CoreAnimation, through our OpenGL ES stand-in, through Mesa's `softpipe` rasterizer, into
+the framebuffer the host captures.
+
+What each link needed:
+
+| link | what it needed |
+|---|---|
+| the compositor asks CoreAnimation to draw | a display it accepts |
+| CoreAnimation picks a renderer | `inject.c:opengl_es()` loads `/redwood/lib/libhakios.gl.dylib`; without a `gl=` boot argument it decides by asking whether a `HakiosGPU` service exists -- which patch 0001 is what creates on this machine |
+| OpenGL ES 3.1 | Mesa 25.0.7 for arm64-darwin from `tools/mk-mesa.sh`: 14,805,208 bytes, 1296 `gl*` functions, `softpipe` |
+| pixels reach the panel | the framebuffer path proven in addenda 5 and 7 |
+
+In the log's own words:
+
+```
+hakios-gl: 8 of 8 methods of EAGLContext are ours; OpenGL ES by Mesa, off-screen (OSMesa)
+hakios-gl: an OpenGL ES 3 context for CoreAnimation, by Mesa, off-screen (OSMesa):
+           OpenGL ES 3.1 Mesa 25.0.7; softpipe; shaders Op...
+```
+
+**`softpipe` is what makes this possible on QEMU at all**: a rasterizer in plain C, no GPU, no Adreno,
+no firmware. The accelerated path (`gpu=1`, `freedreno` through the kernel's GPU service) is a
+different build of the same library and is the work after this.
+
+What this is not: it is the *boot logo*, not the home screen. The drawing pipeline works end to end;
+how far SpringBoard gets from here is a separate question, measured below.
