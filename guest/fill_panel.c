@@ -173,15 +173,9 @@ int main(int argc, char **argv)
         }
         usleep(200000);
     }
-    /* Stay, rather than halting: the guest's halt takes the machine down with it, and the picture
-     * has to be on the panel while someone is looking. This is the frame the capture should show.
-     */
-    tell("fill_panel: the picture is on the panel, staying for a while\n");
-    for (int i = 0; i < 600; i++) {
-        struct show again = {(uint64_t)(uintptr_t)shown, width, height, width * 4, 0};
-
-        IOConnectCallStructMethod(connection, 0x7f, &again, sizeof(again), NULL, NULL);
-        usleep(200000);
-    }
+    /* Leave the frame and go: the stage that started this program waits for it, so a long stay
+     * delays the whole system. Nothing else writes the panel on a machine without a GPU, so the
+     * picture is still there for whoever looks next. */
+    tell("fill_panel: the picture is on the panel\n");
     return 0;
 }

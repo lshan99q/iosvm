@@ -345,3 +345,59 @@ That reorders the work honestly:
 
 The next piece of work is therefore not rendering: it is finding out why `metal=1` stops the boot
 before launchd, which is a much narrower question -- one boot flag, one code path in the accelerator.
+
+## Addendum 9: which image actually booted the user space
+
+The record needs one correction. The "60 to 90 processes including SpringBoard" runs used **the
+reference system image in this tree** (`userland/system.apfs`), not the image built here from the hand
+assembled sysroot. The hand assembled one stopped at `init`, every time, and the reason is one missing
+file:
+
+```
+=== init: done ===          <- init ran its checks, then rc, then halted at 15 s
+```
+
+`/etc/rc` of the small image ends with `exec /sbin/launchd.darwin`. The tree's build moves Apple's
+launchd to that name and puts stage0 at `/sbin/launchd`. The sysroot assembled here had stage0 in
+place but **no `launchd.darwin`**, so that exec failed, `run_rc` returned, and init did what it says it
+does: `reboot(RB_HALT)`. Fifteen seconds in, no launchd, no jobs, no SpringBoard.
+
+Once the file is there (525,088 bytes, `Mach-O 64-bit arm64`), the chain is complete again:
+
+| | before | after |
+|---|---|---|
+| `/sbin/launchd` | stage0 (52,088 B) | stage0 |
+| `/sbin/launchd.darwin` | **missing** | Apple's launchd (525,088 B) |
+| boot reaches | `init: done` at 15 s | launchd, its jobs |
+
+The lesson is worth keeping: a tree that boots from someone else's image is not a tree whose build
+boots. Both have to be run, and this session had been reporting the first one.
+
+### 9a. With the file in place, the same wall shows up one layer down
+
+Adding `launchd.darwin` did not make the built image boot the user space. Init still halts at about
+sixteen seconds, and the log says why:
+
+```
+load_init_program: attempting to load /sbin/launchd     <- stage0, static, runs
+shared_region: ... [1(launchd)] check_np(...) vm_shared_region_start_address() failed
+=== init: done ===                                      <- the exec of launchd.darwin did not happen
+```
+
+`/etc/rc`'s `exec /sbin/launchd.darwin` needs dyld to establish the shared region, and that fails. The
+dyld cache is present -- 43 files, 2.6 GB, the same set in `sysimage/20F66__iPhone10,3_6` and in the
+sysroot, in both `/System/Library/Caches/com.apple.dyld/` and the cryptex path -- so the failure is not
+"cache missing" but something about how it is laid out in the built image (a compressed APFS entry
+cannot be mapped the way the shared region wants).
+
+So the honest scoreboard for the *built* image is:
+
+| | reference image in this tree | image built here |
+|---|---|---|
+| init, its checks, rc | yes | yes |
+| Apple's launchd (shared region) | yes | **no** |
+| launchd jobs, SpringBoard | yes (60-90) | no |
+| our painter on the panel | yes | yes (stage0 runs it before init) |
+
+Both halves are real and they are not the same image. The next piece of work is the shared region in
+a built image -- a narrow question with a clear test (the `check_np` failure above).
