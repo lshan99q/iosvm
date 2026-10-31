@@ -125,9 +125,10 @@ say "  payload.bin $(stat -c %s "$WORK/payload.bin") bytes"
 
 # --- run -------------------------------------------------------------------------------------
 
-# The ESP is a virtio-blk device with its option ROM disabled: GitHub's runner image does not ship
-# efi-virtio.rom, and nothing here needs to boot from that ROM — the UEFI firmware has its own
-# virtio driver. The romfile option belongs on the device, not on -drive.
+# The ESP is a virtio-blk device on the MMIO transport, not on PCI. A PCI virtio device carries an
+# option ROM (efi-virtio.rom) that GitHub's runner image does not ship, and `romfile=` does not
+# suppress the lookup — the boot dies with `failed to find romfile`. The MMIO device has no option
+# ROM at all, and the UEFI firmware brings its own virtio driver, so nothing is lost.
 LOG=$WORK/logs/qemu.log
 say
 say "booting for ${SECONDS_RUN}s (the window is closed: serial only) …"
@@ -139,7 +140,7 @@ timeout --signal=TERM "$SECONDS_RUN" qemu-system-aarch64 \
 	-drive if=pflash,format=raw,readonly=on,file="$WORK/efi.fd" \
 	-drive if=pflash,format=raw,file="$WORK/vars.fd" \
 	-drive file=fat:rw:"$WORK/esp",format=raw,if=none,id=esp0 \
-	-device virtio-blk-pci,drive=esp0,romfile= \
+	-device virtio-blk-device,drive=esp0 \
 	-device loader,file="$WORK/payload.bin",addr=0xF0000000,force-raw=on \
 	-display none -serial stdio -monitor none -no-reboot \
 	>"$LOG" 2>&1
