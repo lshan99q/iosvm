@@ -35,7 +35,7 @@ give CoreAnimation a renderer:
 ## 2. Mesa
 
 ```sh
-PATH=$PWD/xnu-deps/host/bin:$PATH bash tools/mk-mesa.sh
+PATH=$PWD/xnu-deps/host/bin:$PATH bash tools/mk-mesa.sh   # in the kernel tree, not this repository
 # ends with: Mesa 25.0.7 (softpipe,freedreno): .../libOSMesa.8.dylib, 14805208 bytes, 1296 gl* functions
 ```
 

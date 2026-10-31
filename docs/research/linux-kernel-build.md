@@ -450,7 +450,7 @@ The chain, and what each link needed:
 |---|---|
 | backboardd's compositor asks CoreAnimation to draw | the window server has a display it accepts |
 | CoreAnimation picks a renderer | `userland/src/inject.c:opengl_es()` loads `/redwood/lib/libhakios.gl.dylib`; with no `gl=` boot argument it decides by asking whether a `HakiosGPU` service exists -- and patch 0001 above is what makes that service exist on this machine |
-| OpenGL ES 3.1 | Mesa 25.0.7 built for arm64-darwin by `tools/mk-mesa.sh` (14,805,208 bytes, 1296 `gl*` functions, `softpipe`), behind `eagl.c` |
+| OpenGL ES 3.1 | Mesa 25.0.7 built for arm64-darwin by the kernel tree's `mk-mesa` script (14,805,208 bytes, 1296 `gl*` functions, `softpipe`), behind `eagl.c` |
 | pixels reach the panel | the same framebuffer path proven in addenda 5 and 7 |
 
 The log says it in its own words:
@@ -483,7 +483,7 @@ What each link needed:
 |---|---|
 | the compositor asks CoreAnimation to draw | a display it accepts |
 | CoreAnimation picks a renderer | `inject.c:opengl_es()` loads `/redwood/lib/libhakios.gl.dylib`; without a `gl=` boot argument it decides by asking whether a `HakiosGPU` service exists -- which patch 0001 is what creates on this machine |
-| OpenGL ES 3.1 | Mesa 25.0.7 for arm64-darwin from `tools/mk-mesa.sh`: 14,805,208 bytes, 1296 `gl*` functions, `softpipe` |
+| OpenGL ES 3.1 | Mesa 25.0.7 for arm64-darwin from the kernel tree's `mk-mesa` script: 14,805,208 bytes, 1296 `gl*` functions, `softpipe` |
 | pixels reach the panel | the framebuffer path proven in addenda 5 and 7 |
 
 In the log's own words:
