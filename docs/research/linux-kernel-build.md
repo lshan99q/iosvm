@@ -37,24 +37,57 @@ faked badly:
 With those in place the whole tree **compiles**: 320 objects in `osfmk`'s directory alone, 203 MB of
 build products under `BUILD/obj/DEVELOPMENT_ARM64_BCM2837`.
 
-## Where it stopped, precisely
+## The link: Apple's `-alias_list`, and how it was replaced
 
-The final link of `mach.development.bcm2837.unstripped` fails with **9 undefined symbols**:
+The final link failed with **9 undefined symbols**, and they were not missing code. XNU links with
+`-Wl,-alias_list,<file>`; the file's pairs say *the plain name a caller writes is an alias of the
+implementation that carries a suffix*:
 
 ```
-_IOMallocData  _IOMallocZeroData  _mach_vm_allocate  _mach_vm_map
-_mach_vm_remap  _sysctlbyname  _ubc_create_upl  _vm_fault  _vm_map_create
+_IOMallocData_external       _IOMallocData
+_mach_vm_allocate_external   _mach_vm_allocate
+_vm_fault_external           _vm_fault
 ```
 
-These are not "code that does not exist": `vm_fault` and `vm_map_create` are core VM functions whose
-sources compile and whose objects are in the build, `IOMallocData` is IOKit's, and the `mach_vm_*`
-ones are MIG server entries. Two hypotheses, both testable next:
+`vm_user.o` defines `_mach_vm_allocate_external` and `_mach_vm_allocate_kernel`, and nothing else --
+so without the alias list the plain name really is undefined. `ld64.lld` has no `-alias_list`.
 
-- the MIG output here defines `__Xmach_vm_allocate_external` (local) but not `mach_vm_allocate`, so
-  the host `mig` may be generating a different dialect from the one this XNU release expects;
-- or the final link's object list is not picking up the subdirectories, which would be an
-  `ld64.lld` versus cctools difference rather than a build-file difference.
+The wrapper now implements it: it reads the file it was handed, emits one trampoline per pair
+(`_mach_vm_allocate: b _mach_vm_allocate_external`), assembles it for `arm64-apple-ios16.5`, and
+appends the object to the link. The trampolines are **weak**, because a few of those names do exist
+plainly in the tree and a strong duplicate would fail the link (`_task_id_token_port_name_to_task`
+did exactly that).
 
-Either way the honest state is: **the build is one step from done, and the step is understood.** The
-next attempt should try cctools-port's own `ld` before chasing the symbol list, because that
-removes the whole class of "LLVM's Mach-O linker is not Apple's" differences at once.
+Two more host-tool gaps surfaced behind it:
+
+- **`strip`** was GNU binutils, which cannot read Mach-O. It is now `llvm-strip`.
+- **`libtool -ca … -filelist`** was not handled by the shim; it is now, reading the file list.
+
+And one portability bug of my own: `${var//pat/}` is a bashism and `/bin/sh` here is dash, so the
+shim died with `Bad substitution` until it became `tr -d ' '`.
+
+## What exists now, and what it still refuses
+
+**The kernel compiles and links on Linux:** `mach.development.bcm2837`, 15,819,368 bytes,
+`Mach-O 64-bit arm64 executable`. Building it needed the theos layout, the public 16.5 SDK, Apple's
+open sources, and the five stand-ins above (**ld**, **libtool**, **strip**, **mig**, **tcsh**) --
+none of them Apple's binaries.
+
+**It does not boot yet.** Handed to the project's own harness (`tools/qemu-open.sh`), the loader
+rejects it before the kernel runs:
+
+```
+payload entry 'kernel' size f16268
+kernel va 0..1300000 entry 0
+unexpected kernel layout
+```
+
+That message is the upstream `xnuloader` checking the kernel's segment layout, and `ld64.lld` lays
+segments out differently from cctools' `ld` -- a known difference, not a defect in the build. The
+upstream prebuilt kernel still boots (PASS, five markers), so the harness itself is fine.
+
+So the remaining step is exactly one thing: **get cctools' `ld64` onto this host**, at which point the
+wrapper stops emulating Apple's linker and uses it. That build needs libdispatch, which Ubuntu does
+not package; it was built from source (`swift-corelibs-libdispatch`, with clang -- the default GCC
+rejects its warning flags). The `ld64` build itself was interrupting at `libhelper.la` when driven
+from a subdirectory; it has to be driven from `cctools/ld64`, and that is where it stands.
