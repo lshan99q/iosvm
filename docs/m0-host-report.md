@@ -12,7 +12,7 @@ Measured, not estimated. This is the "can this machine carry the project" answer
 | CPU | Intel Xeon E5-2698B v3 @ 2.00 GHz, 32 threads (Haswell, 2014) |
 | RAM | 62 GiB |
 | Disk free | 95 GiB (an APFS image set is ~8 GB) |
-| GPU | 2 × NVIDIA Tesla V100-SXM2-16GB, driver 580.178.04 |
+| GPU | NVIDIA Tesla V100-SXM2-16GB, driver 580.178.04 — **one visible to the driver**; `lspci` shows two GV100GL devices, `nvidia-smi -L` enumerates `GPU 0` only |
 | Vulkan | `libvulkan1` 1.3.275, `mesa-vulkan-drivers` 25.2.8 (lavapipe, radv, intel, nouveau, virtio ICDs present) |
 | KVM | `/dev/kvm` present and group-accessible, **not used** — the guest is ARM64 on x86, so it is TCG |
 
@@ -33,7 +33,8 @@ python3 xnuloader/mkpayload.py -o qemu/payload.bin \
 QEMU_EFI=... QEMU_VARS=... qemu/run.sh 100
 ```
 
-Result: **the kernel boots.** The relevant lines, in order:
+Result: **the kernel reaches BSD initialisation, then panics on `launchd` — which is the expected
+result for a payload with no user space.** The relevant lines, in order:
 
 ```
 BdsDxe: starting Boot0001 "UEFI Misc Device"
@@ -80,20 +81,27 @@ in this repository.
 
 ## What this means for the schedule
 
-- The QEMU half of M0 is **de-risked on this host**: a self-compiled XNU reaches BSD
-  initialisation in ~6.4 s of emulated boot. That is fast enough to iterate on (a full user-space
+- The QEMU half of M0 is **de-risked on this host**: XNU reaches BSD initialisation in ~6.4 s of
+  emulated boot. The kernel used was HakiOS's `prebuilt/hakios-kernel` — built by that project from
+  XNU source (`xnu-8796.121.2`), not compiled here: this host's build failed for lack of the theos
+  toolchain (`xnu-deps/setup.sh` needs its cctools linker). So "XNU boots under QEMU here" is
+  measured; "we compiled that XNU here" is not, and is M0's remaining kernel work.
+  The speed is fast enough to iterate on (a full user-space
   boot is documented upstream as ~5 minutes on a fast desktop; expect more on a 2.0 GHz Haswell,
   and treat 15 minutes as the planning number until measured).
 - The display gap is visible in the boot log before any of our code exists:
   `MiniIOMobileFramebuffer: no usable boot framebuffer`. That is the exact seam
   `virtio-iosvm-gpu` sits on (ADR-004), and it is the first place M1 will look.
-- `interrupt-controller` not found and `cpu-debug-interface` not found are cosmetic warnings from
-  the generic ARM platform expert on `-M virt`; the kernel proceeds past both.
+- `pe_arm_map_interrupt_controller: failed to find the interrupt-controller` and
+  `pe_arm_init_debug: failed to find cpu-debug-interface` are cosmetic warnings from the generic ARM
+  platform expert on `-M virt`; the kernel proceeds past both. They appear a little later in the
+  log than the excerpt above, under the `[ 6.4…]` timestamps.
 - Nothing here needs KVM, and nothing here uses it. Do not budget for hardware acceleration on
   this host: x86 hosting ARM64 is TCG by definition, and this CPU is from 2014.
 
 ## Reproduce
 
 The commands above reference the upstream tree, not this repository, because M0 has no boot
-harness of its own yet. When `tools/qemu-open.sh` lands, this report is regenerated from it and
-these numbers are replaced with `--json` output.
+harness of its own yet. `tools/qemu-open.sh` is the intended owner of this report: when it lands it
+regenerates this file. `tools/doctor.sh --json` reports the host, not boot timings, and does not
+own this report.

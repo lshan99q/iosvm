@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-10-31
-- Supersedes: ADR-003 of `docs/zh/design-baseline.md` ("use the IPSW kernelcache as the main path")
+- Supersedes: ADR-003 of `docs/zh/engineering.md` ("use the IPSW kernelcache as the main path")
+- Amended by: ADR-008 (HakiOS's port is the starting driver set)
 - Superseded by: —
 
 ## Background

@@ -1,8 +1,8 @@
 # Demo evidence
 
-One directory per milestone. Every file here is a capture, not a mock-up. Each capture carries a
-`NOTES.md` beside it naming the commit and the IPSW version it came from — if that file is absent,
-the capture is not evidence yet.
+One directory per milestone. Every file here is a capture, not a mock-up. Each capture carries a NOTES file beside it
+(`docs/demo/NOTES.template.md`) naming the commit and the IPSW version it came from — if that file
+is absent, the capture is not evidence yet.
 
 `*.png` and `*.gif` are the only binaries allowed in the tree (see `.gitignore`). A screenshot is
 evidence; a video goes to a release attachment, not to git.

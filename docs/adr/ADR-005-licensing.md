@@ -51,8 +51,24 @@ fourth (Apple's user space) that we must never redistribute.
   upstream tag. Losing track of which release a patch applies to would be a license compliance
   bug, not a build bug.
 
+## Evidence
+
+- **The license texts in this repository are the canonical ones, not paraphrases.** Checked on
+  2026-10-31: `LICENSE.APSL` is byte-identical to the APSL-2.0 text shipped by HakiOS
+  (`19829` bytes, header "APPLE PUBLIC SOURCE LICENSE Version 2.0 - August 6, 2003"), and
+  `LICENSE.GPL2` is Ubuntu's `/usr/share/common-licenses/GPL-2`. Neither was retyped.
+- **The referenced projects' licenses were read from GitHub's API, not assumed:**
+  `jprx/darwin-vm` MIT, `oosexgang/hakios-metal` MIT, `steelbrain/metal2vulkan` NOASSERTION
+  (a LICENSE file exists but GitHub cannot classify it — treat as unverified until read),
+  `UniXNU/UniXNU` BSD-2-Clause-Patent per its NOTICE, `jprx/qemu-sptm` GPL-2.0 per its README.
+  The `NOASSERTION` cases are why `NOTICE` says "referenced for design, not copied": nothing from
+  them is in this tree yet.
+- **What is unverified:** whether APSL-2.0 §3's source-publication duty is satisfied by shipping
+  patches alone. That is a legal reading of the licence, not a build fact, and it is the one item
+  here a lawyer should confirm before v0.1.0 ships binaries.
+
 ## Follow-up
 
 - `xnu/` contains only `*.patch`, plus a `README.md` naming the exact upstream tag each applies to.
-- `tools/check-licenses.py` (M1): verify that every file under `qemu/` keeps its original header,
-  and that no file under `xnu/` is anything other than a patch.
+- `tools/check-licenses.py` (M1, listed in `docs/phases.md`): verify that every file under `qemu/`
+  keeps its original header, and that no file under `xnu/` is anything other than a patch.

@@ -11,7 +11,7 @@ $ make run
 ...
 $ ./tools/screendump.sh
 $ file logs/screen.png
-logs/screen.png: PNG image data, 1179 x 2556
+logs/screen.png: PNG image data, 1179 x 2556, 8-bit/color RGB, non-interlaced
 ```
 
 That is the v1.0 definition of done. It is not there yet. What is there is written down in
@@ -60,7 +60,10 @@ What works today, exactly: `make test-open`, `make provenance`, `make style`, `m
 `tools/unpack-ipsw.sh` (verified end to end against a synthetic IPSW), `tools/check-frame.py`
 (verified both ways), and the CI gate on every push.
 
-## What lives where
+## What lives where — planned layout
+
+Only `tools/` and `docs/` exist today; the rest is where the work will go, and `docs/phases.md`
+says which milestone creates each one.
 
 | Path | What |
 |---|---|
@@ -80,7 +83,9 @@ bypassed — it is **never entered**, because the system boots flat from a laid-
 sees recovery mode. The hard wall is not activation but the GPU, and M2 (a correct blit through
 the whole channel) is a publishable result even if M3 never lands.
 
-Full reasoning: `docs/architecture.md`, `docs/adr/`, `docs/zh/design-baseline.md`.
+Full reasoning: `docs/architecture.md`, `docs/adr/`, and the Chinese design baseline under
+`docs/zh/` — `docs/zh/engineering.md` for the architecture and ADRs, `docs/zh/design-baseline.md`
+for the feasibility study, `docs/zh/README.md` for what has since been overturned.
 
 ## License
 

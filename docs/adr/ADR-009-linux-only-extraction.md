@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-31
-- Supersedes: ADR-007 of `docs/zh/design-baseline.md` ("build in two environments, one of them a Mac")
+- Supersedes: ADR-007 ("build in two environments, one of them a Mac", `docs/zh/engineering.md`)
 - Superseded by: —
 
 ## Background

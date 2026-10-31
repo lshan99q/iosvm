@@ -55,7 +55,7 @@ moment it is pushed — including force-pushed history, which forks and the GitH
 
 ## Evidence
 
-- The design baseline's own §5.4 SOP already said "revoke first" — this ADR is that SOP made
-  enforced rather than advisory.
+- The design baseline's own leak SOP (`docs/zh/git-rules.md` §5.4) already said "revoke first" —
+  this ADR is that SOP made enforced rather than advisory.
 - `tools/provenance-check.py` implements the scan (pattern list is narrow on purpose: a false
   positive costs a maintainer one review, a false negative costs the account).

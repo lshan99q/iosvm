@@ -2,12 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-10-31
-- Supersedes: parts of ADR-001, ADR-003, ADR-007, and the D1 decision gate as written in `docs/zh/design-baseline.md`
+- Supersedes: parts of ADR-001, ADR-003, ADR-007, and the D1 decision gate as written in
+  `docs/zh/engineering.md` (ADR-001..007 at §3, the C1/C2/C3 gate at §4.5)
 - Superseded by: —
 
 ## Background
 
-The design baseline (`docs/zh/design-baseline.md`) was written from the assumption that the
+The design baseline (`docs/zh/engineering.md` for the architecture and the ADRs,
+`docs/zh/design-baseline.md` for the feasibility study) was written from the assumption that the
 QEMU half of the problem was unsolved: `darwin-vm` reaches a root shell and nothing more, so
 display has to be obtained either by reverse-engineering Apple's closed display kext (C1), by
 hooking the user-space present path (C2), or by giving up on the Apple kernelcache and writing
@@ -40,15 +42,15 @@ its `make doctor` on this host on 2026-10-31.
    `unzbm`. There is no `hdiutil`, `ipsw`, `otool` or `codesign` in the path. **The Mac
    dependency in ADR-007 does not apply to the boot and unpack half.**
 
-4. **AIR is parsed and translated without touching any signature check.** `docs/air.md`: of the
+4. **AIR is parsed and translated without touching any signature check.** HakiOS's air.md (under its docs/): of the
    456 modules in the device's system `.metallib` files, 456 are read byte-for-byte as `llvm-dis`
    reads them, 321 translate to NIR and compile with `ir3`, 255 are numerically identical to
-   LLVM's own execution. `tools/air/check.sh` does this from the files; the document lists no
+   LLVM's own execution. HakiOS's own `air/check.sh` (under its `tools/`) does this from the files; the document lists no
    signing or encryption step as an obstacle. That answers D2's *first* half (is AIR
    encryptable/verifiable) with "no, not in the path we would use" — see the caveat in §Consequences.
 
-5. **The Metal work HakiOS has not done is exactly the work this project exists to do.** `air.md`
-   states plainly: "The other two thirds are not here and are not started: the
+5. **The Metal work HakiOS has not done is exactly the work this project exists to do.** HakiOS's
+   AIR document states plainly: "The other two thirds are not here and are not started: the
    `_MTLDevice`/`IOGPUMetalDevice` object graph (AGXMetalA11 alone is 53 classes and 1158 methods,
    IOGPU.framework 711 more), and the kernel ABI that submits work." The target of that work is
    Adreno via `ir3`. Our target is Vulkan on the host, which is a *different* third — and a

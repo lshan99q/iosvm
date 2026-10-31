@@ -55,9 +55,23 @@ milestone.
 - No ecosystem. If someone later wants to run a real Vulkan driver in the guest, this device does
   not help them. That is out of scope and recorded as such.
 
+## Evidence
+
+No measurement yet — this is a design decision taken before the device exists, and it is labelled
+as such rather than dressed up.
+
+- What is known: the two ends are both ours, so no guest-driver ecosystem constrains the protocol.
+  That is a fact about the architecture (`docs/architecture.md` §layers), not an experiment.
+- What is *not* known: whether `dma-buf` works inside QEMU without `-object memory-backend-memfd`,
+  and whether `eventfd` can approximate `MTLSharedEvent` closely enough. Both are M2 questions and
+  both are listed in `docs/phases.md` §M2 unknowns.
+- HakiOS ships the same shape (a Metal command model in the guest, a transport to a backend, a
+  strict in-process interpreter for tests — `docs/air.md`, `tests/`), which is why this shape is
+  being tried rather than invented.
+
 ## Follow-up
 
 - Version comparison happens **before** any payload is read; an old guest must reject a new host
-  cleanly (see `docs/zh/design-baseline.md` §5.4).
+  cleanly (see `docs/zh/work-rules.md` §5.4, "协议定义").
 - Every struct is packed with explicit padding; `sizeof` assertions live in the unit tests.
 - The `SCREENSHOT` op is the acceptance path for M2 and M3; it must never be asynchronous.

@@ -1,8 +1,9 @@
 # ADR-001: fork QEMU, do not write a VMM
 
-- Status: Accepted (amended by ADR-008)
+- Status: Accepted
 - Date: 2026-10-31
 - Supersedes: —
+- Amended by: ADR-008 (the base is no longer `qemu-sptm`)
 - Superseded by: —
 
 ## Background
@@ -15,9 +16,11 @@ need.
 
 ## Decision
 
-Fork QEMU. Add our devices under `hw/` and keep changes to QEMU's core at zero. The fork is a
-submodule pinned at a commit, never edited in place (see `docs/adr/ADR-004-virtio-device.md` and
-the submodule rules in `docs/zh/design-baseline.md` §8).
+Fork QEMU. Add our devices under `hw/` and keep changes to QEMU's core at zero. When the fork
+exists it is a submodule pinned at a commit, never edited in place (see
+`docs/adr/ADR-004-virtio-device.md` and the submodule rules in `docs/zh/git-rules.md` §8).
+**The fork is not vendored yet**: there is no `.gitmodules`, and `make submodule` fails rather than
+pretending, until M2 adds it.
 
 Amendment (ADR-008): the base changes from `jprx/qemu-sptm` to an upstream-based fork that carries
 HakiOS's `virt` machine configuration and our `hw/` devices. `qemu-sptm` models SPTM/TXM so that an
