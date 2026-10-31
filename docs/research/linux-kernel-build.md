@@ -1168,3 +1168,25 @@ Two things about that picture are worth more than the screenshot:
 
 The gesture set is now: tap an icon, tap a row inside an application, swipe up from the bottom edge,
 swipe down from the top right. All four from the host, all through `qemu/tap.py`.
+
+## Addendum 29: one command, the whole sequence
+
+```sh
+qemu/demo.sh /tmp/demo
+```
+
+boots the machine (retrying, because not every boot reaches the screen), waits for a drawn screen, and
+then operates it from the host, keeping a picture of every step:
+
+| file | bytes | what it is |
+|---|---|---|
+| `00-home.png` | 317,332 | the home screen |
+| `01-settings.png` | 135,744 | Settings, opened by tapping its icon |
+| `02-inside.png` | 63,879 | a page inside Settings, opened by tapping a row |
+| `03-home.png` | 322,811 | the home screen again, after a swipe up from the bottom edge |
+| `04-control-center.png` | 1,027,411 | the Control Center, after a swipe down from the top right |
+
+Those five are in `docs/demo/sequence/`. The run took about eight minutes, most of it the boot.
+
+That is the whole of what this port can do today, reproducible with one command: the system's own
+interface, drawn by Darwin through CoreAnimation and Mesa, operated from outside the machine.
