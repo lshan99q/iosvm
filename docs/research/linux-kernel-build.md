@@ -91,3 +91,33 @@ wrapper stops emulating Apple's linker and uses it. That build needs libdispatch
 not package; it was built from source (`swift-corelibs-libdispatch`, with clang -- the default GCC
 rejects its warning flags). The `ld64` build itself was interrupting at `libhelper.la` when driven
 from a subdirectory; it has to be driven from `cctools/ld64`, and that is where it stands.
+
+## Addendum: how far the boot gets, and where it stops
+
+With the toolchain in place the whole upstream userland side also builds on Linux: `root.apfs` (the
+init image), `xnuloader/loader.efi` (built with the device identity from the user's IPSW), and
+`system.apfs`. Two build-only gaps had to be closed on the way, both about the linker rather than the
+code: the dynamically linked programs need an SDK stub (`libSystem.tbd`, which the public SDK ships
+only as `libSystem.B.tbd`, so a version-less symlink is made), and cctools' `ld64` cannot read `.tbd`
+text stubs at all without TAPI -- so those two links go through LLVM's `ld64.lld`, which can.
+
+The boot reaches further than it ever has here:
+
+```
+resident image at pa fc000000 size 93a00000: it is the root (md0), the payload ramdisk is md1
+BSD root: md0, major 1, minor 0
+apfs: device 1,0: requests to it cost next to nothing (a disk in memory)
+load_init_program: attempting to load /sbin/launchd
+shared_region: [1(launchd)] check_np(...) vm_shared_region_start_address() failed
+** Stackshot Succeeded **
+```
+
+So the APFS volume mounts as the BSD root, the kernel finds and starts loading `/sbin/launchd`, and
+then dies setting up the shared region -- the step where dyld's shared cache has to be mapped.
+
+**It is not the kernel and not the image.** The same panic occurs with mainline upstream's own
+prebuilt kernel and upstream's own images, in upstream's default configuration. That makes it a boot
+*configuration* question, and the concrete hypothesis is written down for the next round: `init`'s
+`mount_cryptex()` expects the OS cryptex as a separate APFS container (container `C` of `md0`, or its
+own device), and both images built here are single-volume containers -- so the cache is present as
+files but never mounted where dyld looks for it, and the shared-region setup has nothing to map.
