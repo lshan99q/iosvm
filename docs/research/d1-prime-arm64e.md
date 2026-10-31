@@ -120,6 +120,11 @@ then "AEA-decrypting the root/cryptex (`/usr/bin/aea` + the FCS key from Apple)"
    can produce an arm64e xnu-12377 kernel on Linux today**, and the sibling publishes no binaries.
    Unlike the 16.5 path — which builds on Linux with the theos toolchain — the iOS 26 kernel build
    currently assumes a Mac.
+   Requirement, from Apple's own table (<https://developer.apple.com/support/xcode>): the iOS 26 SDK
+   ships in **Xcode 26.0.1–26.3**, which runs on **macOS Sequoia 15.6 or later**; Xcode 26.4+ wants
+   macOS Tahoe 26.2+. Cross-compiling arm64e needs no Apple Silicon — any Mac on Sequoia 15.6+ with
+   Xcode 26 runs the build. `github.com/theos/sdks` publishes SDKs only up to `iPhoneOS16.5`, which is
+   exactly why the 16.5 kernel builds on Linux and the 26 one does not.
 2. **The userland data is behind an encrypted container.** iOS 26 ships the root and cryptex
    filesystems as `.aea` (Apple Encrypted Archive), and their recipe decrypts them with
    `/usr/bin/aea` and "the FCS key from Apple". **This project's rule is not to defeat a technical
