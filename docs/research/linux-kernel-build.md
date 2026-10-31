@@ -1190,3 +1190,22 @@ Those five are in `docs/demo/sequence/`. The run took about eight minutes, most 
 
 That is the whole of what this port can do today, reproducible with one command: the system's own
 interface, drawn by Darwin through CoreAnimation and Mesa, operated from outside the machine.
+
+### 29a. What the keyboard can and cannot do
+
+`drivers/input/hakios.virtio_input.c` maps exactly these keys, and no others:
+
+| key | becomes |
+|---|---|
+| `KEY_POWER` (116), `KEY_L` (38) | the lock button |
+| `KEY_VOLUMEUP` (115), `KEY_UP` (103) | volume up |
+| `KEY_VOLUMEDOWN` (114), `KEY_DOWN` (108) | volume down |
+| `KEY_HOME` (102), `KEY_H` (35) | the home button |
+
+Everything else is ignored -- there is no HID keyboard service behind this device the way there is one
+for the touch screen, so **typing text into iOS is not supported** by this port today. That is a
+limitation of the driver, not of the QMP path: the events arrive, and the driver has nothing to do
+with the letters.
+
+So the input story is: touches, gestures and the hardware buttons work from the host; text entry does
+not, and would need the same kind of virtual HID service that addendum 25 shows working for touches.
