@@ -43,7 +43,6 @@ PLANNED = {
     "build/guest/metal-plugin/libmetal-plugin.dylib": "M2: the guest plugin",
     "logs/screen.png": "screendump output, git-ignored",
     "logs/mon.sock": "QEMU monitor socket, git-ignored",
-    "docs/adr/D1-prime-userland-version.md": "M1: the decision record, written when D1' closes",
     "docs/demo/first-frame.png": "M3: the acceptance capture",
     "docs/demo/m1-frame.png": "M1: the acceptance capture",
     "docs/demo/demo.mp4": "M4: released as an attachment, not committed",

@@ -63,7 +63,8 @@ its `make doctor` on this host on 2026-10-31.
 - Guest kernel: a build of XNU from source with our drivers, following HakiOS's port and its
   config system — **not** the IPSW's `kernelcache`, and **not** a fork of `qemu-sptm`.
 - Guest user space: the contributor's own IPSW, laid out by a Linux-only unpack tool in this
-  repository, starting from the Darwin 16.5 path HakiOS documents and moving to iOS 26 arm64e.
+  repository, starting from the Darwin 16.5 path HakiOS documents. (Moving to iOS 26 was the plan
+here; `docs/adr/D1-prime-userland-version.md` later closed that door on licensing grounds.)
 - Display: `virtio-iosvm-gpu` as designed in ADR-004, on top of the framebuffer path HakiOS
   already proves. C1 (reverse-engineering `AppleDisplayPipe`) is **dropped from v1.0 scope**;
   it is only interesting for booting an unmodified Apple `kernelcache`, which we are no longer

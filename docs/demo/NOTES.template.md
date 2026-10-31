@@ -5,7 +5,7 @@ in. A capture without one is not evidence — it is a picture.
 
 - **Milestone**: M0 / M1 / M2 / M3 / M4
 - **Commit**: <the exact commit the capture was taken at>
-- **Guest firmware**: <IPSW version and device identifier, e.g. `iOS 26.0, iPhone17,3`>; and the
+- **Guest firmware**: <IPSW version and device identifier, e.g. `Darwin 16.5, 20F66, iPhone10,3`>; and the
   `firmware/` SHA256 prefix from `.provenance`, e.g. `a1b2c3d4e5f6`
 - **Host**: <distro, CPU, RAM, Vulkan driver version (`vulkaninfo --summary` first line)>
 - **Command**: <the exact command that produced it>

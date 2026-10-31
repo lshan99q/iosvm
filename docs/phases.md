@@ -10,7 +10,7 @@ design assumed.
 | Milestone | Name | One-line criterion | Estimate | Public action |
 |---|---|---|---|---|
 | **M0** | foundation | `make test-open` green with no Apple file, and a boot harness that reproduces the upstream kernel start | 2–3 weeks | repo + README |
-| **M1** | user space boots | `ps aux` inside the guest shows `launchd`, then `WindowServer` | 2–3 months | blog ① |
+| **M1** | user space boots | `ps aux` inside the guest shows `launchd`, then `WindowServer` — **Darwin 16.5 user space** | 2–3 months | blog ① |
 | **M2** | GPU channel | `iosvm-probe` fully green; a 512 KiB blit is byte-identical on the host | 2–4 months | **v0.1.0-alpha.1** + blog ② |
 | **M3** | first frame | a captured PNG with ≥ 64 unique colours | 3–6 months | **v0.1.0** + blog ③ |
 | **M4** | usable home screen | can unlock, scroll, open Settings | 3–6 months | **v1.0.0** |
@@ -18,7 +18,7 @@ design assumed.
 ```
 M0 ──→ M1 ──┬──→ M2 ──→ M3 ──→ M4
              │      ↑
-             └── D1' (does iOS 26 arm64e user space boot?)
+             └── D1' closed: target is the Darwin 16.5 user space (docs/adr/D1-prime-userland-version.md)
 ```
 
 ## M0 — foundation
@@ -69,8 +69,9 @@ work is the harness, the image tooling, and a kernel build of our own.
 
 ## M1 — user space boots
 
-Goal: get a real user space to `WindowServer`, and settle the remaining research question: does
-iOS 26 arm64e boot where Darwin 16.5 does?
+Goal: get the **Darwin 16.5 user space** to `WindowServer`. The version question is closed:
+`docs/adr/D1-prime-userland-version.md` targets 16.5 and defers iOS 26 on licensing grounds, not
+engineering ones.
 
 Deliverables
 - [ ] `tools/check-licenses.py`: every file under `qemu/` keeps its original header, and nothing
@@ -78,7 +79,9 @@ Deliverables
 - [ ] Device tree self-consistent enough that `launchd` does not panic on platform expert
 - [ ] APFS images mount with our block driver
 - [ ] `virtio-net` + SSH into the guest (observability before optimisation)
-- [ ] `docs/adr/D1-prime-userland-version.md`: 16.5 vs 26, with measurements
+- [x] `docs/adr/D1-prime-userland-version.md`: 16.5 chosen, 26 deferred with the reason recorded
+- [ ] `tools/make-images.sh` builds `userland/system.apfs` from a 16.5 IPSW (`iPhone10,3`/`iPhone10,6`,
+      `20F66`) — the APFS writer, which is the real work here
 - [ ] Failing screenshot of `ps aux` in the guest
 
 Acceptance
@@ -92,25 +95,25 @@ Exit condition: `WindowServer` exists as a process (it may crash immediately).
 
 Unknowns
 1. What minimum set of device-tree nodes satisfies the platform expert? No published answer.
-2. What breaks first between Darwin 16.5 and iOS 26 arm64e — PAC, SPTM-era boot, or userland
-   size?
+2. How much of `userland/build.sh`'s APFS assembly has to be reimplemented to stay Linux-only?
+   Upstream's script is the specification.
 3. Can an `IOSurface` be shared across the VM boundary without a copy?
 
 Risks
-- **R1'**: iOS 26 arm64e does not boot with our kernel at all. Mitigation: keep the 16.5 path
-  green so there is always a working demo, and time-box the 26 investigation to 5 days per round.
+- **R1'** (was: iOS 26 does not boot): **retired.** The version question is settled by D1'; the
+  remaining M1 risk is ordinary porting risk, not a research gate.
 - **R5**: a contributor without an IPSW can do M0 but not M1. Mitigation: `tools/` exports logs
   and a reproducible recipe so a contributor with an IPSW can help someone without one.
 
-### Decision gate D1' (replaces the original D1)
+### Decision gates (both closed)
 
-| Question | Test | Yes | No |
-|---|---|---|---|
-| Does HakiOS's QEMU path reproduce here, with no Apple file? | `make qemu-open` equivalent | M0 continues | fix the host; this is not research |
-| Does the same path boot **iOS 26 arm64e**? | your own iOS 26 IPSW through the same tooling | M1 is a port | 16.5 stays the demo; 26 gets a 5-day spike with a written report either way |
+| Gate | Outcome |
+|---|---|
+| **D1** display path (C1/C2/C3) | closed by **ADR-008**: our own driver, which HakiOS already proved |
+| **D1'** which userland version | closed by **`docs/adr/D1-prime-userland-version.md`**: Darwin 16.5; iOS 26 deferred because its OS and System-cryptex images are delivered through Apple's key service |
 
-The original D1 (reverse-engineer `AppleDisplayPipe` vs hook the present path vs our own driver) is
-**closed by ADR-008**: our own driver is the route, and HakiOS already proved it.
+The iOS 26 path is not lost — `docs/research/d1-prime-arm64e.md` and `docs/research/e2-kernel-port-surface.md`
+record what it would take, and the ADR lists the four conditions under which it reopens.
 
 ## M2 — GPU channel
 
@@ -178,7 +181,10 @@ Risks
 
 ## M3 — first frame
 
-Goal: CoreAnimation draws *any* frame through Metal onto the screen.
+Goal: CoreAnimation draws *any* frame through Metal onto the screen — for the **Darwin 16.5** UI,
+which is the flat design of that era. There is no Liquid Glass on this path: no real-time refraction
+and blur pass, and a much smaller compute-shader surface. That is the single biggest reason D1'
+chose 16.5 (`docs/adr/D1-prime-userland-version.md`).
 
 Deliverables
 - [ ] `.metallib` → AIR → SPIR-V (or construct Vulkan pipelines directly)
@@ -202,15 +208,16 @@ Unknowns
 1. Is AIR signed or otherwise checked in our path? **D2: if a check is found, stop and get a legal
    evaluation. Do not route around it.** `docs/air.md` in HakiOS reports no signing step in its
    (Adreno) path — evidence, not proof, for ours.
-2. Liquid Glass relies heavily on compute; if CoreAnimation's blur forces compute, M4's shader work
-   moves into M3.
+2. Which CoreAnimation blurs this era does reach the GPU, and whether they arrive as compute
+   dispatches. Bounded, unlike the Liquid Glass question it replaces: the 16.5 UI uses blur in a few
+   places, not as the foundation of the whole design.
 3. Colour management: CA expects P3; an sRGB blit will look wrong.
 
 ## M4 — usable home screen
 
 Deliverables
 - [ ] `virtio-input`: absolute-coordinate touch, power and volume keys
-- [ ] Compute shader support
+- [ ] Compute shader support, if M3 finds any dispatch in the path (the 16.5 UI needs far less)
 - [ ] Home screen icons, Dock, status bar
 - [ ] Gestures
 - [ ] Recorded, measured responsiveness (numbers, not adjectives)

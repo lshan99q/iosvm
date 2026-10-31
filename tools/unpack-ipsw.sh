@@ -4,8 +4,8 @@
 # unpack-ipsw.sh — take the parts of an IPSW that IOSVM needs, out of a file YOU supply.
 #
 #   tools/unpack-ipsw.sh --help
-#   tools/unpack-ipsw.sh ~/iPhone17,3_26.0.ipsw              # dry run: report, change nothing
-#   tools/unpack-ipsw.sh ~/iPhone17,3_26.0.ipsw --apply      # write firmware/ and userland-raw/
+#   tools/unpack-ipsw.sh ~/iPhone10,3_16.5_20F66_Restore.ipsw             # dry run: change nothing
+#   tools/unpack-ipsw.sh ~/iPhone10,3_16.5_20F66_Restore.ipsw --apply    # write firmware/ + userland-raw/
 #
 # This repository ships nothing of Apple's and downloads nothing of Apple's. The IPSW is yours;
 # this script has no URL in it and adding one is a review veto (PROVENANCE.md, ADR-009).

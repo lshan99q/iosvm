@@ -1,10 +1,17 @@
 # IOSVM
 
-**Boot iOS on Linux in QEMU, and render SpringBoard's first frame — all of it open, all of it reproducible.**
+**Boot iOS on Linux in QEMU, and render SpringBoard's first frame — all of it open, all of it
+reproducible.**
 
 Status: **M0 — foundation.** The VM half is proven upstream (see `docs/adr/ADR-008-hakios-baseline.md`);
-this repository is the project that carries it from Darwin 16.5 to iOS 26 arm64e and from a
-framebuffer to a Metal command stream on the host GPU.
+this repository is the project that carries it from a framebuffer to a Metal command stream on the
+host GPU.
+
+**Target: the Darwin 16.5 user space.** iOS 26 arm64e is deferred, and not for engineering reasons —
+that release delivers its OS and System-cryptex images through Apple's key service, so obtaining its
+user space would mean asking that service for a key. This project does not do that.
+`docs/adr/D1-prime-userland-version.md` records the evidence and the four conditions under which the
+decision reopens.
 
 ```
 $ make run
@@ -43,8 +50,8 @@ make test-open          # compliance + SPDX + protocol units + fake-gpu, no Appl
 make doctor             # what is missing here, and the apt line for it
 
 # 4. Take the parts out of YOUR IPSW                       — works today (dry run first)
-./tools/unpack-ipsw.sh ~/iPhone17,3_26.x.ipsw       # dry run: prints, writes nothing
-./tools/unpack-ipsw.sh ~/iPhone17,3_26.x.ipsw --apply
+./tools/unpack-ipsw.sh ~/iPhone10,3_16.5_20F66_Restore.ipsw       # dry run: prints, writes nothing
+./tools/unpack-ipsw.sh ~/iPhone10,3_16.5_20F66_Restore.ipsw --apply
 ./tools/make-images.sh                              # dry run; --apply needs the M1 APFS writer
 
 # 5. Boot a guest                                          — NOT YET (M0 tail / M1)
