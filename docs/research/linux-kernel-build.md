@@ -1150,3 +1150,21 @@ home screen --tap(683,1689)--> Settings --tap(562,1586)--> Screen Time
 
 Taps open applications and pages; a swipe from the bottom edge dismisses them. Every one of those is
 `qemu/tap.py`, and every pixel after them is Darwin's own drawing.
+
+### 28c. Control Center, and the blur effect drawn by Mesa
+
+`qemu/tap.py --swipe 1050 20 1050 900 18` -- a pull down from the top right corner -- opens the
+**Control Center** (`docs/demo/control-center.png`): the connectivity tile with airplane, Wi-Fi,
+Bluetooth and cellular; the rotation lock and screen mirroring; Focus; the brightness and volume
+sliders; flashlight, timer, calculator and camera; and the home indicator.
+
+Two things about that picture are worth more than the screenshot:
+
+- **the backdrop is blurred.** Control Center dims and blurs what is behind it, and that blur is
+  drawn by CoreAnimation's own shader through our OpenGL ES stand-in and Mesa's `softpipe`. So the
+  path is not only filling rectangles: it renders the effect work too;
+- **it is 1,034,320 bytes**, three times the home screen's, which is what a blurred composite costs
+  the PNG encoder -- a small confirmation that this is a rendered effect and not a flat colour.
+
+The gesture set is now: tap an icon, tap a row inside an application, swipe up from the bottom edge,
+swipe down from the top right. All four from the host, all through `qemu/tap.py`.
