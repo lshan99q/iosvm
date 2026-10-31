@@ -34,6 +34,21 @@ The upstream extraction path treats the 16.5 images as plain APFS containers: `s
 extracts `096-04088-077.dmg` (root), `096-04666-078.dmg` (OS cryptex) and `096-03536-083.dmg` (App
 cryptex) with 7-Zip and its own LZBITMAP helper. There is no key management anywhere in that path.
 
+Verified here on the real archive, not just read: downloaded
+`iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw` — **6,165,698,198 bytes, exactly the size upstream's
+script refuses to run against anything else** — and read its manifest:
+
+| Component | Path | Form |
+|---|---|---|
+| `OS` | `096-04088-077.dmg` | plain, 4.7 GB, APFS volume `SydneyF20F66.D22D221OS.apfs` |
+| `Cryptex1,SystemOS` | `096-04666-078.dmg` | plain, 2.7 GB |
+| `Cryptex1,AppOS` | `096-03536-083.dmg` | plain, 10 MB |
+| `RestoreKernelCache` | `kernelcache.release.iphone10b` | 18 MB |
+
+`tools/unpack-ipsw.sh --apply` extracted the whole archive in 51 s: 48 MB of firmware and 7.2 GB of
+disk images, no key, no macOS, no failure. 7-Zip 23.01 opens the root image and reports the APFS
+volume by name. That is the pipeline this project is going to stand on, demonstrated end to end.
+
 **3. The iOS 26 user space data is behind Apple's key service.** *This is the deciding fact.*
 
 Downloaded `iPhone18,2_26.6.2_23G90_Restore.ipsw` (11,439,109,684 bytes, sha256
