@@ -888,8 +888,17 @@ system:
 
 | image | boots | reached the screen |
 |---|---|---|
-| with the stage0 painter (the one that produced every capture in this document) | many, informally | about one in three |
-| **without it** | 5, `qemu/wait-for-ui.sh` with `NO_FRAMES_BY=84` | see the tally when it finishes |
+| **without** the stage0 painter | 5 | **2 of 5** |
+| with it (the image that made every capture in this document) | 5, the same command | running when this was written |
+
+The five boots without the hook: `boot 1: no screen`, `boot 2: SCREEN (318082 bytes)`, `boot 3: no
+screen`, `boot 4: SCREEN (317387 bytes)`, `boot 5: no screen`. Two pictures, and both are the home
+screen (the sizes are that of a drawn screen, not the logo's 13 KB).
+
+So the old "about one in three" was an impression, and the measured number for an image without our
+hook is 40%. Whether that is better or worse than the image with the hook is what the control run is
+for; at five boots a side, a difference of one boot is not a result, and the honest reading is
+**the hook is not what makes boots stall**.
 
 A boot is counted as lost by the script itself: no frame reported by seven minutes, or no growth in
 the guest's log for two minutes. That is the same criterion the procedure uses, applied five times in
