@@ -1,0 +1,49 @@
+--- /tmp/fb.c.bak	2026-10-31 23:25:40.803789112 +0800
++++ xnu-src/xnu-8796.121.2/iokit/Kernel/MiniIOMobileFramebuffer.cpp	2026-10-31 23:32:14.571210819 +0800
+@@ -197,6 +197,7 @@
+ #define INTF_TIMING_ENGINE_EN   0x000
+ #define INTF_FRAME_COUNT        0x0ac
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" void HakiosGPUStart(void);   /* the show service, made with the panel */
+ static inline uint32_t refreshHz(void);
+ 
+ static void
+@@ -1638,6 +1639,38 @@
+ 	if (fb->start(provider)) {
+ 		publishDisplayNode();
+ 		publishAccelerator(provider);
++		/* The service that lets a program put pixels on the panel is created by the Adreno
++		 * driver, which a machine without that GPU never runs. The panel exists here all the
++		 * same, so create it with the panel: without it nothing in the user space can draw,
++		 * which is exactly the state this port was in. */
++		IOLog("MiniIOMobileFramebuffer: bringing up the show service\n");
++		HakiosGPUStart();
++		/* A band of our own colours across the top of the panel, written from the kernel: the
++		 * shortest possible proof that a write reaches what the host looks at, without a GPU,
++		 * a Metal device, or a user-space client. */
++		{
++			const uint32_t rows = 240;
++			uint8_t * band = (uint8_t *)IOMallocData((vm_size_t)vinfo.v_width * rows * 4);
++
++			if (band != NULL) {
++				for (uint32_t y = 0; y < rows; y++) {
++					for (uint32_t x = 0; x < vinfo.v_width; x++) {
++						uint8_t * px = band + ((size_t)y * vinfo.v_width + x) * 4;
++						uint8_t v = (uint8_t)(x * 255u / (vinfo.v_width ? vinfo.v_width : 1u));
++
++						px[0] = (uint8_t)(255u - v);   /* blue  */
++						px[1] = (y < rows / 3) ? 255u : 0u;
++						px[2] = v;                     /* red   */
++						px[3] = 255u;
++					}
++				}
++				IOLog("MiniIOMobileFramebuffer: painting a %ux%u band\n", (unsigned)vinfo.v_width, (unsigned)rows);
++				MiniIOMobileFramebufferShow(band, vinfo.v_width, rows, vinfo.v_width * 4);
++				IOFreeData(band, (vm_size_t)vinfo.v_width * rows * 4);
++			} else {
++				IOLog("MiniIOMobileFramebuffer: no memory for the band\n");
++			}
++		}
+ 	} else {
+ 		fb->detach(provider);
+ 	}

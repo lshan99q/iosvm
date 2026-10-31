@@ -1,0 +1,27 @@
+--- /tmp/stage0.c.bak	2026-10-31 23:09:40.616591805 +0800
++++ userland/src/stage0.c	2026-10-31 23:10:09.037726279 +0800
+@@ -27,6 +27,24 @@
+ 	if (mount("apfs", "/redwood", MNT_RDONLY, (void *)"/dev/md1") != 0) {
+ 		printf("stage0: cannot mount /dev/md1 on /hakios: %s\n", strerror(errno));
+ 	} else {
++		/* A picture of our own, before the system starts: the painter lives on the RAM disk and
++		 * inherits this console, so what it says arrives on the serial line even though nothing
++		 * else of the user space is up yet. It is the widest test of the display path that does
++		 * not need a working Metal device. */
++		char *paint_argv[] = { "/redwood/bin/fill_panel", "30", NULL };
++		pid_t paint = fork();
++
++		if (paint == 0) {
++			execve(paint_argv[0], paint_argv, envp);
++			printf("stage0: cannot run %s: %s\n", paint_argv[0], strerror(errno));
++			_exit(1);
++		}
++		if (paint > 0) {
++			int status = 0;
++
++			(void)wait4(paint, &status, 0, NULL);   /* mini.h spells it wait4 */
++			printf("stage0: the painter finished (status %#x)\n", status);
++		}
+ 		execve(init_argv[0], init_argv, envp);
+ 		printf("stage0: cannot run %s: %s\n", init_argv[0], strerror(errno));
+ 	}

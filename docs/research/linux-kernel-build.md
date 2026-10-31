@@ -231,3 +231,36 @@ So the honest summary of the black panel:
 The next step is therefore not in the display code at all: run a program of ours from a context this
 userland *does* launch (a system-domain job, or an init path that is actually taken), and only then
 ask what the panel shows.
+
+## Addendum 5: the screen is lit
+
+**A picture reached the panel.** The frame is `docs/demo/first-pixels.png`: two gradient bands across
+the top 240 rows of a 1125x2436 panel, written by the kernel at display start-up and captured from
+the host through QEMU's ramfb. Before this, every capture was 8061 bytes of black; this one is 14316
+bytes of colour.
+
+Two findings came out of the attempt, and both are the kind that only measurement gives:
+
+**1. The path that draws is not the one the port had.** The service a program needs to put pixels on
+the panel (`HakiosGPU`, selector 0x7f) is created by the **Adreno** driver, and a machine without that
+GPU never runs it -- so on QEMU the display was up and nothing could draw into it. Creating the
+service with the display instead (`patches/0001-display-brings-up-the-show-service.patch`) is what
+makes the panel writable at all on this machine.
+
+**2. A band from the kernel is enough to prove the path.** With the service brought up, painting
+happens through `MiniIOMobileFramebufferShow()`, which memcpy's the rows into `vinfo.v_baseaddr` --
+the memory the loader programmed into ramfb. The capture shows exactly the pattern the code writes,
+which settles the question the black frames had left open: a write to that buffer *does* reach the
+host's picture.
+
+What is still open, and what is not:
+
+| | state |
+|---|---|
+| the panel is writable and the host sees it | **proven** (this picture) |
+| a guest process can paint it | **not yet** -- the launchd job still never execs (addendum 4) |
+| the system UI can paint it | **no**: SpringBoard needs Metal, and the Metal device is still a stub |
+
+So the floor is now solid: whatever draws next -- a Metal device, a framebuffer test, a compositor --
+there is a working way to put its output in front of a person. That is the first time that has been
+true in this project.
