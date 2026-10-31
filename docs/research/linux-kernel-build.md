@@ -914,3 +914,32 @@ alive and the programs alive (addendum 20), and the display driver never reports
 
 That is the useful shape of the result: it removes our own changes from the list of suspects and
 leaves the port's own start-up, which is where the next person should look.
+
+## Addendum 24: a real screen, and taps that do not reach it
+
+`KEEP=1` in `qemu/wait-for-ui.sh` leaves the machine running once the screen is verified, which is
+what an interaction test needs:
+
+```
+$ KEEP=1 TRIES=6 qemu/wait-for-ui.sh /tmp/keep-ui.png
+attempt 1 of 6
+  frames are flowing but the panel is still blank (8061 bytes)
+the panel shows the system: /tmp/keep-ui.png (318556 bytes)
+left running (KEEP=1): monitor on tcp:127.0.0.1:4444
+```
+
+With that machine up, taps were sent two ways and **neither reached the interface**:
+
+| how | result |
+|---|---|
+| monitor `mouse_move` + `mouse_button 1/0` (a pointer event) | screen unchanged apart from the clock |
+| monitor `input-send-event` with `abs` x/y (0..0x7fff, the range `drivers/input/hakios.virtio_input.c` expects) and `btn` left down/up | screen unchanged; no icon highlight, no application launched |
+
+The driver's side of the mapping is clear from its source: `ABS_X`/`ABS_Y` scale into its own 16-bit
+touch coordinates, `BTN_LEFT`/`BTN_TOUCH` set the pressed bit, and `EV_SYN` posts the touch. So the
+question is whether QEMU delivered those events to the device the driver is bound to, and the port's
+own notes say the window server does not reliably take a touch screen for its own ("still waiting for
+a main screen digitizer", `userland/src/inject_sb.c`).
+
+Recorded as a negative result: **the screen is real and the machine is interactive in principle, but
+nothing of ours has yet made it respond to a tap.**
