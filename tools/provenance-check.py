@@ -192,11 +192,44 @@ def scan(root: Path, report: Report, allow_binaries: set[str]) -> None:
                     report.fail(rel, f"fetches Apple content at byte {m.start()}: {what}")
 
 
+def scan_history(root: Path, report: Report) -> int:
+    """Every line ever added to any branch or tag, scanned for credential shapes.
+
+    A secret in history is worse than one in the work tree: deleting the file does not remove the
+    value from clones, forks or GitHub's event cache. This walks `git log -p --all` and reports
+    which commit introduced such a line, never the line itself.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(root), "log", "--all", "-p", "--format=%H", "--no-color",
+         "--no-ext-diff", "-U0"],
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        report.fail("<history>", "git log failed; history not verified")
+        return 0
+
+    commits = 0
+    for raw in proc.stdout.split(b"\n"):
+        if len(raw) == 40 and not raw.startswith((b"+", b"-", b"@", b" ")):
+            commits += 1
+            continue
+        if not raw.startswith((b"+", b"-")) or raw.startswith((b"+++", b"---")):
+            continue
+        body = raw[1:]
+        for pattern, what in SECRET:
+            if pattern.search(body):
+                report.fail(f"<history:commit {commits}>", f"credential ever added: {what}")
+                break
+    return commits
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Check the IOSVM tree for Apple artifacts, undeclared binaries and credentials.")
     ap.add_argument("--root", default=".", help="repository root (default: .)")
     ap.add_argument("--quiet", action="store_true", help="only print violations")
+    ap.add_argument("--history", action="store_true",
+                    help="also scan every commit ever made (slower; needs a full clone)")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -207,14 +240,24 @@ def main() -> int:
     report = Report()
     scan(root, report, declared_binaries(root))
 
+    commits = 0
+    if args.history:
+        commits = scan_history(root, report)
+
     if report.violations:
         for path, why in report.violations:
             print(f"FAIL {path}: {why}")
-        print(f"\nprovenance-check: {len(report.violations)} violation(s) in {report.checked} tracked file(s)")
+        msg = (f"\nprovenance-check: {len(report.violations)} violation(s) in "
+               f"{report.checked} tracked file(s)")
+        if args.history:
+            msg += f", {commits} commit(s) of history"
+        print(msg)
         return 1
 
     if not args.quiet:
-        print(f"provenance-check: clean ({report.checked} tracked files)")
+        msg = f"provenance-check: clean ({report.checked} tracked files"
+        msg += f", {commits} commits of history)" if args.history else ")"
+        print(msg)
     return 0
 
 

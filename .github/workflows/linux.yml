@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Tier 1 — the gate. Runs on a bare runner, needs no Apple file, no QEMU fork, no GPU.
-  # This is the only job a contributor without an iPhone or a Mac must be able to pass.
+  # Tier 1 — the gate. A bare runner, no Apple file, no QEMU fork, no GPU.
+  # A contributor without an iPhone or a Mac must be able to stay green here.
   provenance:
     name: provenance + secrets
     runs-on: ubuntu-24.04
@@ -29,13 +30,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: No Apple artifacts, no undeclared binaries, no credentials
+      - name: No Apple artifacts, no undeclared binaries
         run: python3 tools/provenance-check.py --root .
 
-      - name: gitleaks (history, not just the work tree)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: No credentials in the work tree or in history
+        run: python3 tools/provenance-check.py --root . --history
 
   test-open:
     name: test-open (no Apple file)
@@ -48,11 +47,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential meson ninja-build pkg-config \
+            build-essential meson ninja-build pkg-config shellcheck \
             mesa-vulkan-drivers vulkan-tools libvulkan-dev
 
-      - name: Protocol unit tests
-        run: make -C . test-open
+      - name: The contributor gate
+        run: make test-open
+
+      - name: Doctor (informational — a warning must not fail the job)
+        run: tools/doctor.sh || true
 
   style:
     name: style
@@ -60,21 +62,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: clang-format
+      - name: Install
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format
-          files=$(git ls-files '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' || true)
-          if [ -n "$files" ]; then
-            clang-format --dry-run --Werror $files
-          else
-            echo "no C sources yet — nothing to format"
-          fi
+          sudo apt-get install -y --no-install-recommends clang-format shellcheck clang
 
       - name: SPDX headers
         run: python3 tools/check-spdx.py
 
-  # Tier 2 — optional. Needs the QEMU fork and a GPU. Not required to merge.
+      - name: clang-format
+        run: |
+          files=$(git ls-files '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' || true)
+          if [ -n "$files" ]; then
+            echo "$files" | xargs clang-format --dry-run --Werror
+          else
+            echo "no C sources yet — nothing to format"
+          fi
+
+      - name: shellcheck
+        run: shellcheck --severity=warning tools/*.sh
+
+  # Tier 2 — optional. Needs a Vulkan driver but still no Apple file. Not a merge gate yet.
   vkbridge-fake-gpu:
     name: vkbridge on lavapipe
     runs-on: ubuntu-24.04
@@ -82,9 +90,11 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - run: |
+      - name: Install
+        run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential meson ninja-build pkg-config \
             mesa-vulkan-drivers vulkan-tools libvulkan-dev libdrm-dev
-      - run: make -C . test-gpu
+      - name: fake-gpu
+        run: make test-gpu
