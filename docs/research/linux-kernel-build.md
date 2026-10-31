@@ -1077,3 +1077,38 @@ is entirely a question about QEMU's virtio-tablet absolute pointer.
 
 The VNC option is kept because watching the machine live is worth having, and because it is the
 natural way for a person to use this port from outside while the touch path is settled.
+
+## Addendum 28: the host drives the interface -- QMP, not the human monitor
+
+`docs/demo/settings-from-host.png` is Settings, opened by a tap sent **from the host**:
+
+```sh
+qemu/tap.py 683 1689        # the Settings icon, in panel pixels
+```
+
+Before the tap the panel is the home screen (318,804 bytes); after it, Settings (135,720 bytes). No
+program of ours ran inside the guest to make that happen.
+
+The missing piece was not QEMU's virtio-tablet at all -- it was **which interface the command is sent
+through**. The same event, in the two places:
+
+| sent through | what the guest's driver receives |
+|---|---|
+| the human monitor (HMP), `input-send-event` | EV_KEY for its buttons, **no EV_ABS at all** |
+| **QMP**, `input-send-event` with a list of events | `type 3 code 0 value 19893` (ABS_X), `type 3 code 1 value 12132` (ABS_Y), the buttons, the EV_SYN |
+
+So addendum 27's conclusion needs one correction: the coordinates *do* reach this guest, and the HMP's
+JSON argument parsing is what swallowed them. `qemu/tap.py` is the tool -- a tap, or a swipe with
+`--swipe X0 Y0 X1 Y1` -- and it sends everything over QMP (the socket `qemu/run.sh` already opens on
+127.0.0.1:4445).
+
+What that means for the state of the port, which is now worth stating as a whole:
+
+| from the host | works |
+|---|---|
+| watch the screen | yes -- `VNC=1`, or a screendump |
+| tap an icon, open an application | **yes** -- `qemu/tap.py` |
+| navigate inside an application | yes -- the same tool with new coordinates |
+| type on a keyboard | not tried; `virtio-keyboard-device` is there |
+
+The interface is now something a person can operate, not only photograph.
