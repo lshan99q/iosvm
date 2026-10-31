@@ -1056,3 +1056,24 @@ That is now a precise question about QEMU's virtio-tablet input path (or the dri
 and a much smaller one than "the host cannot drive the interface". For anyone continuing: the guest's
 own path (`/dev/hakios-touch` -> window server -> SpringBoard) is proven to work, so this last piece is
 the only thing between a machine that can be operated and one that can be operated from the host.
+
+### 27a. Watching the machine: VNC, and what it does not fix
+
+`VNC=1 qemu/run-darwin.sh 600` adds a graphical console on `127.0.0.1:5909` (any VNC client connects;
+the RFB handshake answers `RFB 003.008`). That is useful on its own -- the iOS screen can be watched
+live instead of photographed -- and it was tried as a possible reason the host's pointer did nothing:
+
+| configuration | host pointer coordinates reach the guest? |
+|---|---|
+| `-display none` (as it was) | no -- no EV_ABS at all |
+| with a VNC console added | no -- still no EV_ABS |
+| device named (`id=tablet`) and events addressed to it | no -- still no EV_ABS |
+| buttons from the same monitor, in every one of those | **yes** -- EV_KEY arrives every time |
+
+So the console was not the reason and the device name was not the reason. What is measured is that
+`mouse_button` reaches the guest and `mouse_move`, `input-send-event` with `abs`, and the same
+addressed to a named device, do not. The guest's own input path is proven (addenda 25 and 26), so this
+is entirely a question about QEMU's virtio-tablet absolute pointer.
+
+The VNC option is kept because watching the machine live is worth having, and because it is the
+natural way for a person to use this port from outside while the touch path is settled.
