@@ -56,3 +56,26 @@ every frame after the first is dropped -- the panel then shows the boot logo for
 its show service, a stage0 that can run a program before init, an explicit `newUserClient` so the
 client class cannot be dropped, a user client that starts without a GPU, `build.sh` fixes (dyld cache
 path, no halting demo job), and init finding its own image without `argv[0]`.
+
+## The interface can now be operated, not only photographed
+
+```sh
+qemu/demo.sh /tmp/demo          # boot, then: open Settings, a page inside it, back home, Control Center
+qemu/tap.py X Y                 # a tap, from the host
+qemu/tap.py --swipe X0 Y0 X1 Y1 # a gesture, from the host
+VNC=1 qemu/run-darwin.sh 600    # and watch it live on 127.0.0.1:5909
+```
+
+What was proven, with pictures in `docs/demo/` and `docs/demo/sequence/`:
+
+| from the host | state |
+|---|---|
+| watch the screen | works — VNC or screendump |
+| tap an icon, open an application | works — Settings, from `qemu/tap.py` |
+| navigate inside an application | works — Settings -> Screen Time |
+| swipe up from the bottom edge | works — back to the home screen |
+| swipe down from the top right | works — Control Center, backdrop blur included |
+
+Two things that are easy to get wrong, both written down in the research note: the events must go
+over **QMP** (the human monitor's `input-send-event` delivers buttons and no coordinates), and in a
+gesture the finger is down for the whole thing — press, move, release, in that order.
