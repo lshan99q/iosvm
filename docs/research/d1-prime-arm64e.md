@@ -86,3 +86,57 @@ One environment caveat: QEMU's `cortex-a710` advertises `ID_AA64ISAR1_EL1 = 0x00
 - **U7-ENTITLEMENTS-SOURCE** — where entitlements come from with no AMFI, and whether 26 userland trusts anything beyond the signature blob.
 - **U8-FIRST-FAULT-MAP** — the ordered list of launchd's first N faults on 26, with PCs and symbols. This is E1's deliverable, not a verdict.
 - **U9-JOB-STATE** — what `job state = running` proves: that launchd thinks the job started, not that a frame was drawn. Keep the two apart in every status claim.
+
+---
+
+## Addendum, 2026-10-31 — what the sibling's own document settles, and where it stops
+
+Read `superboyyy/hakios-arm64e-dada` at `main` (2026-10-31), `base/docs/ARM64E.md`, 434 lines. It
+answers more of D1' than the earlier note could, and it also names the wall precisely.
+
+**Settled: the iOS 26 kernel boots, arm64e, in QEMU.** Their milestone 4b: the arm64e
+`xnu-12377` kernel boots `hello` as PID 1 under `QEMU_CPU=cortex-a710` with no PAC fault, then
+panics on initproc exit — the same terminal state as the arm64 bring-up. Six boot fixes are named
+individually (kstackptr PAC-DA gating, trust-cache init, `_unsafe_kernel_text_initialized`,
+`iomediaClass`, `mi_base` width, and the `fleh_dispatch64` `pacia` ordering). The loader's chained
+fixup signer needed no retarget: `CHAINED_PTR_ARM64E_KERNEL` is unchanged between the tags. That
+matches E2's finding that the ptrauth surface is frozen.
+
+**Settled: the kernel side of the iOS 26 user space is ready.** Their milestone 4c resolves the 17
+deferred userland/filesystem rejects and states that the kernel "is now ready for the full iOS 26
+arm64e user space (launchd + daemons + SpringBoard)". So the kernel is not the blocker.
+
+**Not settled, and named as data rather than code:** the extracted iOS 26 userland is not on disk.
+Their words: re-acquiring it means downloading the iPhone 17 Pro Max iOS 26.6.2 IPSW (~12 GB),
+then "AEA-decrypting the root/cryptex (`/usr/bin/aea` + the FCS key from Apple)", re-extracting the
+84-subcache arm64e dyld shared cache, writing an `ios26/` selection config, and pointing
+`qemu/run-ios.sh` at the xnu-12377 kernel (it hardcodes the xnu-8796 path today).
+
+### The two blockers this project has to decide about, not engineer around
+
+1. **A build host.** Their kernel build uses Xcode's `iig` (the `iig` shim "runs the real Xcode
+   iig", falling back to SDK headers) and the iphoneos SDK, and `MakeInc.cmd` is left as-is
+   "since the absolute paths exist and the build succeeds on macOS". **Nothing in this repository
+   can produce an arm64e xnu-12377 kernel on Linux today**, and the sibling publishes no binaries.
+   Unlike the 16.5 path — which builds on Linux with the theos toolchain — the iOS 26 kernel build
+   currently assumes a Mac.
+2. **The userland data is behind an encrypted container.** iOS 26 ships the root and cryptex
+   filesystems as `.aea` (Apple Encrypted Archive), and their recipe decrypts them with
+   `/usr/bin/aea` and "the FCS key from Apple". **This project's rule is not to defeat a technical
+   measure** (PROVENANCE.md, ADR-006). Whether that step is ordinary extraction (a key published in
+   the IPSW or its build manifest) or a key obtained from Apple's servers / derived from a device
+   identity decides whether it is in bounds at all — and that question must be answered **before**
+   any data is fetched, not after.
+
+### So: what "can we run iOS 26" means today
+
+| Layer | State | Evidence |
+|---|---|---|
+| Kernel boots arm64e processes | **proven in QEMU** | sibling milestone 4b |
+| Kernel is ready for iOS 26 user space | **proven** | sibling milestone 4c |
+| iOS 26 user space boots in QEMU | **not done anywhere public** | sibling names it as their remaining work |
+| SpringBoard renders (Metal→Vulkan) | **not done** | their phone does it through Turnip on real Adreno |
+
+The honest summary: **iOS 26 is not a research question any more at the kernel level; it is a data
+and build-host question.** That is a much better position than the project was in this morning, and
+it is also why D1' cannot close from this machine.

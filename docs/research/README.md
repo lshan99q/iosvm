@@ -11,6 +11,10 @@ note says what is known and how to find out more; an ADR says what was chosen
 | `d1-prime-arm64e.md` | Does iOS 26 arm64e user space boot on a kernel we compile, the way Darwin 16.5 does? | open — the gate `docs/adr/D1-prime-userland-version.md` does not exist yet |
 | `e2-kernel-port-surface.md` | How much of the kernel has to change between the Darwin 16.5 tag and the iOS 26 tag? (experiment E2 of the note above) | done — syscall and trap numbering unchanged; a handful of small changes; two research items |
 
+The note's addendum (2026-10-31) records what the sibling project's own document settles: the arm64e
+iOS 26 kernel boots in QEMU, the kernel side of the user space is ready, and what remains is **data
+and a build host**, not kernel work.
+
 ## Why the labels matter
 
 This project was once built on a confident wrong claim: that extracting an IPSW needs a Mac, and
