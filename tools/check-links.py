@@ -48,7 +48,6 @@ PLANNED = {
     "docs/demo/m1-frame.png": "M1: the acceptance capture",
     "docs/demo/demo.mp4": "M4: released as an attachment, not committed",
     "tools/scratch/": "git-ignored scratch space (docs/zh/work-rules.md)",
-    "tools/sync-components.sh": "M2 follow-up named in ADR-010",
 }
 
 # Archived design documents quote the filenames they were written under, and paths from the
