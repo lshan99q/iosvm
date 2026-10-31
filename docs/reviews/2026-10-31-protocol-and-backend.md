@@ -8,8 +8,9 @@ The result is recorded here in full, including what was wrong with this project'
 because the value of a review is what happens to the findings afterwards — and because the same
 class of mistake appeared twice in one day.
 
-Status key: **fixed** — changed in the repository; **open** — known and scheduled; **accepted** —
-judged not worth changing, with the reasoning recorded.
+Status key: **fixed** — changed and verified in the repository; **in flight** — a fix is being
+written in the same day's work; **accepted** — judged not worth changing, with the reasoning
+recorded. Nothing here is left as "known but unowned".
 
 ---
 
