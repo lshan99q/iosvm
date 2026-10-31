@@ -46,8 +46,8 @@ test-open: provenance ## every check that needs no Apple file (the contributor g
 provenance: ## no Apple artifacts, no undeclared binaries, no credentials
 	@$(PYTHON) tools/provenance-check.py --root .
 
-style: ## SPDX headers, dangling doc references, clang-format
-	@$(PYTHON) tools/check-spdx.py
+style: ## SPDX headers (all trees), dangling doc references, clang-format
+	@tools/check-spdx.sh
 	@$(PYTHON) tools/check-links.py
 	@if git ls-files -z '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' | grep -qz .; then \
 		git ls-files -z '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' \
