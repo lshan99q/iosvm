@@ -125,10 +125,13 @@ say "  payload.bin $(stat -c %s "$WORK/payload.bin") bytes"
 
 # --- run -------------------------------------------------------------------------------------
 
-# The ESP is a virtio-blk device on the MMIO transport, not on PCI. A PCI virtio device carries an
-# option ROM (efi-virtio.rom) that GitHub's runner image does not ship, and `romfile=` does not
-# suppress the lookup — the boot dies with `failed to find romfile`. The MMIO device has no option
-# ROM at all, and the UEFI firmware brings its own virtio driver, so nothing is lost.
+# Two portability notes, both learned from a runner that ships a leaner QEMU than a desktop does:
+#
+#  * `-net none` is not cosmetic. `-M virt` adds a `virtio-net-pci` NIC by default, and that device
+#    loads `efi-virtio.rom`, which GitHub's runner image does not ship: the boot dies in 0.1 s with
+#    `failed to find romfile "efi-virtio.rom"`. The ROM belonged to a NIC this test never uses.
+#  * The ESP is a virtio-blk device on the MMIO transport, so it has no `romfile` property at all.
+#    The UEFI firmware brings its own virtio driver, which is how it finds BOOTAA64.EFI.
 LOG=$WORK/logs/qemu.log
 say
 say "booting for ${SECONDS_RUN}s (the window is closed: serial only) …"
@@ -139,6 +142,7 @@ timeout --signal=TERM "$SECONDS_RUN" qemu-system-aarch64 \
 	-accel tcg,tb-size=384 \
 	-drive if=pflash,format=raw,readonly=on,file="$WORK/efi.fd" \
 	-drive if=pflash,format=raw,file="$WORK/vars.fd" \
+	-net none \
 	-drive file=fat:rw:"$WORK/esp",format=raw,if=none,id=esp0 \
 	-device virtio-blk-device,drive=esp0 \
 	-device loader,file="$WORK/payload.bin",addr=0xF0000000,force-raw=on \
