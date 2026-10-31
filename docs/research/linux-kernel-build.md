@@ -156,3 +156,40 @@ Successfully spawned amfid[25] ... containermanagerd[42] ... keybagd[24] ... loc
 state of this milestone, not a defect in it: QEMU offers no GPU, so nothing draws. Turning that black
 screen into a picture is exactly what the vkbridge work (a real Vulkan backend on the host) and the
 guest-side Metal device are for -- the boot now reaches the point where rendering would matter.
+
+## Addendum 3: the panel is black, and what that means
+
+With launchd running the system, the next question is the picture, and it is not there: every
+framebuffer capture is 1125x2436 of black. That is the honest state, and it is worth separating from
+a bug.
+
+What is established:
+
+- the framebuffer is set up and the panel is the right shape -- the loader programs a 1125x2436 mode
+  and `MiniIOMobileFramebuffer` reports `display 1125x2436 on a panel of 1125x2436 (4500 bytes per
+  row)`, which is 1125 * 4;
+- nothing in this configuration draws: SpringBoard's compositor needs Metal, and the Metal device in
+  this tree is a stub that accepts messages and produces no images (`docs/metal-plan.md` says as
+  much);
+- a program of our own (`guest/fill_panel.c`) was written to bypass all of that: it paints a
+  gradient, four colour bars and a centre square, and hands the pixels to the kernel's own
+  `kHakiosShow` path -- the same call the upstream `gl_test` uses -- so it exercises the display
+  chain from a guest process to `MiniIOMobileFramebufferShow`, which memcpy's into the boot
+  framebuffer.
+
+What that experiment has and has not shown:
+
+- the launchd job that starts it does spawn (`xpcproxy spawned with pid 38`, `SPAWNED`), and the
+  process does not exit while its paint loop should be running;
+- **but its output is unreadable**: a launchd job's stdout goes to launchd, not to the serial
+  console, and `open("/dev/console")` from inside the job does not produce a line in the log either.
+  So whether `IOServiceOpen` succeeded and what `kHakiosShow` returned is still unknown, and a black
+  screen is consistent with both "the call failed" and "the call worked and the loader's idea of the
+  framebuffer address is not the memory ramfb scans out";
+- the guest also panics a few tens of seconds into these runs (a stackshot), which cuts the window
+  short.
+
+So the next step is not more guessing, it is instrumenting the guest: put the paint program where its
+stdout *is* the console (the init path, whose stdio is the serial line) instead of behind launchd,
+and have it return a distinct exit code for each failure so the answer arrives even without a
+visible picture.

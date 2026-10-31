@@ -1,0 +1,134 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * fill_panel: put a picture of our own on the panel of the guest, to prove the display path end to
+ * end. It draws nothing through Metal or CoreAnimation -- it writes pixels itself and hands them to
+ * the kernel's GPU service (the same call the upstream gl_test uses), so what it proves is the
+ * path from a guest process, through the kernel, to the framebuffer the host reads.
+ *
+ * The panel's pixels are blue first (BGRA) and its rows go bottom up; both are the upstream
+ * convention, and getting either wrong is a picture that is upside down and colour-swapped rather
+ * than absent -- so this is written to be obviously right.
+ *
+ *   fill_panel [SECONDS [WIDTH HEIGHT]]
+ */
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <mach/mach_time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+/* launchd keeps a job's stdout to itself; the console of this guest is the serial line, which is
+ * what the host reads after the run. So every marker goes there, twice if stdout is a terminal. */
+static int console = -1;
+
+static void
+tell(const char *fmt, ...)
+{
+	va_list ap;
+	char buf[512];
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+	if (n > 0) {
+		if (console >= 0) { ssize_t w = write(console, buf, (size_t)n); (void)w; }
+		fputs(buf, stdout);
+		fflush(stdout);
+	}
+}
+
+/* drivers/gpu/hakios.gpu.cpp: kHakiosShow (0x7f), "pixels of the caller's onto the panel" */
+struct show {
+	uint64_t pixels;
+	uint32_t width, height, row_bytes, pad;
+};
+
+static void
+paint_bgra(uint8_t *to, unsigned width, unsigned height)
+{
+	/* A picture that is unmistakably not a black screen and not a mistake of orientation:
+	 * a vertical gradient, then four 1/8-height bars at the bottom in R, G, B and white order,
+	 * then a white square in the middle. Every one of those is wrong in a different way if the
+	 * row order or the channel order is wrong. */
+	for (unsigned y = 0; y < height; y++) {
+		for (unsigned x = 0; x < width; x++) {
+			uint8_t *p = to + ((size_t)y * width + x) * 4;
+			uint8_t v = (uint8_t)(255 - (y * 255 / (height ? height : 1)));
+
+			p[0] = v;               /* blue */
+			p[1] = v;               /* green */
+			p[2] = v;               /* red */
+			p[3] = 255;
+		}
+	}
+	unsigned band = height / 8;
+	for (int i = 0; i < 4; i++) {
+		for (unsigned y = height - band; y < height; y++) {
+			for (unsigned x = (unsigned)i * width / 4; x < (unsigned)(i + 1) * width / 4; x++) {
+				uint8_t *p = to + ((size_t)y * width + x) * 4;
+				p[0] = (i == 0 || i == 3) ? 0 : 255;
+				p[1] = (i == 2) ? 255 : 0;
+				p[2] = (i == 0) ? 255 : 0;
+				p[3] = 255;
+			}
+		}
+	}
+	for (unsigned y = height / 2 - 60; y < height / 2 + 60; y++) {
+		for (unsigned x = width / 2 - 60; x < width / 2 + 60; x++) {
+			uint8_t *p = to + ((size_t)y * width + x) * 4;
+			p[0] = p[1] = p[2] = p[3] = 255;
+		}
+	}
+}
+
+int
+main(int argc, char **argv)
+{
+	int seconds = argc > 1 ? atoi(argv[1]) : 20;
+	unsigned width = argc > 3 ? (unsigned)atoi(argv[2]) : 1125;
+	unsigned height = argc > 3 ? (unsigned)atoi(argv[3]) : 2436;
+	const size_t bytes = (size_t)width * height * 4;
+	uint8_t *drawn = malloc(bytes), *shown = malloc(bytes);
+	io_service_t service;
+	io_connect_t connection;
+
+	if (drawn == NULL || shown == NULL) {
+		tell("fill_panel: no memory for %zu bytes\n", bytes);
+		return 1;
+	}
+	paint_bgra(drawn, width, height);
+	/* the panel's rows go down, the picture's go up */
+	for (unsigned y = 0; y < height; y++) {
+		memcpy(shown + (size_t)y * width * 4, drawn + (size_t)(height - 1 - y) * width * 4,
+		    (size_t)width * 4);
+	}
+
+	console = open("/dev/console", O_WRONLY);
+	tell("fill_panel: console %d, %ux%u\n", console, width, height);
+	service = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
+	if (service == 0 || IOServiceOpen(service, mach_task_self(), 0, &connection) != 0) {
+		tell("fill_panel: no GPU service to put pixels on the panel with\n");
+		return 1;
+	}
+	tell("fill_panel: %ux%u, %d seconds; corner %u %u %u %u, middle %u %u %u %u\n",
+	    width, height, seconds, shown[0], shown[1], shown[2], shown[3],
+	    shown[(size_t)(height / 2) * width * 4], shown[(size_t)(height / 2) * width * 4 + 1],
+	    shown[(size_t)(height / 2) * width * 4 + 2], shown[(size_t)(height / 2) * width * 4 + 3]);
+	for (int i = 0; i < seconds * 5; i++) {
+		struct show s = { (uint64_t)(uintptr_t)shown, width, height, width * 4, 0 };
+		kern_return_t result = IOConnectCallStructMethod(connection, 0x7f, &s, sizeof(s), NULL, NULL);
+
+		if (i == 0) {
+			tell("fill_panel: on the panel (%#x)\n", result);
+		}
+		usleep(200000);
+	}
+	tell("fill_panel: done\n");
+	return 0;
+}
