@@ -31,25 +31,34 @@ device to Apple's servers, no credentials.
 ## Quick start
 
 ```sh
-# 1. Host prerequisites (Linux x86_64)
+# 1. Host prerequisites (Linux x86_64)                      — works today
 sudo apt install build-essential meson ninja pkg-config \
                  qemu-system-arm qemu-efi-aarch64 lld lz4 7zip \
                  mesa-vulkan-drivers vulkan-tools libvulkan-dev libdrm-dev
 
-# 2. Everything that needs no Apple file
-make test-open          # protocol units + fake-gpu, must stay green for every contributor
+# 2. The thing you must keep green                          — works today
+make test-open          # compliance + SPDX + protocol units + fake-gpu, no Apple file
 
-# 3. Install the QEMU fork (submodule)
-git submodule update --init --recursive
-make qemu               # builds QEMU with hw/virtio-iosvm-gpu
+# 3. Look at your host before blaming the code              — works today
+make doctor             # what is missing here, and the apt line for it
 
-# 4. Your own IPSW, then boot
-./tools/unpack-ipsw.sh ~/iPhone17,3_26.x.ipsw
-./tools/make-images.sh
+# 4. Take the parts out of YOUR IPSW                       — works today (dry run first)
+./tools/unpack-ipsw.sh ~/iPhone17,3_26.x.ipsw       # dry run: prints, writes nothing
+./tools/unpack-ipsw.sh ~/iPhone17,3_26.x.ipsw --apply
+./tools/make-images.sh                              # dry run; --apply needs the M1 APFS writer
+
+# 5. Boot a guest                                          — NOT YET (M0 tail / M1)
 make run
 ```
 
-`make doctor` reports what this machine lacks and what to install.
+Step 5 is the one that does not exist. `make run`, `make host`, `make guest`, `make qemu` and
+`make test-gpu` are stubs that say so; `hw/virtio-iosvm-gpu` is M2 work. What *is* proven is
+upstream, not here: a self-compiled XNU reaches BSD initialisation in 6.4 s of emulated boot on the
+reference host (`docs/m0-host-report.md`).
+
+What works today, exactly: `make test-open`, `make provenance`, `make style`, `make doctor`,
+`tools/unpack-ipsw.sh` (verified end to end against a synthetic IPSW), `tools/check-frame.py`
+(verified both ways), and the CI gate on every push.
 
 ## What lives where
 
