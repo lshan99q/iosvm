@@ -210,5 +210,18 @@ int main(int argc, char **argv)
         tell("fill_panel: cannot run %s\n", tap_argv[0]);
         _exit(1);
     }
+    /* ... and inside Settings a while later, General: does the interface navigate, not just open? */
+    if (fork() == 0) {
+        char *row_argv[] = {"/redwood/bin/rwtouch", "tap", "0.5", "0.651", NULL};
+        char *row_envp[] = {"PATH=/bin:/sbin:/usr/bin:/usr/sbin", NULL};
+
+        for (int i = 0; i < 2900; i++) { /* 580 s in 200 ms steps */
+            usleep(200000);
+        }
+        tell("fill_panel: tapping General in Settings\n");
+        execve(row_argv[0], row_argv, row_envp);
+        tell("fill_panel: cannot run %s\n", row_argv[0]);
+        _exit(1);
+    }
     return 0;
 }

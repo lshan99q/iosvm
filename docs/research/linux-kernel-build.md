@@ -1004,3 +1004,24 @@ monitor's events reach (or do not reach) the virtio input driver, and not in any
 Note what also had to be true for this to work: the machine has to be kept running (`KEEP=1`) for the
 touch to have a screen to land on, and the touch is sent from a process started before `init` --
 because a launchd job of ours is not reliably executed at all (addendum 4's xpcproxy pattern).
+
+## Addendum 26: it navigates -- a second tap moves inside Settings
+
+`docs/demo/settings-focus-page.png` is the **Focus** page of Settings: the `< Settings` back button, the
+title, "Share Across Devices" (greyed, "Focus syncing is not supported on this device"), "Focus
+Status: Off", and the explanatory paragraph. It is two touches from a home screen that nothing of ours
+had ever touched:
+
+| when | what | result |
+|---|---|---|
+| +480 s | `rwtouch tap 0.607 0.693` -- the Settings icon | Settings opens (`docs/demo/settings-app.png`) |
+| +580 s | `rwtouch tap 0.5 0.651` -- meant to be General, landed on Focus | **the Focus page slides in** |
+
+The second tap landing on a different row than intended is beside the point; that it *navigated* is
+the point. A list view was drawn, a touch landed on a row, and the application pushed a new view and
+drew it -- all through the same CoreAnimation and Mesa path as everything else here.
+
+So the state of the interface is: **it opens, it navigates, and it is driven by touches we send.**
+What it cannot yet do is be driven from the host: the monitor's input events still do not reach the
+guest's virtio driver. The sender that works is a program inside the guest writing to
+`/dev/hakios-touch`, started before `init` because a launchd job of ours is not reliably executed.
