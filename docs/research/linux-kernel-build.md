@@ -706,3 +706,30 @@ successful boot in addendum 15 carries the same "burning CPU" line and the same 
 `com.apple.mobileactivationd`. What differs is only whether `lsd` finishes in time. That is why the
 honest procedure for now is `qemu/wait-for-ui.sh`: boot, wait for the display driver to report
 frames, and if it never does, boot again.
+
+## Addendum 18: it reproduces, through a script that checks the picture
+
+The home screen is now obtainable on demand:
+
+```
+$ qemu/wait-for-ui.sh /tmp/ui-final.png
+attempt 1 of 4
+  frames are flowing but the panel is still blank (8061 bytes)
+  frames are flowing but the panel is still blank (13152 bytes)
+the panel shows the system: /tmp/ui-final.png (339412 bytes)
+```
+
+`docs/demo/home-screen-fresh.png` is that capture: clock at 2:49, the widgets, the twenty icons, the
+dock. It is a *later* boot than addendum 15's 2:12, which is the point -- the pipeline is not a
+one-off.
+
+Two things in the script are the lessons of this whole session:
+
+- **"frames are flowing" is not "the screen has something on it".** The first two captures were 8,061
+  bytes (black) and 13,152 (the boot logo) *while the driver was reporting frames*. Content is the
+  thing to wait for, so the script measures the picture, not the log: under 30,000 bytes is not a
+  drawn screen.
+- **boots are not reliable yet, so the procedure has to be a retry.** Addendum 17 has the stalls; the
+  script boots again rather than pretending they do not happen.
+
+`docs/state-of-the-port.md` is the one-page summary this all adds up to.
