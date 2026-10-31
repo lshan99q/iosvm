@@ -23,18 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+          fetch-depth: 0          # --history needs every commit
 
       - name: No Apple artifacts, no undeclared binaries
         run: python3 tools/provenance-check.py --root .
 
       - name: No credentials in the work tree or in history
         run: python3 tools/provenance-check.py --root . --history
+
+      - name: No dangling references in the docs
+        run: python3 tools/check-links.py
 
   test-open:
     name: test-open (no Apple file)
@@ -43,13 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install host build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential meson ninja-build pkg-config shellcheck \
-            mesa-vulkan-drivers vulkan-tools libvulkan-dev
-
+      # make test-open needs python3 and git, both on a stock runner. Nothing to install.
       - name: The contributor gate
         run: make test-open
 
@@ -65,7 +57,7 @@ jobs:
       - name: Install
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format shellcheck clang
+          sudo apt-get install -y --no-install-recommends clang-format shellcheck
 
       - name: SPDX headers
         run: python3 tools/check-spdx.py
@@ -82,19 +74,5 @@ jobs:
       - name: shellcheck
         run: shellcheck --severity=warning tools/*.sh
 
-  # Tier 2 — optional. Needs a Vulkan driver but still no Apple file. Not a merge gate yet.
-  vkbridge-fake-gpu:
-    name: vkbridge on lavapipe
-    runs-on: ubuntu-24.04
-    needs: provenance
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential meson ninja-build pkg-config \
-            mesa-vulkan-drivers vulkan-tools libvulkan-dev libdrm-dev
-      - name: fake-gpu
-        run: make test-gpu
+  # Tier 2 (vkbridge against lavapipe) lands with M2. It is not a job yet rather than a job that
+  # cannot fail: `make test-gpu` exits 1 by design until hw/virtio-iosvm-gpu exists.

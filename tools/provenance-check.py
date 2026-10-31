@@ -84,6 +84,10 @@ TEXT_NAME_OK = {
     "NOTICE", "PROVENANCE.md", "README", "Dockerfile", "Kconfig", "meson.build",
 }
 
+# Acceptance captures are the only binaries this project may commit: they are produced by
+# tools/screendump.sh from our own VM, and docs/demo/README.md requires a NOTES.md beside each.
+DEMO_EVIDENCE = re.compile(r"^docs/demo/.+\.(png|gif)$")
+
 MAX_SCAN = 2 * 1024 * 1024  # do not read a 500 MB text file into memory to look for a magic number
 
 
@@ -105,17 +109,26 @@ def tracked_files(root: Path) -> list[str]:
 
 
 def declared_binaries(root: Path) -> set[str]:
-    """Paths listed in the PROVENANCE.md table of allowed binaries."""
+    """Paths listed under `## Allowed binary files` in PROVENANCE.md.
+
+    Only that table declares binaries. The other tables are prose ("IPSW, `*.dmg`, ...") and
+    regexing every row would turn a sentence into an allow-list entry.
+    """
     prov = root / "PROVENANCE.md"
     allowed: set[str] = set()
     if not prov.exists():
         return allowed
+    inside = False
     for line in prov.read_text(encoding="utf-8", errors="replace").splitlines():
-        m = re.match(r"^\|\s*`?([^`|\s][^|]*)`?\s*\|", line)
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            inside = stripped.lower().startswith("## allowed binary")
+            continue
+        if not inside:
+            continue
+        m = re.match(r"^\|\s*`([^`]+)`\s*\|", line)
         if m:
-            p = m.group(1).strip().strip("`")
-            if p and not p.startswith(("Path", "—", "-", ":")):
-                allowed.add(p)
+            allowed.add(m.group(1).strip())
     return allowed
 
 
@@ -146,7 +159,9 @@ def scan(root: Path, report: Report, allow_binaries: set[str]) -> None:
             report.fail(rel, "forbidden artifact extension/name")
             continue
 
-        # 3. Binary not declared.
+        # 3. Binary not declared. Demo captures are the one declared exception.
+        if DEMO_EVIDENCE.match(rel):
+            continue
         if not looks_text(path):
             try:
                 head = path.read_bytes()[:4096]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# make-images.sh — turn firmware/ (from YOUR IPSW) into the two APFS images the guest mounts.
+# make-images.sh — turn an unpacked IPSW (from YOUR own IPSW) into the APFS images the guest mounts.
 #
 #   tools/make-images.sh --help
 #   tools/make-images.sh                 dry run: report what it would build
@@ -56,7 +56,7 @@ say() { printf '%s\n' "$*"; }
 say "IOSVM make-images"
 say "  firmware  $FW"
 say "  raw       $RAW"
-say "  output    $OUT/system.apfs, $OUT/data.apfs"
+say "  output    $OUT/system.apfs  (needs the APFS writer, which is M1 work)"
 say "  mode      $([ "$APPLY" = 1 ] && echo 'APPLY' || echo 'dry run (pass --apply to write)')"
 say
 
@@ -73,18 +73,17 @@ say
 
 if [ "$APPLY" = 1 ]; then
 	mkdir -p "$OUT"
-	say "make-images: the system volume (system.apfs) needs the APFS writer that M1 adds; not built."
-	say "             data volume (data.apfs) is created empty below."
-	: >"$OUT/.provenance"
+	say "make-images: nothing is written yet — building system.apfs needs the APFS writer"
+	say "             that M1 adds (docs/phases.md). This run only stages the provenance note."
 	cat >"$OUT/.provenance" <<EOF
 Produced by tools/make-images.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) from $FW/.
 $( [ -f "$FW/.provenance" ] && sed -n '1,5p' "$FW/.provenance" )
 This directory is git-ignored and must never be committed (PROVENANCE.md).
 EOF
-	say "make-images: wrote $OUT/"
+	say "make-images: wrote $OUT/.provenance (no image yet)"
 else
-	say "would build $OUT/system.apfs from the unpacked system volume"
-	say "would build $OUT/data.apfs, empty, with the /private/var skeleton"
+	say "would build $OUT/system.apfs from the unpacked system volume (APFS writer: M1)"
+	say "would build $OUT/data.apfs, with the /private/var skeleton (APFS writer: M1)"
 	say
 	say "dry run complete. Re-run with --apply to write."
 fi

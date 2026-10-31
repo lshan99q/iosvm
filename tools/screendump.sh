@@ -5,7 +5,7 @@
 #
 #   tools/screendump.sh                      # logs/screen.png from the running VM's monitor socket
 #   tools/screendump.sh -o shots/a.png       # explicit output
-#   tools/screendump.sh --ppm /tmp --from logs/qemu.log   # keep the raw PPM too
+#   tools/screendump.sh --ppm /tmp            # keep the raw PPM as well
 #
 # Talks to QEMU's monitor over a unix socket (run the VM with -monitor unix:logs/mon.sock,server,nowait).
 # Convert a PPM to PNG with any of: python3 (built in below), ImageMagick, netpbm.
@@ -39,10 +39,22 @@ mkdir -p "$(dirname "$OUT")" "${PPM_DIR:-$(dirname "$OUT")}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# QEMU writes the PPM at the path we give it.
+# QEMU writes the PPM at the path we give it. Use python3 rather than socat: python is already a
+# hard dependency of this repository, socat is not, and a missing socat is a confusing failure.
 target=${PPM_DIR:-$tmp}/screen.ppm
-printf 'screendump %s\n' "$target" | socat - "UNIX-CONNECT:$MON" >/dev/null 2>&1 ||
-	die "could not talk to the monitor (socat missing, or the monitor is not there)"
+python3 - "$MON" "$target" <<'PY' || die "could not talk to the monitor at $MON"
+import socket, sys
+mon, target = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(mon)
+try:
+    s.recv(65536)          # the monitor's greeting and prompt
+except socket.timeout:
+    pass
+s.sendall(b"screendump " + target.encode() + b"\n")
+s.close()
+PY
 for _ in $(seq 20); do [ -s "$target" ] && break; sleep 0.1; done
 [ -s "$target" ] || die "QEMU did not produce $target"
 
@@ -77,5 +89,5 @@ open(png, "wb").write(out)
 print(f"{png}: {w}x{h}, PNG")
 PY
 
-[ "$KEEP_PPM" = 1 ] && printf '%s\n' "kept $target"
+[ "$KEEP_PPM" = 1 ] && printf '%s\n' "kept $target" >&2
 printf '%s\n' "$OUT"

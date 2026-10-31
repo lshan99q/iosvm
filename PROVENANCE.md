@@ -29,14 +29,19 @@ is copied from an IPSW, a firmware bundle, a device dump or any other Apple dist
 
 ## Allowed binary files
 
-The list is deliberately empty. If a binary ever has to be committed, add it here **with its
-source and its SHA256**, in the same pull request, and say why in the commit body. `PROVENANCE.md`
-is a compliance-sensitive path: changing it needs a maintainer review (see
-`docs/adr/ADR-006-no-credentials.md`; compliance-sensitive paths need a maintainer review).
+One class is allowed, and only this one: **acceptance captures under `docs/demo/`** (`*.png`,
+`*.gif`). They are produced by `tools/screendump.sh` from the project's own virtual machine, they
+contain no Apple asset, and each one carries a NOTES file beside it naming the commit and IPSW
+version it came from (`docs/demo/README.md`, template: `docs/demo/NOTES.template.md`). They are what "the milestone is done" means; the project would
+have to delete its own evidence to keep the allow-list empty.
+
+Everything else needs a row in the table below, added **with its source and its SHA256** in the
+same pull request, and a reason in the commit body. `PROVENANCE.md` is compliance-sensitive:
+changing it needs a maintainer review, as `docs/adr/ADR-006-no-credentials.md` requires.
 
 | Path | What it is | Made from | SHA256 |
 |---|---|---|---|
-| — | — | — | — |
+| `docs/demo/**/*.png`, `docs/demo/**/*.gif` | milestone acceptance captures | `tools/screendump.sh` on our own VM; see the NOTES file beside each | per file, in that NOTES file |
 
 ## The tool chain is not downloaded for you
 

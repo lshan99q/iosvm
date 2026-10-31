@@ -59,7 +59,10 @@ def read_png(path: Path) -> tuple[int, int, int, bytes]:
         src += 1
         line = bytearray(raw[src:src + stride])
         src += stride
-        # Undo the per-scanline filter (PNG spec §9.2).
+        # Undo the per-scanline filter (PNG spec §9.2). An unknown filter is a corrupt file,
+        # not a licence to treat it as filter 0.
+        if f > 4:
+            raise ValueError(f"unknown PNG filter type {f} on row {y}")
         if f == 1:
             for i in range(channels, stride):
                 line[i] = (line[i] + line[i - channels]) & 0xFF

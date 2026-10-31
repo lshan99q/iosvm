@@ -70,7 +70,7 @@ need warn  "Vulkan ICD"        "test -n \"$(ls /usr/share/vulkan/icd.d/*.json 2>
 
 # Memory and disk: the guest wants 6 GB minimum (ADR-002), the build wants space.
 if [ "$mem_gb" -lt 8 ]; then
-	rows+=("fail|memory|${mem_gb} GB: the guest asks for 6 GB minimum, and QEMU needs its own||")
+	rows+=("fail|memory|${mem_gb} GB: the guest wants 6 GB minimum (docs/zh/engineering.md §4.1)||")
 	fail=$((fail + 1))
 else
 	rows+=("ok|memory|${mem_gb} GB||")

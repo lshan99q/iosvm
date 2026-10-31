@@ -29,11 +29,10 @@ qemu/*
 !qemu/.git
 !qemu/README.md
 
-# Logs and screenshots (demo evidence is picked by hand)
+# Logs and ad-hoc screenshots. Acceptance captures live in docs/demo/ and are tracked.
 logs/
 *.log
-!docs/demo/*.png
-!docs/demo/*.gif
+docs/demo/**/scratch*
 
 # Local configuration
 .env

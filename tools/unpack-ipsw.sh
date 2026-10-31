@@ -38,11 +38,11 @@ What it produces, all of it git-ignored:
   firmware/BuildManifest.plist          what this IPSW is
   firmware/kernelcache.*                the kernel and its kexts (for reference, not booted)
   firmware/*.im4p, *.im4m               device tree, trustcache and friends
-  userland-raw/*.dmg                    the APFS containers, before expansion
+  userland-raw/*.dmg                    the APFS containers, for tools/make-images.sh
 EOF
 }
 
-die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit "${2:-1}"; }
+die() { local msg=$1 code=${2:-1}; printf '%s: %s\n' "$PROG" "$msg" >&2; exit "$code"; }
 
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -76,8 +76,10 @@ sevenz=$(7z i 2>/dev/null | sed -n '/7-Zip/p' | head -1)
 sevenz_major=$(printf '%s' "$sevenz" | sed -n 's/.*[^0-9]\([0-9][0-9]*\)\.[0-9][0-9]*.*/\1/p' | head -1)
 [ -n "$sevenz_major" ] || die "cannot read the 7-Zip version from: $sevenz" 2
 if [ "$sevenz_major" -lt 23 ]; then
-	die "7-Zip $sevenz_major is too old: APFS needs 23 or newer, and older versions silently
-       produce empty files instead. Install a newer 7-Zip (PROVENANCE.md, ADR-009)." 3
+	# The extraction here is plain zip; the APFS work happens in tools/make-images.sh. Warn, and
+	# let --apply continue, because refusing would block a step that does not need 7-Zip at all.
+	printf '%s: warning: 7-Zip %s is older than 23; tools/make-images.sh needs 23+ for APFS\n' \
+		"$PROG" "$sevenz_major" >&2
 fi
 
 size=$(wc -c <"$IPSW" | tr -d ' ')
@@ -149,6 +151,9 @@ with zipfile.ZipFile(ipsw) as z:
             continue
         base = os.path.basename(name)
         dst = os.path.join(out_raw if name.endswith(".dmg") else out_fw, base)
+        if os.path.exists(dst):
+            sys.exit(f"refusing to overwrite {dst}: two members of the IPSW share the name {base}")
+
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
         with z.open(name) as src, open(dst, "wb") as f:
             while chunk := src.read(1 << 20):
@@ -165,7 +170,6 @@ EOF
 	say "unpack-ipsw: wrote $OUT_FW/ and $OUT_RAW/"
 else
 	plan "extract BuildManifest.plist, kernelcache, *.dmg, Firmware/*.im4p to $OUT_FW/"
-	plan "expand the APFS containers into $OUT_RAW/"
 	plan "write $OUT_FW/.provenance"
 	say
 	say "dry run complete. Re-run with --apply to write."

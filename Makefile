@@ -23,7 +23,7 @@ BUILD   := build
 VKBRIDGE := $(BUILD)/host/vkbridge/vkbridge
 PROBE   := $(BUILD)/guest/iosvm-probe
 
-.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule
+.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images
 
 help: ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -37,17 +37,17 @@ doctor: ## report what this machine lacks, and what to install
 # ---------------------------------------------------------------------------
 
 test-open: provenance ## every check that needs no Apple file (the contributor gate)
-	@echo "== protocol units =="
-	@if [ -f tests/unit/run.sh ]; then tests/unit/run.sh; else echo "  (none yet)"; fi
-	@echo "== fake-gpu =="
-	@if [ -f tests/fake-gpu/run.sh ]; then tests/fake-gpu/run.sh; else echo "  (none yet)"; fi
-	@echo "test-open: green"
+	@ran=0; \
+	if [ -f tests/unit/run.sh ]; then tests/unit/run.sh; ran=$$((ran+1)); else echo "  protocol units: none yet (M2)"; fi; \
+	if [ -f tests/fake-gpu/run.sh ]; then tests/fake-gpu/run.sh; ran=$$((ran+1)); else echo "  fake-gpu: none yet (M2)"; fi; \
+	echo "test-open: provenance clean, $$ran test suite(s) run"
 
 provenance: ## no Apple artifacts, no undeclared binaries, no credentials
 	@$(PYTHON) tools/provenance-check.py --root .
 
-style: ## SPDX headers + clang-format check
+style: ## SPDX headers, dangling doc references, clang-format
 	@$(PYTHON) tools/check-spdx.py
+	@$(PYTHON) tools/check-links.py
 	@if git ls-files -z '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' | grep -qz .; then \
 		git ls-files -z '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' \
 			| xargs -0 clang-format --dry-run --Werror; \
@@ -61,49 +61,59 @@ test: test-open ## everything, including the parts that need a GPU
 	@$(MAKE) test-gpu
 
 test-gpu: ## vkbridge + probe against lavapipe (no Apple file needed, needs a Vulkan driver)
-	@echo "test-gpu: not implemented yet (M2)"
+	@echo "test-gpu: FAILS BY DESIGN — not implemented until M2 (docs/phases.md)" >&2
+	@exit 1
 
 # ---------------------------------------------------------------------------
 # Host side
 # ---------------------------------------------------------------------------
 
-host: $(VKBRIDGE) ## build host/vkbridge
-
-$(VKBRIDGE):
-	@echo "host: not implemented yet (M2)"
+host: ## build host/vkbridge
+	@echo "host: FAILS BY DESIGN — host/vkbridge is M2 (docs/phases.md)" >&2
+	@exit 1
 
 # ---------------------------------------------------------------------------
 # Guest side (needs the iPhoneOS SDK, so: a Mac — see ADR-009)
 # ---------------------------------------------------------------------------
 
 guest: ## build guest/metal-plugin
-	@echo "guest: needs the iPhoneOS SDK; not implemented yet (M2)"
+	@echo "guest: FAILS BY DESIGN — needs the iPhoneOS SDK, and is M2 (ci/mac.md)" >&2
+	@exit 1
 
 # ---------------------------------------------------------------------------
 # QEMU fork
 # ---------------------------------------------------------------------------
 
-submodule: ## fetch the QEMU fork
+submodule: ## fetch the QEMU fork (not vendored yet)
+	@if [ ! -f .gitmodules ]; then \
+		echo "submodule: no .gitmodules — the QEMU fork is not vendored yet (M2, docs/phases.md)" >&2; \
+		exit 1; \
+	fi
 	git submodule update --init --recursive
 
-qemu: submodule ## build QEMU with hw/virtio-iosvm-gpu
-	@echo "qemu: the hw/ device does not exist yet (M2); the unmodified fork builds with:"
-	@echo "      cd qemu && ./configure --target-list=aarch64-softmmu --disable-pvg && ninja"
+qemu: ## build QEMU with hw/virtio-iosvm-gpu
+	@echo "qemu: FAILS BY DESIGN — neither the fork nor hw/virtio-iosvm-gpu exists yet (M2)" >&2
+	@exit 1
 
 # ---------------------------------------------------------------------------
 # The guest that needs an IPSW — the contributor's own, never fetched
 # ---------------------------------------------------------------------------
 
-unpack: ## extract firmware from YOUR IPSW: make unpack IPSW=/path/to/your.ipsw
+unpack-plan: ## show what unpack would do, write nothing: make unpack-plan IPSW=/path/to/your.ipsw
 	@test -n "$(IPSW)" || { echo "give IPSW=/path/to/your.ipsw (see tools/unpack-ipsw.sh --help)"; exit 2; }
 	tools/unpack-ipsw.sh "$(IPSW)"
 
-images: ## build userland/system.apfs and userland/data.apfs from firmware/
+unpack: ## extract firmware from YOUR IPSW: make unpack IPSW=/path/to/your.ipsw
+	@test -n "$(IPSW)" || { echo "give IPSW=/path/to/your.ipsw (see tools/unpack-ipsw.sh --help)"; exit 2; }
+	tools/unpack-ipsw.sh "$(IPSW)" --apply
+
+images: ## build userland/system.apfs from an unpacked IPSW (APFS writer: M1)
 	tools/make-images.sh --apply
 
 run: ## boot the VM
-	@echo "run: not implemented yet (M0) — needs a firmware/ from your own IPSW"
-	@echo "      upstream reference: HakiOS 'make qemu-open' (no Apple file) and its QEMU Darwin path"
+	@echo "run: FAILS BY DESIGN — no boot harness here yet (M0 tail, docs/phases.md)" >&2
+	@echo "     what is proven, upstream: HakiOS 'make qemu-open' (no Apple file)" >&2
+	@exit 1
 
 clean: ## remove build products (never touches firmware/ or userland/)
 	rm -rf $(BUILD) logs

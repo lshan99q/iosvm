@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Check that every source file carries an SPDX license identifier.
 
-The rule (docs/adr/ADR-005-licensing.md): the first non-shebang, non-empty line of a source file
+The rule (CONTRIBUTING.md, section Code): the first non-shebang, non-empty line of a source file
 is a comment holding `SPDX-License-Identifier: <id>`. Generated files declare
 `SPDX-License-Identifier: MIT` too, plus `SPDX-FileCopyrightText: GENERATED` or similar.
 
