@@ -851,3 +851,26 @@ problem from the one this port has been solving.
 
 Recorded as a negative result with its evidence, which is worth as much as a positive one here: it
 rules out the cheapest explanation and names the next one.
+
+## Addendum 22: doing something with the system once it is up
+
+`qemu/wait-for-ui.sh` now takes `AFTER_CMD`: a shell command run while the guest is alive and the
+home screen is on the panel, before the machine is stopped. That is the hook any interaction test
+needs, and it exists because the alternative -- a bare boot that waits for frames, then taps -- kept
+landing on the boots that stall.
+
+The tap itself is a QEMU monitor command, because this port maps QEMU's virtio tablet and keyboard to
+its touch screen (`drivers/input/hakios.virtio_input.c`, enabled by `virtio_input=1`, which
+`run-darwin.sh` always passes):
+
+```sh
+TRIES=5 AFTER_CMD="bash /tmp/after-tap.sh" qemu/wait-for-ui.sh /tmp/home-tap.png
+```
+
+with `after-tap.sh` sending `mouse_move 620 1590`, `mouse_button 1`, `mouse_button 0` -- the Settings
+icon -- and capturing before and after.
+
+**State: the hook is written and exercised, the tap has not yet been seen to do anything.** Every run
+of it so far landed on a stalled boot (the script retries, and each attempt is minutes), so what is
+recorded here is the mechanism, not a result. The coordinates are the third column of the fourth row
+of icons in `docs/demo/home-screen.png`, which is where Settings sits.
