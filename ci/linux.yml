@@ -1,0 +1,90 @@
+name: linux-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Tier 1 — the gate. Runs on a bare runner, needs no Apple file, no QEMU fork, no GPU.
+  # This is the only job a contributor without an iPhone or a Mac must be able to pass.
+  provenance:
+    name: provenance + secrets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: No Apple artifacts, no undeclared binaries, no credentials
+        run: python3 tools/provenance-check.py --root .
+
+      - name: gitleaks (history, not just the work tree)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-open:
+    name: test-open (no Apple file)
+    runs-on: ubuntu-24.04
+    needs: provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential meson ninja-build pkg-config \
+            mesa-vulkan-drivers vulkan-tools libvulkan-dev
+
+      - name: Protocol unit tests
+        run: make -C . test-open
+
+  style:
+    name: style
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+          files=$(git ls-files '*.c' '*.h' '*.cc' '*.cpp' '*.hpp' '*.m' '*.mm' || true)
+          if [ -n "$files" ]; then
+            clang-format --dry-run --Werror $files
+          else
+            echo "no C sources yet — nothing to format"
+          fi
+
+      - name: SPDX headers
+        run: python3 tools/check-spdx.py
+
+  # Tier 2 — optional. Needs the QEMU fork and a GPU. Not required to merge.
+  vkbridge-fake-gpu:
+    name: vkbridge on lavapipe
+    runs-on: ubuntu-24.04
+    needs: provenance
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential meson ninja-build pkg-config \
+            mesa-vulkan-drivers vulkan-tools libvulkan-dev libdrm-dev
+      - run: make -C . test-gpu

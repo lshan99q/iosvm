@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: MIT
+# Signals per check. Not meant to be fast: refusing a bad commit costs a second.
+exclude: ^(qemu/|docs/demo/)
+repos:
+  # Refuse to commit anything under the directories we must never commit.
+  - repo: local
+    hooks:
+      - id: provenance
+        name: provenance — no Apple artifacts, no undeclared binaries, no credentials
+        entry: python3 tools/provenance-check.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: spdx
+        name: SPDX headers on every source file
+        entry: python3 tools/check-spdx.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: forbidden-paths
+        name: firmware/ and userland/ are git-ignored and must never be staged
+        entry: bash -c 'f=$(git diff --cached --name-only --diff-filter=ACM | grep -E "^(firmware|userland)/" || true); if [ -n "$f" ]; then echo "refusing to commit Apple-derived files:"; echo "$f"; exit 1; fi'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: clang-format
+        name: clang-format
+        entry: clang-format --dry-run --Werror
+        language: system
+        types_or: [c, c++, objective-c]
+        exclude: ^qemu/
+
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+        args: ["--severity=warning"]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.19.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: mixed-line-ending
+        args: [--fix=lf]
