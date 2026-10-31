@@ -100,16 +100,28 @@ Status 2026-10-31: **the data path is proven end to end on Linux, except one pie
 | Get the IPSW | **done** — `iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw`, 6,165,698,198 bytes, the exact size upstream's unpacker refuses to run without, downloaded from Apple's public CDN |
 | Extract it on Linux | **done** — `tools/unpack-ipsw.sh --apply`, 51 s, 48 MB of firmware and 7.2 GB of images; no Mac, no key service, this repository's first run against a real IPSW |
 | Read the system volume | **done** — 7-Zip 23.01 opens `096-04088-077.dmg` and yields the APFS volume `SydneyF20F66.D22D221OS.apfs` and its full Darwin tree (`Applications`, `System`, `usr`, `private`, `Library`, …) |
-| Turn that tree into `system.apfs` | **the one missing piece** — an APFS *writer* |
+| Turn that tree into `system.apfs` | **done** — 4.7 GB container, `apfsck` clean (details below) |
 
-The writer is not research either: upstream ships one in its `apfs/` tool directory — `mkapfs.py`,
-`apfs.py`, `dmg.py`, `verify.py` — about 5.7k lines of stdlib-only Python including its own test
-suite, validated by
-`apfsck` and by the kernel's `apfs_lib` reading every volume back. HakiOS licenses its tools and
-scripts **MIT**, so this is a matter of integrating it with attribution in `NOTICE` (or
-reimplementing the parts we need), not of inventing a filesystem.
+The writer was not research: upstream ships one in its `apfs/` tool directory, MIT-licensed, and
+`tools/apfs/` now carries `apfs.py` and `mkapfs.py` verbatim with an attribution header and a `NOTICE`
+row. `tools/make-images.sh --apply` is a real implementation on top of it:
 
-So M1 has no unresolved questions left — it has a known amount of work.
+- the root image's name comes **from the BuildManifest** (`OS`), not from a hardcoded file number;
+- it extracts the volume with 7-Zip and repairs the four symbolic links that 7-Zip's "dangerous path"
+  policy declines to create — normal on a Darwin volume (`AVFoundation.framework/Frameworks/
+  AVFAudio.framework` → `../../AVFAudio.framework`, inside the volume) — while still failing on any
+  other extraction error;
+- it stores files the way Apple does (`mkapfs.py -z`): small ones whole in the `decmpfs` attribute,
+  larger ones in 64 KiB zlib pieces in the resource fork;
+- it checks the result twice, because a check that cannot fail is worth nothing: `apfsck` (built from
+  `linux-apfs/apfsprogs`) and a 7-Zip read-back through a completely different parser.
+
+Measured on the real archive: **179,361 files, 136,413 directories, 2,324 symbolic links and
+1,187,306 data blocks — 15,735 compressed into resource forks, 155,371 in their attribute — into a
+4.7 GB container in 125 s.** `apfsck: clean`; the volume reads back as `System.apfs`.
+
+So the data half of M1 is finished. What remains is the guest half: a kernel that mounts this volume
+and an init that executes from it — code to write, not questions to answer.
 
 Unknowns
 1. What minimum set of device-tree nodes satisfies the platform expert? No published answer.

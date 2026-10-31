@@ -88,6 +88,21 @@ right and the code does use `vkCmdCopyBuffer`; the proof is what is missing, and
 oracle is in flight. `docs/phases.md` records the same thing, because a claim that survives in
 only one document is still a claim.
 
+And this is what the guest will mount — a real Darwin 16.5 system volume, built on Linux from a
+user-supplied IPSW, checked by `apfsck` and read back through a different parser:
+
+```
+$ ./tools/make-images.sh --apply
+  tree: 318098 entries, 8.8G
+  mkapfs.py: volume 0 "System": 179361 files, 136413 directories, 2324 symbolic links,
+             1187306 blocks of data (15735 compressed in their resource fork,
+             155371 whole in their attribute)
+  mkapfs.py: userland/system.apfs: 1233652 blocks of 4096 bytes, 256 free
+  built in 125s, 4.7G
+  apfsck: clean
+  7z read-back: volume "System.apfs"
+```
+
 It takes about eight seconds of wall clock on a 2014 Xeon: the kernel reaches the interrupt
 controller at 6.3 s of emulated boot and the expected `launchd` panic ends the run. The kernel is
 the upstream project's build, not ours — `tools/qemu-open.sh` says so, and that distinction is
