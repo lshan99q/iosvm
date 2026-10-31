@@ -121,3 +121,38 @@ prebuilt kernel and upstream's own images, in upstream's default configuration. 
 `mount_cryptex()` expects the OS cryptex as a separate APFS container (container `C` of `md0`, or its
 own device), and both images built here are single-volume containers -- so the cache is present as
 files but never mounted where dyld looks for it, and the shared-region setup has nothing to map.
+
+## Addendum 2: the user space boots -- launchd, 60 processes, SpringBoard
+
+Three fixes, each found by measurement, took the boot from "panics in the shared region" to "launchd
+runs the system".
+
+**1. The loader's device identity.** `xnuloader/identity.h` was the placeholder ("no Apple
+device-tree data"), so the kernel knew no hardware: launchd's libignition died with
+`failed to query hardware target: 22`. Generating it from the IPSW's device tree
+(`xnuloader/mkidentity.sh`, which needs an LZFSE decoder -- built from source, Ubuntu packages none)
+gives `hardware target: d22ap` and `Device: D22 / Hardware Model: iPhone10,3` in the panic banner.
+
+**2. The dyld shared cache has to be where dyld looks.** `strings rootfs/usr/lib/dyld` shows the two
+paths this dyld knows: `/System/Library/Caches/com.apple.dyld/` and `/Library/Caches/com.apple.dyld/`
+-- not the cryptex path the upstream image used. With the cache at the first of those, dyld stops
+saying `Library not loaded: /usr/lib/libSystem.B.dylib`.
+
+**3. The system manifest is not optional.** Building the image without
+`manifest=sysimage/system.manifest` leaves the volume without the directories only the manifest
+declares -- `/dev` among them -- and then `devfs_kernel_mount: kernel_mount failed: 2`, after which
+pid 1 cannot open `/dev/null` and exits. With the manifest, devfs mounts.
+
+The result, inside QEMU on this Linux host, with the kernel built here and an image built here:
+
+```
+Successfully spawned SpringBoard[4] because system support
+Successfully spawned notifyd[71] ... mediaserverd[7] ... configd[15] ... logd[70]
+Successfully spawned amfid[25] ... containermanagerd[42] ... keybagd[24] ... lockdownd[55]
+... 60 processes in total
+```
+
+`qemu/screendump.sh` captures the framebuffer: 1125x2436, and **entirely black**. That is the expected
+state of this milestone, not a defect in it: QEMU offers no GPU, so nothing draws. Turning that black
+screen into a picture is exactly what the vkbridge work (a real Vulkan backend on the host) and the
+guest-side Metal device are for -- the boot now reaches the point where rendering would matter.
