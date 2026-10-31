@@ -781,3 +781,38 @@ real  7m6.167s
 Three captures in a row now, from three separate boots (2:12, 2:49, and this one), which is the
 strongest statement this document can make about reproducibility: the pipeline works, and the retry
 is part of the procedure rather than a workaround to be embarrassed about.
+
+## Addendum 20: a heartbeat, and what it says about the stalls
+
+Because a stalled boot's log simply stops, the first question was whether the machine stops or only
+its writers. A thread that does nothing but sleep and log answered it, behind a boot argument so it
+costs nothing normally:
+
+```
+CMDLINE="cpus=4 fb_beat=0 hb=20"
+
+MiniIOMobileFramebuffer: heartbeat 2: 23 programs, 23 runnable, SpringBoard 9
+MiniIOMobileFramebuffer: heartbeat 3: 22 programs, 22 runnable, SpringBoard 9
+MiniIOMobileFramebuffer: heartbeat 7: 22 programs, 22 runnable, SpringBoard 9
+```
+
+while the programs' own log had stopped at 03:13:12:
+
+| question | answer from the heartbeat |
+|---|---|
+| is the kernel deadlocked? | **no** -- a kernel thread keeps being scheduled every 20 s |
+| did anything crash or exit? | **no** -- the program count holds, and SpringBoard keeps its pid |
+| is memory gone? | no: `free 2366 MB, ramfs 110 MB, programs 298` |
+| is the console stuck? | no: these lines are written to it while the programs' lines are not |
+
+So the stall is in the user space: alive, not crashed, not out of memory, doing nothing. That is a
+much smaller thing to look for than "the machine hangs", and it is now a *measured* statement rather
+than a guess.
+
+Two notes for whoever uses this:
+
+- the "runnable" count reading every program as runnable is almost certainly the metric and not the
+  machine: `p_stat` is read here without the process-list lock, as a diagnostic, and Darwin's `SRUN`
+  covers running and runnable both. The program count and SpringBoard's pid are the reliable parts.
+- the heartbeat is `hb=N` (seconds), off by default; it is in the same file as the frame pacing, and
+  the two together are how the display questions in this document were answered.
