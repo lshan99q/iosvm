@@ -168,7 +168,8 @@ def main() -> int:
         return 2
 
     docs = [f for f in tracked(root) if f.endswith(".md")] + [f for f in ("Makefile",) if (root / f).exists()]
-    adrs = {f for f in tracked(root) if f.startswith("docs/adr/ADR-")}
+    # Look on disk, not in the index: an ADR written in this same change must count.
+    adrs = {p.name for p in (root / "docs/adr").glob("ADR-*.md")}
 
     problems: list[str] = []
     checked = 0
@@ -187,7 +188,7 @@ def main() -> int:
                 problems.append(f"{rel}: names `{tok}`, which does not exist")
         for m in ADR.finditer(text):
             num = f"ADR-{m.group(1)}"
-            if not any(a.startswith(f"docs/adr/{num}-") for a in adrs):
+            if not any(a.startswith(f"{num}-") for a in adrs):
                 problems.append(f"{rel}: cites {num}, which has no file under docs/adr/")
 
     if problems:

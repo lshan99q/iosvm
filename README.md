@@ -74,6 +74,20 @@ controller at 6.3 s of emulated boot and the expected `launchd` panic ends the r
 the upstream project's build, not ours — `tools/qemu-open.sh` says so, and that distinction is
 the point of the exercise.
 
+## Repositories
+
+The components have different toolchains and different gates, so they are separate repositories
+pinned by this one (ADR-010). A contributor with a C compiler can improve the protocol; one with a
+GPU can work on the backend; neither needs a Mac or an iPhone.
+
+| Repository | What | Builds with | Gate |
+|---|---|---|---|
+| `iosvm` (this one) | docs, ADRs, tools, the compliance gate, the plan | python3, make | `make test-open` |
+| `iosvm-proto` | the wire protocol: packed structs, ring, codec, strict fake GPU | a C compiler | `make test` |
+| `iosvm-vkbridge` | the host Vulkan backend: object tables, replay, fences, probe | C++20 + Vulkan | `make test` on lavapipe |
+
+`hw/` and `guest/` stay in this repository until they need their own toolchain (ADR-010 §rules).
+
 ## What lives where — planned layout
 
 Only `tools/` and `docs/` exist today; the rest is where the work will go, and `docs/phases.md`
