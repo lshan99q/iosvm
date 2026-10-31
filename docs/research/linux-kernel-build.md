@@ -1112,3 +1112,20 @@ What that means for the state of the port, which is now worth stating as a whole
 | type on a keyboard | not tried; `virtio-keyboard-device` is there |
 
 The interface is now something a person can operate, not only photograph.
+
+### 28a. And it goes deeper: Screen Time, from the host
+
+One more tap from the host, on the Settings list: `qemu/tap.py 562 1586` -- meant for General, landed
+on Screen Time -- and the Screen Time page comes up (`docs/demo/screen-time-from-host.png`): the
+hourglass, "Get insights about your screen time...", Weekly Reports, Content & Privacy Restrictions,
+Downtime & App Limits, and the "Turn On Screen Time" and "Set Up Later" buttons.
+
+That is three levels deep from a cold boot, all of it driven from outside the machine:
+
+```
+home screen  --tap(683,1689)-->  Settings  --tap(562,1586)-->  Screen Time
+```
+
+Nothing in the guest was told to do any of this; the taps are `qemu/tap.py`, and everything after them
+-- launching the application, pushing a view, drawing a new page with buttons and icons -- is Darwin's
+own work through CoreAnimation and Mesa.
