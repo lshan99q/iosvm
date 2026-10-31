@@ -13,8 +13,9 @@ policy — it is a research project with best-effort maintenance.
 
 **Do not open a public issue, and do not paste a reproducer into a chat.**
 
-Use GitHub's private vulnerability reporting: `Security` tab → `Report a vulnerability`. If that is
-unavailable, mail the maintainer address in `MAINTAINERS.md`.
+Use GitHub's private vulnerability reporting: `Security` tab → `Report a vulnerability`.
+If that is unavailable, open an issue containing **only** the words "security contact requested"
+and no details, and a maintainer will reach out.
 
 Include: the version or commit, the host (distro, QEMU version, Vulkan driver), what you expected,
 what happened, and the smallest input that shows it. Rotate any credential you had to use to

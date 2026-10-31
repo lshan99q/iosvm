@@ -22,12 +22,9 @@ make guest SDK=iphoneos ABI=arm64e
 # produces build/guest/metal-plugin/libmetal-plugin.dylib
 ```
 
-Then, on the Linux side, inject what you built into your own image:
-
-```sh
-# YOUR image; nothing here is committed and nothing is uploaded
-./tools/inject-guest.sh --image userland/system.apfs --plugin build/guest/metal-plugin/libmetal-plugin.dylib
-```
+Then, on the Linux side, inject what you built into your own image. **The injection tool is M2 work
+and does not exist yet** — until it lands, mount your own `userland/system.apfs` with any APFS
+tool and copy the dylib into it. Whatever you do, do not commit the result.
 
 ## Rules that do not bend for the Mac step
 
@@ -39,6 +36,8 @@ Then, on the Linux side, inject what you built into your own image:
    from Apple, and it is not installing anything system-wide.
 4. **A change to the plugin is still reviewed like any other change.** Being unbuildable in CI
    does not make it unreviewable: keep the diff small and explain how you verified it in the PR.
+5. **The plugin's interface is `proto/`, not the dylib.** Anything the plugin does to the wire
+   format is reviewable on Linux against `tests/fake-gpu/`.
 
 ## What this costs the project
 

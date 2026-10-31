@@ -32,7 +32,7 @@ is copied from an IPSW, a firmware bundle, a device dump or any other Apple dist
 The list is deliberately empty. If a binary ever has to be committed, add it here **with its
 source and its SHA256**, in the same pull request, and say why in the commit body. `PROVENANCE.md`
 is a compliance-sensitive path: changing it needs a maintainer review (see
-`docs/adr/ADR-006-no-credentials.md` §Review).
+`docs/adr/ADR-006-no-credentials.md`; compliance-sensitive paths need a maintainer review).
 
 | Path | What it is | Made from | SHA256 |
 |---|---|---|---|

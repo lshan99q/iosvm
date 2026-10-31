@@ -76,8 +76,9 @@ be replaced without touching the backend.
   so we do not need to satisfy a guest driver ecosystem's protocol.
 - **HakiOS's QEMU path as the baseline** (ADR-008): it already boots a self-compiled XNU with its
   own drivers on a stock `virt` machine, and reaches a home screen with a user-supplied userland.
-- **No activation code, ever** (baseline ADR-006): the boot path never enters recovery mode, so
-  there is nothing to bypass. Adding a bypass would be both illegal and pointless.
+- **No activation code, ever** (baseline ADR-006, `docs/zh/engineering.md`; enforced by ADR-006 here):
+  the boot path never enters recovery mode, so there is nothing to bypass. Adding a bypass would be
+  both illegal and pointless.
 
 ## The three hard walls
 
@@ -85,7 +86,7 @@ Recorded here so they are not rediscovered as surprises:
 
 | Wall | Consequence | Where it is handled |
 |---|---|---|
-| No Secure Enclave | no keychain, no DRM, no App Store, no Apple services | out of scope, ADR-005 baseline |
+| No Secure Enclave | no keychain, no DRM, no App Store, no Apple services | non-goals in `docs/phases.md`; baseline ADR-005 in `docs/zh/engineering.md` |
 | FairPlay-encrypted `.ipa` | App Store apps cannot be run, ever | documented in `docs/phases.md` non-goals |
 | Apple GPU instruction set | no hardware emulation | ADR-002 translates at the API level |
 

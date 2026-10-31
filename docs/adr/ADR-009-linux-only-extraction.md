@@ -30,7 +30,7 @@ cache. No `hdiutil`, no `ipsw` CLI, no `otool`, no `codesign`, no macOS.
    must stay that way. Any step that needs macOS is a bug in the tool, not a documented
    limitation.
 2. The Mac requirement is confined to building `guest/metal-plugin`, which compiles ObjC against
-   the iPhoneOS SDK (see `IMPLEMENTATION.md` for M2). That code is **built once and shipped as a
+   the iPhoneOS SDK (M2, see `docs/phases.md`). That code is **built once and shipped as a
    guest-side component inside the user's own image**, never as an Apple-derived artifact.
 3. CI has one Linux tier that is the merge gate, and the Mac-only guest build is a documented
    manual step (`ci/mac.md`), not a CI job.
