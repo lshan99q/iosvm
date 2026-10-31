@@ -110,10 +110,54 @@ int main(int argc, char **argv)
 
     console = open("/dev/console", O_WRONLY);
     tell("fill_panel: console %d, %ux%u\n", console, width, height);
-    service = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
-    if (service == 0 || IOServiceOpen(service, mach_task_self(), 0, &connection) != 0) {
-        tell("fill_panel: no GPU service to put pixels on the panel with\n");
-        return 1;
+    io_service_t wanted = 0;
+
+    /* What is actually in the registry, before asking for a name that may not be there. A service
+     * made by hand rather than by a kext can be published under a name the matcher does not expect,
+     * and "no such service" and "a service with another name" look identical from here. */
+    {
+        io_iterator_t it = 0;
+
+        if (IOServiceGetMatchingServices(0, IOServiceMatching("IOService"), &it) == 0 && it != 0) {
+            io_object_t o;
+            int shown = 0, total = 0;
+
+            while ((o = IOIteratorNext(it)) != 0) {
+                char name[128];
+                io_name_t cls;
+
+                total++;
+                if (IORegistryEntryGetName(o, name) == 0 && IOObjectGetClass(o, cls) == 0) {
+                    if ((strstr(name, "Hakios") != NULL || strstr(cls, "Hakios") != NULL) &&
+                        shown < 8) {
+                        tell("fill_panel: registry: name=%s class=%s\n", name, cls);
+                        shown++;
+                    }
+                    /* Take the service while it is in hand: matching it again by name is what
+                     * failed, so the object the enumeration produced is the one to open. */
+                    if (wanted == 0 && strstr(cls, "HakiosGPU") != NULL) {
+                        wanted = o;
+                        IOObjectRetain(wanted);
+                    }
+                }
+                IOObjectRelease(o);
+            }
+            tell("fill_panel: registry: %d services, %d named Hakios\n", total, shown);
+            IOObjectRelease(it);
+        } else {
+            tell("fill_panel: registry: cannot enumerate\n");
+        }
+    }
+    service = wanted != 0 ? wanted : IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
+    {
+        kern_return_t opened =
+            (service == 0) ? -1 : IOServiceOpen(service, mach_task_self(), 0, &connection);
+
+        tell("fill_panel: service %#x, open %#x\n", service, opened);
+        if (service == 0 || opened != 0) {
+            tell("fill_panel: no GPU service to put pixels on the panel with\n");
+            return 1;
+        }
     }
     tell("fill_panel: %ux%u, %d seconds; corner %u %u %u %u, middle %u %u %u %u\n", width, height,
          seconds, shown[0], shown[1], shown[2], shown[3], shown[(size_t)(height / 2) * width * 4],

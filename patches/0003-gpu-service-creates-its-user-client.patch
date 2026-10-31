@@ -1,0 +1,41 @@
+Give the GPU service an explicit newUserClient
+
+The user client class (HakiosGPUUserClient) is only ever named as a string in the
+kIOUserClientClassKey property, so nothing in the kernel refers to it and the
+linker is free to drop it. With it dropped, every IOServiceOpen answers
+kIOReturnUnsupported even though the service itself is in the registry -- which is
+exactly what fill_panel saw: registry: name=HakiosGPU class=HakiosGPU, then
+open 0xe00002c7.
+
+Overriding newUserClient and allocating the class there makes the reference real.
+
+--- a/iokit/Kernel/hakios.gpu.cpp
++++ b/iokit/Kernel/hakios.gpu.cpp
+@@ class HakiosGPU : public IOService
+ public:
+ 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++	/* Explicit, so that the user client class is referenced from the kernel and cannot be
++	 * dropped by the linker. */
++	virtual IOReturn newUserClient(task_t owningTask, void * securityID, UInt32 type,
++	    OSDictionary * properties, IOUserClient ** handler) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(HakiosGPU, IOService);
+@@ (after OSDefineMetaClassAndStructors(HakiosGPUUserClient, IOUserClient);)
++IOReturn
++HakiosGPU::newUserClient(task_t owningTask, void * securityID, UInt32 type,
++    OSDictionary * properties, IOUserClient ** handler)
++{
++	HakiosGPUUserClient * client = new HakiosGPUUserClient;
++
++	if (client == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (!client->initWithTask(owningTask, securityID, type, properties) ||
++	    !client->attach(this) || !client->start(this)) {
++		OSSafeReleaseNULL(client);
++		return kIOReturnNoResources;
++	}
++	*handler = client;
++	return kIOReturnSuccess;
++}

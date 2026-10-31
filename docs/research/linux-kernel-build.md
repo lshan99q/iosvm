@@ -264,3 +264,29 @@ What is still open, and what is not:
 So the floor is now solid: whatever draws next -- a Metal device, a framebuffer test, a compositor --
 there is a working way to put its output in front of a person. That is the first time that has been
 true in this project.
+
+## Addendum 6: the user-space path, one IOKit answer at a time
+
+With the panel writable from the kernel, the next question is whether a *program* can paint it, and
+the answer has been getting narrower rather than louder. The sequence below is what four runs said,
+each an OSError code from `IOServiceOpen`:
+
+| what the program did | what it got |
+|---|---|
+| `IOServiceMatching("HakiosGPU")` then open | no service at all -- the matcher found nothing |
+| enumerated every IOService and looked for the name | `registry: name=HakiosGPU class=HakiosGPU`, 20 services, 1 named Hakios -- so the service *was* there and the matcher was the problem |
+| opened the object the enumeration produced | `open 0xe00002c7` (kIOReturnUnsupported): the service refuses user clients |
+| after giving the service an explicit `newUserClient` | `open 0xe00002be`: a different answer, so the client class is now reached and something later in its start-up refuses |
+
+The third line is the interesting one: `HakiosGPUUserClient` is named only as a string in the
+`kIOUserClientClassKey` property, so no code refers to it and the linker may drop it entirely -- in
+which case every open answers *unsupported* while the service looks perfectly healthy in the
+registry. `patches/0003-gpu-service-creates-its-user-client.patch` makes the reference real.
+
+What this is and is not:
+
+- it is **not** a rendering path yet -- nothing of ours has put a pixel on the panel from user space;
+- it is the last layer under one: the kernel can paint (addendum 5, the frame is real), and the only
+  missing step is a program it will accept;
+- the remaining error is a *different* one, which is what progress looks like in this kind of work:
+  not "nothing there", but "the client's start-up said no", and its reason is the next thing to read.
