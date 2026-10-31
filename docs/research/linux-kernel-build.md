@@ -1025,3 +1025,34 @@ So the state of the interface is: **it opens, it navigates, and it is driven by 
 What it cannot yet do is be driven from the host: the monitor's input events still do not reach the
 guest's virtio driver. The sender that works is a program inside the guest writing to
 `/dev/hakios-touch`, started before `init` because a launchd job of ours is not reliably executed.
+
+## Addendum 27: which part of the host's input reaches the guest
+
+Addendum 26 left one thing open: touches sent from inside the guest work, and the QEMU monitor's do
+not. Logging every event the virtio input driver receives (rate-limited to the first forty) put a
+number on it:
+
+```
+virtio-input: event from 1: type 1 code 272 value 1     <- EV_KEY, BTN_LEFT, pressed
+virtio-input: event from 1: type 0 code 0 value 0       <- EV_SYN
+virtio-input: event from 1: type 1 code 272 value 0     <- BTN_LEFT, released
+virtio-input: event from 1: type 0 code 0 value 0
+hakios: input: sample type 3 finger 0 at 0 0            <- the touch that came of it
+```
+
+So **the buttons arrive and the position does not**:
+
+| from the monitor | reaches the driver |
+|---|---|
+| `mouse_button 1` / `mouse_button 0` | **yes** -- EV_KEY for BTN_LEFT, then EV_SYN |
+| `mouse_move X Y` | no EV_ABS at all |
+| `input-send-event` with `abs` x/y | no EV_ABS at all |
+
+and the touch that results is at `(0, 0)`, which is why the interface never reacted to it. `info mice`
+confirms there is exactly one pointer device -- `QEMU Virtio Tablet (absolute)` -- so the device is not
+the ambiguity; the absolute coordinate events are simply not arriving.
+
+That is now a precise question about QEMU's virtio-tablet input path (or the driver's handling of it),
+and a much smaller one than "the host cannot drive the interface". For anyone continuing: the guest's
+own path (`/dev/hakios-touch` -> window server -> SpringBoard) is proven to work, so this last piece is
+the only thing between a machine that can be operated and one that can be operated from the host.
