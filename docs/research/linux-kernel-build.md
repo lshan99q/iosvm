@@ -755,3 +755,29 @@ What is still not known is why SpringBoard stops at that point in some boots. Th
 from a stalled boot does not show it waiting on anything: every daemon it depends on is alive, and
 `lsd` has spent the same processor time in both (`1:36` stalled, `1:35` successful). The log simply
 stops.
+
+## Addendum 19: seven minutes, measured, to a screen you can look at
+
+With the content check and the stall detection in `qemu/wait-for-ui.sh`:
+
+```
+$ time qemu/wait-for-ui.sh /tmp/ui-v2.png
+attempt 1 of 5
+  frames are flowing but the panel is still blank (8061 bytes)
+  frames are flowing but the panel is still blank (13157 bytes)
+the panel shows the system: /tmp/ui-v2.png (339390 bytes)
+
+real  7m6.167s
+```
+
+`docs/demo/home-screen-scripted.png` is that capture. The procedure is now:
+
+1. boot with `cpus=4 fb_beat=0` (the two arguments that matter, addendum 15);
+2. if the guest's log stops growing for two minutes, that boot is lost -- boot again;
+3. when the display driver reports frames, capture and *measure the picture*: under 30,000 bytes is
+   the boot logo or a black panel, not a screen;
+4. stop when the picture is a screen, and keep it.
+
+Three captures in a row now, from three separate boots (2:12, 2:49, and this one), which is the
+strongest statement this document can make about reproducibility: the pipeline works, and the retry
+is part of the procedure rather than a workaround to be embarrassed about.
