@@ -193,3 +193,41 @@ So the next step is not more guessing, it is instrumenting the guest: put the pa
 stdout *is* the console (the init path, whose stdio is the serial line) instead of behind launchd,
 and have it return a distinct exit code for each failure so the answer arrives even without a
 visible picture.
+
+## Addendum 4: the panel detour, and why it stopped
+
+The plan was to prove the display chain without Metal: paint pixels in a guest process, hand them to
+`kHakiosShow`, and see them in a capture. It did not get there, and the reason is worth recording
+because it is not the display path.
+
+The program (`guest/fill_panel.c`) is correct as far as it goes: it builds, it is a valid
+`Mach-O 64-bit arm64 executable`, and ldid signs it (`CodeDirectory ... flags=0x0(none)`). Installed
+in the system volume with a launchd job, it reaches:
+
+```
+xpcproxy spawned with pid 38
+internal event: SPAWNED, code = 0
+service state: xpcproxy
+internal event: SOURCE_ATTACH, code = 0
+```
+
+and then nothing -- no exec, no exit, for as long as the guest runs. Apple's own daemons in the same
+boot exit normally (`xpcproxy exited due to exit(78)`, `service state: exited`), so xpcproxy works;
+what does not work is *our* binary through launchd. Signing it changed nothing, which rules out a
+plain signature check as the cause. The likely difference is that this userland's own programs are
+never started by launchd at all -- they run from the RAM disk through `etc/rc`, a path that in the
+full-userland configuration the kernel does not take, because PID 1 there is the system volume's
+`/sbin/launchd`.
+
+So the honest summary of the black panel:
+
+| Question | Answer |
+|---|---|
+| Is the framebuffer set up? | yes -- 1125x2436, 4500 bytes per row, matching the loader's mode |
+| Does anything draw? | no: SpringBoard needs Metal and the Metal device here is a stub |
+| Can a guest process of ours paint it? | **not established** -- the launchd job never execs, so nothing of ours has run in that position |
+| Is the frustration a display bug? | no -- it is a launchd/xpcproxy question that has to be solved first |
+
+The next step is therefore not in the display code at all: run a program of ours from a context this
+userland *does* launch (a system-domain job, or an init path that is actually taken), and only then
+ask what the panel shows.
