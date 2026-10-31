@@ -619,3 +619,47 @@ One boot argument, no kernel change: `CMDLINE="cpus=4 fb_beat=0"`.
 Note that the app icons' *content* is drawn (camera, photos, mail, maps) while the two big widgets
 (Weather, Calendar) are white rectangles: a widget's content comes from an extension process, and on
 this machine those extensions are not running. The screen is real; the widgets are the honest gap.
+
+## Addendum 16: rendering performance, measured
+
+With the home screen on the panel (addendum 15), the numbers the driver reports about itself:
+
+```
+MiniIOMobileFramebuffer: 30 frames in 5140 ms (5 a second), 3766 us each in the driver,
+  after 3 us waiting for the GPU ... 0 swaps waited for the frame before, 0
+MiniIOMobileFramebuffer: 38 frames in 5037 ms (7 a second), 3576 us each in the driver ...
+```
+
+and the renderer's own account of one frame:
+
+```
+hakios-gl: frame 1120: 55 GL calls, 9 draws, 66 triangles; 1 picture copied out;
+  148544 us (75 handing on, 15 waiting, 7029 copying out)
+```
+
+148 ms a frame, of which ~7 ms is the copy to the panel and **~141 ms is Mesa drawing**. So the
+driver and the copy path are not the problem; the rasterizer is. That is what a software renderer
+costs for 2.7 million pixels, and it is why the panel updates at 5-7 frames a second.
+
+What actually helped, measured:
+
+| change | effect |
+|---|---|
+| `CMDLINE="cpus=4"` **and** `QEMU_SMP=4` | the guest clock stops running ~8x slower than the host; before this every measurement in this document was on one core |
+| `QEMU_TB_MB=1024..1536` | a bigger translation cache, less retranslation under TCG |
+| `fb_beat=0` | the difference between one swap ever and a live screen (addendum 15) |
+
+What was tried and rejected, with what it did:
+
+| change | result |
+|---|---|
+| `QEMU_SMP=8 CMDLINE="cpus=8"` | the guest stops making progress (its clock freezes); 4 is the working number |
+| `fbwidth=750 fbheight=1624` (a smaller logical screen, ~2.2x fewer pixels) | the UI stops drawing entirely: SpringBoard is tied to the mode's dimensions |
+| llvmpipe instead of softpipe | would need LLVM cross-built for arm64-darwin, since the JIT runs in the guest; a project of its own |
+
+**About GPU acceleration, plainly:** it cannot happen on this host. The accelerated path in this tree
+is `gpu=1` with Mesa's `freedreno` driver talking to the kernel's GPU service, and the service only
+exists when the Adreno GPU does (`HakiosGPUStart()` is called from the Adreno driver). QEMU has no
+Adreno and no firmware for one, so the honest rendering path here is `softpipe` on the guest's CPUs.
+What was optimised is what exists: cores, translation cache, and the display pacing that was silently
+throwing every frame away.
