@@ -40,8 +40,11 @@ repos:
         types: [shell]
         args: ["--severity=warning"]
 
+  # Secret scanning, independent of tools/provenance-check.py (which is what CI runs).
+  # pre-commit builds this hook from Go source, so a contributor needs a Go toolchain for it;
+  # `make provenance` covers the same ground with nothing but python3, and is the gate.
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.19.2
+    rev: v8.30.1
     hooks:
       - id: gitleaks
 
