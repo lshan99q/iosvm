@@ -173,13 +173,15 @@ int main(int argc, char **argv)
         }
         usleep(200000);
     }
-    /* Leave the frame where it can be looked at: this guest halts with the picture on the panel, so
-     * a capture taken after the halt is the picture and nothing else. */
-    tell("fill_panel: halting with the picture on the panel\n");
-    {
-        /* the SDK's headers carry no sys/reboot.h; this is the call and flag init.c uses */
-        extern int reboot(int);
-        reboot(0x80000000); /* RB_HALT */
+    /* Stay, rather than halting: the guest's halt takes the machine down with it, and the picture
+     * has to be on the panel while someone is looking. This is the frame the capture should show.
+     */
+    tell("fill_panel: the picture is on the panel, staying for a while\n");
+    for (int i = 0; i < 600; i++) {
+        struct show again = {(uint64_t)(uintptr_t)shown, width, height, width * 4, 0};
+
+        IOConnectCallStructMethod(connection, 0x7f, &again, sizeof(again), NULL, NULL);
+        usleep(200000);
     }
     return 0;
 }

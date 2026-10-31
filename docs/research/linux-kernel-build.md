@@ -290,3 +290,28 @@ What this is and is not:
   missing step is a program it will accept;
 - the remaining error is a *different* one, which is what progress looks like in this kind of work:
   not "nothing there", but "the client's start-up said no", and its reason is the next thing to read.
+
+## Addendum 7: a program of ours paints the panel
+
+The frame in `docs/demo/userland-frame.png` was drawn by a **user-space process**: `guest/fill_panel.c`,
+running from the RAM disk, opened the GPU service, called `kHakiosShow` and put its own picture on the
+1125x2436 panel. The host captured it. Nothing Apple's UI drew is in it -- it is a gradient, four
+colour bars and a white square, exactly what the code writes -- which is the point: the path works,
+so whatever draws next has somewhere to put its output.
+
+Three kernel-side layers had to give way, each found by its own error, in order:
+
+| layer | what refused | what it was |
+|---|---|---|
+| the service | not in the registry at all | `HakiosGPUStart()` is called only by the **Adreno** driver, which a machine without that GPU never runs -- so the panel was writable and unreachable |
+| the user client | `open 0xe00002c7` (unsupported) | `HakiosGPUUserClient` is named only as a string, so nothing referenced it and the linker could drop it |
+| the client's start | `open 0xe00002be` (no resources) | `HakiosGPUUserClient::start()` demanded `hakios_gpu_ready()`, which is false without a GPU -- although the one selector that matters (`kHakiosShow`) never touches a GPU |
+
+With those three, `open 0` and `on the panel (0)`: every call succeeded.
+
+Patches: `0001` (display brings up the service), `0002` (stage0 runs a painter first),
+`0003` (explicit `newUserClient`), `0004` (the client starts without a GPU).
+
+What is still true: this is **our** picture, not the system's. SpringBoard still cannot draw, because
+it needs Metal and the Metal device here is a stub. But the floor is now under the *user-space*
+layer too, which it was not before -- and that is the layer a Metal device would have to live in.

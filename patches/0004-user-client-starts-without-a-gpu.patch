@@ -1,0 +1,19 @@
+The GPU user client starts on a machine with no GPU
+
+HakiosGPUUserClient::start() refused unless hakios_gpu_ready(), which is false without
+the Adreno GPU. But the selector that has to work without one is kHakiosShow: it
+copies pixels into the boot framebuffer and touches no GPU. The dispatch already
+answers kIOReturnNotReady to every other selector on such a machine, so the check in
+start() only made the panel unpaintable -- which is exactly what it did.
+
+--- a/iokit/Kernel/hakios.gpu.cpp
++++ b/iokit/Kernel/hakios.gpu.cpp
+@@ HakiosGPUUserClient::start(IOService * provider)
+-	if (!hakios_gpu_ready() || !IOUserClient::start(provider)) {
++	/* No GPU is required to open this client: the one selector that must work without
++	 * one is kHakiosShow, which copies pixels into the boot framebuffer and never touches
++	 * a GPU. The dispatch below already answers kIOReturnNotReady to every other selector
++	 * on such a machine, so refusing here only kept the panel unpaintable. */
++	if (!IOUserClient::start(provider)) {
+ 		return false;
+ 	}
