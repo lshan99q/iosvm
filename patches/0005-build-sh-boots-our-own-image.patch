@@ -1,0 +1,36 @@
+# build.sh: the dyld cache at both paths, and no demo job that halts the machine
+
+@@ -375,7 +375,10 @@
+ 	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
+ 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
+ 	# fairplayd among them).
+-	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
++	# Not com.hakios.demo: that job runs the small image's init a second time with rc.jobs, and
++	# that init ends with reboot(RB_HALT) -- a machine whose whole user space is up and then goes
++	# down at fifteen seconds. It stays out of this image; the two that are wanted stay in.
++	cp com.hakios.wifi.plist com.iosvm.fillpanel.plist root/LaunchDaemons/
+ 	VOLUME=""
+ 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
+ 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
+@@ -465,7 +468,7 @@
+ [ -d root/lib/HakiosAudio.driver ] && ln -s /redwood/lib/HakiosAudio.driver root/hal/HakiosAudio.driver
+ # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
+ # as it is, which the kernel's drivers use where it lies in memory (drivers/storage/hakios.image.c)
+-python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
++python3 ../tools/apfs/mkapfs.py ${ROOTZ:--z} --plain fw -o root.apfs redwood=root | tail -1
+ [ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
+ 
+ # --- the RAM part of a boot off the flash: FLASHBOOT=1 -> flashboot.apfs --------------------------------
+@@ -640,6 +643,12 @@
+ 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
+ 		ln -f "$f" $D/
+ 	done
++	# dyld looks for the cache at /System/Library/Caches/com.apple.dyld before it looks anywhere else
++	# (strings of the dyld in this rootfs say so), and the cryptex is where it is assembled above. A
++	# symlink, not a second copy: the image has to stay small enough to live in RAM beside Darwin.
++	mkdir -p sysroot/System/Library/Caches
++	ln -sfn /System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
++		sysroot/System/Library/Caches/com.apple.dyld
+ 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
+ 	# files in 2.5 GB, what fits into the phone's RAM beside Darwin
+ 	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$DARWIN/system.manifest | tail -1

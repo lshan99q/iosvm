@@ -1,0 +1,19 @@
+@@ -1527,6 +1527,18 @@
+ 	(void)envp;
+ 	if (argc > 0 && strncmp(argv[0], "/redwood/", 9) == 0) {
+ 		base = "/redwood";
++	} else {
++		/*
++		 * Not every way of starting this program passes an argv: the kernel's first exec passes
++		 * none at all, and then argv[0] says nothing about where the image is. Look for the image
++		 * instead of asking how we were called -- without it, every path below ("/etc/rc") is
++		 * looked for in the wrong tree and the boot ends quietly at "init: done".
++		 */
++		struct stat st;
++
++		if (stat("/redwood/etc/rc", &st) == 0) {
++			base = "/redwood";
++		}
+ 	}
+ 	/* Not process 1: a command runner, "init FILE" (this is how a launchd job runs a list of commands). */
+ 	if (getpid() != 1) {

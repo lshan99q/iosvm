@@ -401,3 +401,38 @@ So the honest scoreboard for the *built* image is:
 
 Both halves are real and they are not the same image. The next piece of work is the shared region in
 a built image -- a narrow question with a clear test (the `check_np` failure above).
+
+## Addendum 10: the built image boots the user space
+
+Five things had to be right, and each was found by its own failure. With them, an image built here
+(not the reference one) runs launchd, backboardd and SpringBoard:
+
+| what | before | after |
+|---|---|---|
+| `/sbin/launchd.darwin` | missing from the built sysroot | present, 525,088 bytes |
+| dyld shared cache | only at `/System/Cryptexes/OS/...` | that **and** `/System/Library/Caches/com.apple.dyld/` (a symlink, not a copy) |
+| the cache is usable | `no dyld cache` on every load | dyld finds it; that error is gone |
+| `com.hakios.demo` job | runs init again with `rc.jobs`; that init ends in `reboot(RB_HALT)` and takes the machine down at 15 s | not in the image |
+| how init finds its image | only from `argv[0]`; the kernel's first exec passes no argv, so `base` stayed "" and `/etc/rc` was looked for in the wrong tree | `stat("/redwood/etc/rc")` as well |
+
+The last one is the subtle one, and it explains a whole afternoon of quiet boots:
+
+```
+=== init: process 1, started as ?        <- argc is 0 here, so argv[0] said nothing
+```
+
+so `in_image("/etc/rc")` was `/etc/rc` -- not `/redwood/etc/rc` -- the read failed silently (the
+function returns on error), and init went straight on to `=== init: done ===` and `reboot(RB_HALT)`.
+
+What the boot looks like now:
+
+```
+$ exec /sbin/launchd.darwin
+com.apple.xpc.launchd| (user/501/com.apple.SpringBoard [7]) <Notice>: service spawned with pid 7
+backboardd[12] [SystemShell] Now monitoring "com.apple.springboard"
+backboardd[12] [BootUI] systemShellChangedWithPrimary: bundleIdentifier: com.apple.springboard
+```
+
+Also worth recording: `com.apple.SpringBoard.plist` logs one complaint that does not stop it --
+`Unknown key for plist importer (key: HighPriorityIO type: bool)` -- launchd ignores the key and
+spawns the job anyway.
