@@ -193,5 +193,22 @@ int main(int argc, char **argv)
         tell("fill_panel: cannot run %s\n", ps_argv[0]);
         _exit(1);
     }
+    /*
+     * A touch of our own, once the home screen is expected to be up: through the device a
+     * driver's presses go to, and from a process that exists whether or not launchd gets round
+     * to running a job of ours (ours did not -- see addendum 24 in the research note).
+     */
+    if (fork() == 0) {
+        char *tap_argv[] = {"/redwood/bin/rwtouch", "tap", "0.607", "0.693", NULL};
+        char *tap_envp[] = {"PATH=/bin:/sbin:/usr/bin:/usr/sbin", NULL};
+
+        for (int i = 0; i < 2400; i++) { /* 480 s in 200 ms steps */
+            usleep(200000);
+        }
+        tell("fill_panel: tapping the Settings icon\n");
+        execve(tap_argv[0], tap_argv, tap_envp);
+        tell("fill_panel: cannot run %s\n", tap_argv[0]);
+        _exit(1);
+    }
     return 0;
 }

@@ -973,3 +973,34 @@ They start and they are counted. The Weather and Calendar rectangles on the pane
 what is missing is the step between "the extension process is running" and "its rendered output
 reaches the layer the home screen composites" -- a different question from the daemon being absent,
 and further along than addendum 21 could tell.
+
+## Addendum 25: the interface answers -- tapping the Settings icon opens Settings
+
+`docs/demo/settings-app.png` is the iOS **Settings** application, on the panel, launched by a touch
+that this project sent:
+
+```
+fill_panel: tapping the Settings icon
+```
+
+and, a few seconds later, Settings: "Sign in to your iPhone", Airplane Mode with its switch, Wi-Fi,
+Bluetooth (Unavailable), Notifications, Sounds & Haptics, Focus, Screen Time, General, Control Center,
+Display & Brightness, Home Screen.
+
+The chain that was missing in addendum 24 turned out to be **the sender, not the input stack**:
+
+| link | state |
+|---|---|
+| a touch written to `/dev/hakios-touch` | `rwtouch` does it, and the child of our painter is what ran it |
+| the window server accepting the virtual HID service | it does; the retry warning appears once and the service is created |
+| SpringBoard launching the application the touch lands on | **it does** -- this screenshot |
+| the application drawing | **it does** -- through CoreAnimation and Mesa, as everything else here |
+
+The lesson recorded in addendum 24 needs correcting in one place: taps from the QEMU monitor still do
+nothing, but a touch written inside the guest does what it should. So the fault there is in how the
+monitor's events reach (or do not reach) the virtio input driver, and not in anything downstream of
+`/dev/hakios-touch`.
+
+Note what also had to be true for this to work: the machine has to be kept running (`KEEP=1`) for the
+touch to have a screen to land on, and the touch is sent from a process started before `init` --
+because a launchd job of ours is not reliably executed at all (addendum 4's xpcproxy pattern).
