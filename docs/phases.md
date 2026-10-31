@@ -93,6 +93,24 @@ ssh -p 2222 root@127.0.0.1 'ps aux | grep -c WindowServer'   # >= 1
 
 Exit condition: `WindowServer` exists as a process (it may crash immediately).
 
+Status 2026-10-31: **the data path is proven end to end on Linux, except one piece.**
+
+| Step | State |
+|---|---|
+| Get the IPSW | **done** — `iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw`, 6,165,698,198 bytes, the exact size upstream's unpacker refuses to run without, downloaded from Apple's public CDN |
+| Extract it on Linux | **done** — `tools/unpack-ipsw.sh --apply`, 51 s, 48 MB of firmware and 7.2 GB of images; no Mac, no key service, this repository's first run against a real IPSW |
+| Read the system volume | **done** — 7-Zip 23.01 opens `096-04088-077.dmg` and yields the APFS volume `SydneyF20F66.D22D221OS.apfs` and its full Darwin tree (`Applications`, `System`, `usr`, `private`, `Library`, …) |
+| Turn that tree into `system.apfs` | **the one missing piece** — an APFS *writer* |
+
+The writer is not research either: upstream ships one in its `apfs/` tool directory — `mkapfs.py`,
+`apfs.py`, `dmg.py`, `verify.py` — about 5.7k lines of stdlib-only Python including its own test
+suite, validated by
+`apfsck` and by the kernel's `apfs_lib` reading every volume back. HakiOS licenses its tools and
+scripts **MIT**, so this is a matter of integrating it with attribution in `NOTICE` (or
+reimplementing the parts we need), not of inventing a filesystem.
+
+So M1 has no unresolved questions left — it has a known amount of work.
+
 Unknowns
 1. What minimum set of device-tree nodes satisfies the platform expert? No published answer.
 2. How much of `userland/build.sh`'s APFS assembly has to be reimplemented to stay Linux-only?
