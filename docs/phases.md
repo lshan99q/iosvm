@@ -63,8 +63,13 @@ Status 2026-10-31: the boot is now a **script, not an anecdote** —
 upstream boot is **reproduced on the host** — HakiOS's prebuilt kernel
 (`xnu-8796.121.2`, built by that project from XNU source) reaches BSD initialisation in 6.4 s of
 emulated boot and then panics on `launchd`, because the test ramdisk carries no user space
-(`docs/m0-host-report.md`). Building that kernel here failed for lack of the theos toolchain, so
-"self-compiled on this host" is not yet true. The kernel half of M0 is de-risked; the remaining
+(`docs/m0-host-report.md`).
+
+**Update 2026-10-31: the kernel is now built here.** The theos toolchain is installed and five host
+tools are stood in for (cctools ld64, llvm-ar as libtool, cctools strip, mig, tcsh --
+`docs/research/linux-kernel-build.md`). `mach.development.bcm2837`, 15,771,248 bytes, boots through
+all five markers to BSD initialisation in 6.11 s. `tools/qemu-open.sh --kernel FILE` boots a build you
+made yourself. The kernel half of M0 is de-risked; the remaining
 work is the harness, the image tooling, and a kernel build of our own.
 
 ## M1 — user space boots

@@ -35,6 +35,8 @@ usage() {
 
 Options:
   --hakios DIR        checkout of the upstream kernel tree (default: $HAKIOS)
+  --kernel FILE       boot this Mach-O kernel instead of the tree's prebuilt one (e.g. one you
+                      built with the tree's own xnu-build.sh after xnu/apply.sh)
   --seconds N         how long to let QEMU run before killing it (default: 120)
   --mem SIZE          guest RAM (default: 6G; 6G is what the kernel asks for)
   --check             assert the markers, print a verdict, exit 0/1
@@ -49,6 +51,7 @@ say() { printf '%s\n' "$*"; }
 while [ $# -gt 0 ]; do
 	case $1 in
 		--hakios) HAKIOS=${2:?--hakios needs a directory}; shift ;;
+		--kernel) KERNEL_PATH=${2:?--kernel needs a file}; shift ;;
 		--seconds) SECONDS_RUN=${2:?--seconds needs a number}; shift ;;
 		--mem) MEM=${2:?--mem needs a size}; shift ;;
 		--check) CHECK=1 ;;
@@ -68,7 +71,9 @@ done
 command -v qemu-system-aarch64 >/dev/null || die "qemu-system-aarch64 is missing (apt install qemu-system-arm)"
 command -v python3 >/dev/null || die "python3 is missing"
 
-KERNEL=$HAKIOS/prebuilt/hakios-kernel
+# A kernel built from source can be pointed at directly (--kernel); otherwise the upstream tree's
+# prebuilt one is used, which is the same code the tree would produce.
+KERNEL=${KERNEL_PATH:-$HAKIOS/prebuilt/hakios-kernel}
 LOADER=$HAKIOS/prebuilt/loader.efi
 HELLO=$HAKIOS/prebuilt/userland/hello
 for f in "$KERNEL" "$LOADER" "$HELLO"; do

@@ -123,3 +123,37 @@ the boot regresses. Measured on this host: 6.3 s of emulated boot to the interru
 so an upstream change cannot break a pull request but does show up on Monday. `tools/doctor.sh
 --json` reports the host, not boot timings, and does not own this report; `tools/qemu-open.sh`
 does.
+
+## Update, 2026-10-31: the kernel is now built here, on Linux, from source
+
+The report above could only say "not self-compiled on this host" — the build wanted the theos
+toolchain that was not installed. It is installed now, and on top of it five host tools were stood in
+for, each of which had to be replaced for a specific reason (details in
+`docs/research/linux-kernel-build.md`): **ld** (cctools ld64 built from source; LLVM's ld64.lld does
+not implement `-alias_list`, which XNU needs, nor the segment layout the loader validates),
+**libtool** (must be `llvm-ar`; GNU ar's archive index is rejected), **strip** (GNU binutils cannot
+read Mach-O, and llvm-strip refuses the kernel; cctools' strip works), **mig** and **tcsh**.
+
+The result, on this machine:
+
+```
+mach.development.bcm2837   15,771,248 bytes   Mach-O 64-bit arm64 executable
+$ tools/qemu-open.sh --hakios ~/src/hakios --kernel .../mach.development.bcm2837 --check
+  [ok]   loader banner (XNULOADER v3)
+  [ok]   kernel banner (Darwin Kernel Version)
+  [ok]   paged memory (vm_page_bootstrap)
+  [ok]   security framework (MAC Framework)
+  [ok]   BSD half reached pid 1 (expected panic on launchd)
+  [i]   kernel reached the interrupt controller at 6.113122s
+qemu-open: PASS
+```
+
+So M0's last open item is closed: **the kernel this project boots is compiled on the project's own
+platform, from Apple's open source plus the upstream port.** `tools/qemu-open.sh --kernel FILE` exists
+because the kernel is not committed here, and a build of it has to be pointed at explicitly.
+
+Two caveats, stated rather than buried: the build ends with `check_all_exports` failing, which is a
+symbol-export verification step and does not affect the image (the boot above is from that image); and
+one line was dropped from the generated alias list (`_task_id_token_port_name_to_task`, whose plain
+name this tree defines itself, so the alias duplicated it) — a local artifact edit that a clean rebuild
+would redo, and which is recorded here rather than patched silently.
