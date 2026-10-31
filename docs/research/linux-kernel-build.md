@@ -1129,3 +1129,24 @@ home screen  --tap(683,1689)-->  Settings  --tap(562,1586)-->  Screen Time
 Nothing in the guest was told to do any of this; the taps are `qemu/tap.py`, and everything after them
 -- launching the application, pushing a view, drawing a new page with buttons and icons -- is Darwin's
 own work through CoreAnimation and Mesa.
+
+### 28b. Gestures work too, with two details that matter
+
+`qemu/tap.py --swipe 562 2425 562 500 20` returns to the home screen
+(`docs/demo/home-after-gesture.png`, the home screen again with the clock moved on). Two things had to
+be right, and both were found by getting them wrong first:
+
+| detail | wrong | right |
+|---|---|---|
+| the order of the events | positions, then a press and a release at the end | press **first**, move while the finger is down, release last |
+| where a swipe starts | `562, 2300` -- 135 px above the bottom edge: nothing happened | `562, 2425` -- the bottom edge itself: the home gesture |
+
+So the whole loop is now driven from outside the machine:
+
+```
+home screen --tap(683,1689)--> Settings --tap(562,1586)--> Screen Time
+            <--swipe(562,2425 -> 562,500)--
+```
+
+Taps open applications and pages; a swipe from the bottom edge dismisses them. Every one of those is
+`qemu/tap.py`, and every pixel after them is Darwin's own drawing.
