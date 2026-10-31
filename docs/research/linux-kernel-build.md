@@ -943,3 +943,33 @@ a main screen digitizer", `userland/src/inject_sb.c`).
 
 Recorded as a negative result: **the screen is real and the machine is interactive in principle, but
 nothing of ours has yet made it respond to a tap.**
+
+Two pieces of evidence collected afterwards narrow where that sits, and both are worth keeping:
+
+- **the touch surface *is* accepted.** `userland/src/inject.c` retries up to twenty times to get the
+  window server to open its virtual HID service, and in a live boot the warning appears exactly once:
+  `the event server has not opened "HakiOS touch screen" (attempt 1): making it again` -- then
+  `touch screen service 0x100b1ae20, buttons 0x100d19620`. Later the same boot logs
+  `[TouchDeliveryPolicy] TDPS server connection from SpringBoard.9`, so touch delivery is running;
+- **the synthetic touches never ran.** The job meant to send them (`com.iosvm.touch`, which calls
+  `rwtouch tap 0.607 0.693`) reached `SOURCE_ATTACH` and then `EXITED` in the same second -- the
+  xpcproxy pattern from addendum 4, not a problem with the touch path at all.
+
+So the next attempt at interaction should check that the job actually executed before concluding
+anything about the input stack; this one did not.
+
+### 24a. The widget extensions do spawn, and their content still does not draw
+
+With `chronod` in the job list (addendum 21), a boot that reaches the home screen also launches the
+widget extensions themselves:
+
+```
+(pid/50 [PodcastsWidget]) <Notice>: Service stub created for com.apple.cloudsettings...
+(pid/50 [PodcastsWidget]) ...
+[BatteriesWidget] [HomeWidget] [PodcastsWidget] [RemindersWidget] [StocksWidget]
+```
+
+They start and they are counted. The Weather and Calendar rectangles on the panel stay white, so
+what is missing is the step between "the extension process is running" and "its rendered output
+reaches the layer the home screen composites" -- a different question from the daemon being absent,
+and further along than addendum 21 could tell.
