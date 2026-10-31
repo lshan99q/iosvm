@@ -888,8 +888,8 @@ system:
 
 | image | boots | reached the screen |
 |---|---|---|
-| **without** the stage0 painter | 5 | **2 of 5** |
-| with it (the image that made every capture in this document) | 5, the same command | running when this was written |
+| **without** the stage0 painter | 5 | **2 of 5** (40%) |
+| **with** it (the image that made every capture in this document) | 3 of 5 when this was written | 1 of 3 (33%) |
 
 The five boots without the hook: `boot 1: no screen`, `boot 2: SCREEN (318082 bytes)`, `boot 3: no
 screen`, `boot 4: SCREEN (317387 bytes)`, `boot 5: no screen`. Two pictures, and both are the home
@@ -903,3 +903,11 @@ for; at five boots a side, a difference of one boot is not a result, and the hon
 A boot is counted as lost by the script itself: no frame reported by seven minutes, or no growth in
 the guest's log for two minutes. That is the same criterion the procedure uses, applied five times in
 a row, which is the only way an informal "about one in three" can become a number.
+
+Two runs, the same command, the same images apart from one hook, and the answer is the same on both
+sides within the resolution five boots can give: **the stall is not caused by anything this project
+added.** It is in the port -- the same boots that fail, fail after the same sequence, with the kernel
+alive and the programs alive (addendum 20), and the display driver never reports a frame.
+
+That is the useful shape of the result: it removes our own changes from the list of suspects and
+leaves the port's own start-up, which is where the next person should look.
