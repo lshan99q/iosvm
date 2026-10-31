@@ -132,8 +132,7 @@ question for a lawyer, not for an engineer:
 2. Apple ships the OS and System cryptex images unencrypted again, or publishes the key material
    through a channel meant for general use.
 3. A user supplies a userland image they obtained lawfully, and can say how.
-4. Someone establishes that an intermediate iOS version (17.x, 18.x) still ships plain images — then
-   the natural upgrade path from 16.5 is that version, not 26.
+4. *Answered on 2026-10-31, and it does not change the decision — see the addendum below.*
 
 ## Follow-up
 
@@ -144,3 +143,37 @@ question for a lawyer, not for an engineer:
   ADR).
 - Keep `docs/research/d1-prime-arm64e.md` and `docs/research/e2-kernel-port-surface.md` as the record of what the
   26 path would take, so the work is not lost if the gate reopens.
+
+## Addendum, 2026-10-31 — where the encryption actually starts (reopen condition 4)
+
+Read the `BuildManifest.plist` of each release straight out of the archive with HTTP range requests —
+the central directory first, then only that one entry, a few hundred KiB per release instead of a
+multi-gigabyte download:
+
+| Release | `OS` | `Cryptex1,SystemOS` | Form |
+|---|---|---|---|
+| iOS 16.6.1 (`20G81`) | `096-56967-082.dmg` | `096-56849-083.dmg` | plain |
+| iOS 17.7 (`21H16`) | `044-17482-018.dmg` | `044-17955-018.dmg` | **plain** |
+| iOS 18.6.2 (`22G100`) | `043-18757-102.dmg.aea` | `043-18359-102.dmg.aea` | **AEA** |
+
+So the encryption did not arrive with iOS 26: **it arrived with iOS 18.** iOS 17 still ships ordinary
+APFS containers. That is the answer to reopen condition 4, and it is better news than expected —
+there is a lawful version two major releases above 16.5.
+
+It does not move the target, because of a different fact: **iOS 17 dropped every arm64 device.**
+A11 (iPhone X, `iPhone10,3`) ends at iOS 16.7; iOS 17 requires A12 and up, all of which run arm64e
+userland. So the upgrade from 16.x to 17.x is not a data problem at all — it is the arm64e kernel
+work (standard-PAC backend, arm64e userland, `docs/research/d1-prime-arm64e.md`) that this release
+defers anyway.
+
+The practical ladder is therefore:
+
+| Ceiling | Data | Kernel cost |
+|---|---|---|
+| **16.x — chosen** | plain | arm64, works today |
+| 17.x | plain, lawful | arm64e: the whole HAS_STD_PAC port |
+| 18.x and later | AEA, behind Apple's key service | arm64e *and* a licensing question |
+
+So D1' stands, and its successor question is written down: *do we want arm64e badly enough to pay for
+it?* If the answer ever becomes yes, the userland is available lawfully in the 17.x line, and this
+ADR's cost estimate for the upgrade is the kernel work only.
