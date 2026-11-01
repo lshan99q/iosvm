@@ -37,3 +37,24 @@ gpu_host: 1125x2436 drawn in 25.29 ms
 frame back out. That already fits the 41.7 ms a frame that 24 a second allows -- and the copies are
 exactly what disappears when the host maps the guest's RAM instead (then it is the 1.9 ms `glquad`
 measures). The guest's half of this is the work that remains.
+
+## The loop, closed: the guest asks the host to draw
+
+`gpu_client` is the guest's half. Built for arm64-iOS, run inside the VM, it builds a layer,
+sends it to the host over the QEMU user-mode network, and gets the composited frame back:
+
+```
+gpu_client: connected to 10.0.2.2:9100
+gpu_client: 10962000 bytes of layer sent, waiting for the frame
+gpu_client: frame back after 6800.2 ms
+gpu_client: centre 127,127,60,255  corner 0,0,60,255
+gpu_host:   1125x2436 drawn in 32.35 ms
+```
+
+The frame is pixel-correct -- the centre is exactly the gradient the client generated at that pixel
+(127,127,60) -- so the drawing really did happen on the host's GPU and come back through the pipe.
+
+The two numbers say where the work is now. **Drawing: 32 ms on the V100. Transfer: 6.8 s**, because
+21.9 MB (a layer out, a frame back) is being copied twice through an emulated network stack that runs
+as ARM instructions under TCG. That copy is the thing shared memory removes: when the host maps the
+guest's RAM, the layer never moves, and the frame is written straight into the display surface.
