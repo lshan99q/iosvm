@@ -1398,3 +1398,36 @@ What this also settles, for the record: **jailbreaking is not the missing piece 
 never judges a signature (AMFI is a stand-in that accepts anything parseable, and ad-hoc signatures
 are handed `CS_PLATFORM_BINARY`), so there is nothing for TrollStore's CoreTrust trick to bypass. What
 is missing is registration and installation, in user space.
+
+### 34a. Entitlements can be forged here, and it is still not enough
+
+Two more attempts, both worth recording because they say where the wall really is.
+
+**An `ldid` exists on this machine** (`/tmp/ldid/ldid`, built from source earlier in the project),
+so a guest binary *can* carry an entitlement plist -- and because the port's AMFI reads that plist
+straight out of the signature without verifying anything (addendum on code signing), the plist is
+taken at face value. `register_app` was signed with `platform-application`,
+`com.apple.private.mobileinstallationservices`, `com.apple.lsd.modifydb`,
+`com.apple.private.launchservices.allowall` and a few more, and `ldid -e` shows them in the binary.
+
+**It still hangs.** With the entitlements in place the tool gets further:
+
+```
+register_app: workspace 0x101805fd0, 0 applications known before
+register_app: proxy for /Applications/TestApp.app -> 0x101907400
+register_app: calling registerApplication: ...
+```
+
+and there it stops, for as long as one cares to wait. `lsd` is alive throughout -- launchd reports it
+spawned, `INIT`, `Successfully spawned`, and never an exit -- so the call is not failing, it is simply
+never answered. Whatever `registerApplication:` sends over XPC, this process cannot get a reply to,
+entitlement or not.
+
+**Where the icons actually come from** is the other half of the answer: `SpringBoard.app` ships
+`DefaultIconState~iphone.plist`, which names the bundles the home screen lays out
+(`com.apple.Preferences` among them). So the layout is static and the applications behind it are
+resolved in SpringBoard's own privileged context -- not from the empty database a plain process sees.
+
+Which leaves the honest position: an application can be put into the image, it cannot yet be made to
+appear. Doing so needs the installation path Apple uses (installd, in the image but not in the job
+list) or a writer for the LaunchServices database, and both are userland work rather than a setting.
