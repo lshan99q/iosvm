@@ -94,9 +94,7 @@ The reply is `R done <ms>` after the records are replayed and the picture is in 
 ## Tests
 
 ```
-$ cc -O2 -o frame_replay frame_replay.c frame_record.c -lEGL -lGL
-$ cc -O2 -o host_glwire host_glwire.c -lEGL -lGL
-$ cc -O2 -o map_test   map_test.c map_stream.c -lEGL -lGL
+$ make
 
 $ ./map_test
 map_test: 1267 bytes of records
