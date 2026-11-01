@@ -94,3 +94,13 @@ describes:
 `patches/0007` and `0008` carry the two changes made while proving the input path: the event logging
 that showed what the driver actually receives, and the VNC console becoming the primary display (which
 is what makes a VNC client's pointer absolute rather than relative).
+
+### Operating it from a VNC viewer
+
+```sh
+tools/qemu/vncbridge.py            # 127.0.0.1:5910, the panel's own 1125x2436
+```
+point any VNC viewer at it and click: taps open applications, a one-second press raises the context
+menu, drags work. QEMU's own VNC console can only show the machine -- its pointer arrives at the
+guest as relative motion, which the touch driver cannot use -- so the bridge takes the client's
+pointer and sends it as touches instead, over QMP.
