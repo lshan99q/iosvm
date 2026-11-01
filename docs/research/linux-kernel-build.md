@@ -1635,6 +1635,12 @@ is worth separating from the guest's rendering, and it is very likely part of wh
 called "the screen does not appear on every boot": the machine often *has* drawn, and the display
 device is showing an older push.
 
+**Correction (Addendum 39):** that conclusion was a PPM reading artefact, not a property of the
+display device. QEMU writes pixman's padded line stride per row, and a reader that assumed packed RGB
+saw a sheared frame. Read correctly, the surface is live: a probe written into `0x33b9eb000` appears
+in the next screendump, and the whole frame is byte-for-byte the guest's. Keep the observation, but
+do not build on it.
+
 ### glwire: what was actually wrong, and what now runs
 
 The 22:44 note was right that pointing the 62 table slots at the recorders took the local state with
@@ -1711,3 +1717,165 @@ reason a `GL=1` boot of the current tree would still draw with its own renderer,
 Also open, and independent: QEMU's ramfb surface should follow the guest's framebuffer (or the
 screendump will keep being a frame behind), and the IOSurface stride (4608) and the panel's (4500)
 are different numbers that the show path has to reconcile.
+
+**Addendum 39 settles the first half:** the surface does follow the guest's framebuffer; the PPM
+reader was wrong. The segment and IOSurface question is the guest's, not the display device's.
+
+## Addendum 38: the names travel, and the wire's signatures were wrong
+
+The last note named the next step correctly -- the guest's object names have to travel with the
+calls -- but the wire had a second, older fault that would have stopped CoreAnimation's own stream
+before names ever mattered.
+
+**The trampolines did not fit the table.** `gen.py` had written every pointer argument as two C
+parameters, `(const void *p, GLsizei n)`, because `frame_record.c` could pass a size. An EAGL slot
+is called as `entry(table[0], glArguments...)` with exactly the GL signature, so the extra parameter
+was whatever happened to be in the next register. `glVertexAttribPointer` (6 GL arguments, the
+trampoline read a 7th), `glDrawElements` (4, read a 5th) and `glShaderSource` (4, invented two more
+than the GL has) were all reading garbage. Nothing had noticed because only `frame_record.c`, which
+called the recorders directly with the extra argument, had ever run.
+
+`spec.def` now writes the real GL signatures, and each pointer argument says how its byte count is
+worked out: `strlen` for a string, `count * sizeof(type)` for an index array, width and height and
+the pixel format for a texture, `count * 4` for a name array, the guest's `GLsync` for a fence. A
+vertex array has no size at pointer time and the GL does not read it until the draw, so the pointer
+tuple is remembered and the bytes go with `glDrawArrays`/`glDrawElements` in an opcode-200 record;
+the host applies them with `glVertexAttribPointer` and frees the copy after the draw.
+
+**The answers travel.** `glCreateProgram`, `glCreateShader`, `glGetUniformLocation` and
+`glFenceSync` append the guest's result to their record; `glGenTextures` and `glGenFramebuffers`
+already carry the filled name array in their `t`/`r` argument (the recorder runs after the local call,
+which is what fills it). `names.h` keeps the maps: textures, framebuffers, programs, shaders, syncs,
+and uniform locations keyed by `(guest program, guest location)`. Every call that consumes a name
+translates it, and the delete calls remove the mapping.
+
+**Per process, not per machine.** Each guest process has its own record arena and picture, and the
+host used to find them by one fixed magic word -- the first process's buffer, every time. The words
+now carry the process id, the host caches the address after one scan, and each connection gets its
+own GL context and maps.
+
+The acceptance without a guest uses names that are deliberately unlike the host's:
+
+```
+$ ./map_test
+map_test: 1267 bytes of records
+map_test: current program 3 (linked 1), framebuffer 2 (status 0x8cd5), 2 shaders: 4(compile 1) 5(compile 1)
+map_test: tint at 1 is 1 0.5 0 1
+map_test: layer unit at 0 is 0; position attribute 0; error 0
+map_test: centre pixel 51 51 0 255; maps: 2 textures, 1 framebuffers, 1 programs, 2 shaders, 1 syncs, 2 uniform locations
+map_test: PASS
+```
+
+The stream names its program 77, its shaders 88 and 89, its textures 101 and 102, its framebuffer 303
+and its uniform locations 5 and 6; the host context first makes dummy objects, so its names are
+3, 4/5, 8/9, 2 and 0/1. The centre pixel is the layer (0.2, 0.4, 0.8) times the tint uniform
+(1, 0.5, 0, 1); if any name or either location went across untranslated the pixel is black.
+
+The socket path is its own test, because map_test does not exercise the request line, the search for
+the picture in the RAM file, the context per connection or the reply:
+
+```
+$ ./e2e_test.py
+e2e_test: reply 'R done 0.09'
+e2e_test: centre pixel B=0 G=51 R=51 A=255
+e2e_test: PASS
+```
+
+and the panel path is unchanged by the new signatures:
+
+```
+$ ./frame_replay qemu/ram.img 0x33b9eb000
+frame_replay: 10962480 B of records for 10962000 B of layer; recorded in 6.7 ms, drawn in 59.0 ms;
+              0 pixels differ (0.000%), mean 0.000, worst 0
+```
+
+### What was not run, and why
+
+The live half -- the host receiving the current guest's own CoreAnimation calls -- was **not** run
+this round. The paused guest cannot provide it, and the reason is worth writing down instead of
+calling the synthetic tests an end-to-end result:
+
+- the guest was booted **without a network device** (`netcfg: SIOCAIFADDR: Device not configured`,
+  only `lo0` up), so `eagl_remote_flush()` has nowhere to connect;
+- it was booted **before** `/redwood/bin/glremote_on` existed in `root.apfs`, so
+  `eagl_remote_install()` returned early in every process, and the EAGL slots still hold the local
+  functions;
+- both are boot-time facts. Enabling the recorder in the live processes would mean patching their
+  tables and `local_entry[]` in guest memory, and the recorder would still have no transport.
+
+A second boot would need a 12 GB RAM file with the 2.4 GB system image in it. `/data3/iosvm-scratch`
+is the right place for it, but the file sandbox refuses writes there, and the fallback is `/tmp` with
+a 2 GB ceiling -- smaller than the image itself. The tree is ready for that boot, though:
+
+`root.apfs` was rebuilt with `GL=1 EXTRA=/tmp/glremote_on`, which puts the switch at
+`/redwood/bin/glremote_on`, and `libhakios.gl.dylib` now contains the corrected recorders (582,024
+bytes). The APFS writer's `-z` path starts a `ProcessPoolExecutor` and this sandbox denies its
+semaphore (`PermissionError: [Errno 13] ... SemLock`), so the image was made uncompressed:
+20,570,112 bytes instead of 4 MiB. That still fits the payload, but it is a build-environment
+workaround, not a decision.
+
+The command for the next boot, when there is room, is the ordinary one with a network:
+
+```
+QEMU_NET=1 QEMU_SMP=4 QEMU_TB_MB=1024 QEMU_RAM_GB=12 \
+  IMG=$PWD/userland/system.apfs ROOT=$PWD/userland/root.apfs \
+  timeout 1700 bash qemu/run-darwin.sh 1620 >/tmp/iosvm-live.log 2>&1 &
+tools/glwire/host_glwire qemu/ram.img 9110
+```
+
+with `/redwood/etc/glremote` optional (the default is `10.0.2.2:9110`, which is QEMU's user network).
+`QEMU_NET=1` adds `virtio_net=1` to the kernel's arguments. The window is still about ten minutes
+from `backboardd` before the Ticket spinlock panic.
+
+### What that boot will not fix
+
+`eagl.c` makes textures of its own for IOSurfaces (`-attachImage:`), outside the 62-call table; a
+frame that samples one of them cannot be rebuilt from the GL stream alone. And the recorder's arena
+is process-global, so two EAGL contexts used alternately in one process would interleave. Both are
+the next structural questions, independent of the names.
+
+## Addendum 39: the console surface is live -- the "slide-in" was a PPM stride
+
+The previous commit concluded that QEMU's console surface was a copy taken at the first update after
+the loader's mode set, because a magenta probe written into `0x33b9eb000` never appeared and every
+later screendump returned the same bytes. Both observations were artefacts of how the PPM was read.
+
+QEMU's `ppm_save()` writes `pixman_image_get_stride(linebuf)` bytes per row. For a 1125-pixel wide
+RGB image pixman's stride is 3376, not `1125 * 3 = 3375`; P6 has no padding. A reader that follows
+the format therefore starts every row one byte early, and 2436 rows later the picture is sheared by
+2436 pixels -- a diagonal wipe that is easy to mistake for a frame from the Settings slide-in. The
+bytes never changed because the settled page behind the shear never changed.
+
+Read with the stride QEMU actually wrote, the surface is a **live view**:
+
+- the screendump and the guest's framebuffer at `0x33b9eb000` are **0 differing pixels** over the
+  whole 1125 x 2436 frame, not a sample;
+- writing a 120 x 120 magenta rectangle at (40, 40) into the guest's framebuffer makes **14,400 of
+  14,400** of those pixels magenta in the next screendump, with **0** other differing pixels;
+- restoring the rectangle restores the frame byte for byte (**0** differing pixels).
+
+```
+$ tools/glwire/panel_probe.py qemu/ram.img
+panel_probe: 1. the settled screen
+panel_probe:    screendump vs guest framebuffer: 0 differing pixels
+panel_probe: 2. a magenta rectangle at 40,40 120x120
+panel_probe:    magenta pixels in the screendump: 14400 of 14400; other differing pixels: 0
+panel_probe: 3. restoring the framebuffer
+panel_probe:    after restore: 0 differing pixels
+panel_probe: PASS: the console surface is live
+```
+
+`docs/demo/glwire-settings-panel.png` was the sheared read; it is now the same moment read
+correctly, and `docs/demo/panel-probe.png` is the probe. The frame is the settled Settings page, not
+an animation.
+
+The readers were fixed (`tools/screendump.sh`, `panel_run.py`; `tools/qemu/screendump.sh` and
+`webvnc.py` already handled the stride), and `tools/qemu/qemu-ppm-stride.patch` is the one-line QEMU
+change that writes `width * 3` instead of the padded stride. It applies cleanly to QEMU 8.2.2
+(`patch -p1 --dry-run`), but the running machine's binary was not rebuilt: the surface itself did not
+need fixing.
+
+Two consequences. The ramfb surface does follow the guest framebuffer, so the "display device is
+showing an older push" explanation for "the screen does not appear on every boot" is **not** this;
+whatever that turns out to be, it is elsewhere. And the IOSurface stride (4608) and the panel's
+(4500) are about the guest's compositing, not about QEMU's display surface.
