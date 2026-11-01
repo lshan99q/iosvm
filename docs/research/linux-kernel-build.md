@@ -1600,3 +1600,111 @@ cd .. && QEMU_NET=1 ROOT=/tmp/root.net.apfs bash qemu/wait-for-ui.sh /tmp/net.pn
 The tree's `userland/root.apfs` is then never read by the boot and stays the other worker's. Two
 gotchas: `payload.bin` is still shared (write it only when no qemu is running), and `TMPDIR` is not
 honoured for the per-boot log, so the log is whichever `/tmp/tmp.*` is newest.
+
+## Addendum 37: the Settings frame, drawn by the host, pixel for pixel
+
+The handover said the guest was at launchd and `lsd`; it was not. By the time this session looked,
+the machine had already come up, drawn the home screen, and then died of a **kernel panic**, not of
+anything done to it:
+
+| boot | what it did | how it ended |
+|---|---|---|
+| `/tmp/iosvm-0100b.log` | backboardd 01:17:42, home screen in the framebuffer at 01:26 | `Ticket spinlock[0xfffffff007b68880]` timeout at 883 s, owner on CPU 3, panicked task `fseventsd` |
+| `/tmp/iosvm-0142.log` | backboardd 02:01:45, home screen, Settings | the same lock and the same 60 s timeout, panicked task `backboardd` |
+
+No host OOM, no `kill`; the owner of the lock is on CPU 3 and never releases it. With `cpus=4`
+under TCG this is reproducible within a quarter of an hour, so the working window is about ten
+minutes from `backboardd`, and a machine paused inside that window stays usable. The current guest
+(`/tmp/iosvm-0202.log`) was paused at the Settings page and left that way.
+
+### The two pictures
+
+The loader allocates the panel at `0x33b9eb000`, 1125 x 2436, 4500 bytes a row; the kernel draws
+the interface there, and the CoreAnimation IOSurfaces behind it are 1125 x 2436 **BGRA at 4608 bytes
+a row** (`MiniIOSurface: backboardd[15] created surface 1 ... 4608 bytes per row`) — 1152 pixels, not
+1125. Reading `0x33b9eb000` as 1125 x 2436 BGRA gives the UI exactly.
+
+QEMU's display surface is **not** that memory. With the machine paused, a screendump returned a frame
+from the middle of the Settings slide-in, and a magenta pixel written into `0x33b9eb000` (a marker,
+adjusted to both 4500 and 4608 strides) never appeared in it. The surface is a copy of a frame the
+guest pushed earlier: the guest's own screen had settled, the panel still showed the animation. That
+is worth separating from the guest's rendering, and it is very likely part of what the earlier notes
+called "the screen does not appear on every boot": the machine often *has* drawn, and the display
+device is showing an older push.
+
+### glwire: what was actually wrong, and what now runs
+
+The 22:44 note was right that pointing the 62 table slots at the recorders took the local state with
+them — `-attachImage:` asked for `GL_TEXTURE_BINDING_2D` and got 0. Four things were wrong, and one
+of them had not been seen:
+
+1. **The recorder has to keep the local call.** `remote_gl*` now calls the entry the slot held
+   before it was overridden (`local_entry[i]`, saved by `eagl_fill_table_remote()`), then records.
+   That is not a fallback: it keeps `eagl.c`'s own wrappers in the path, and it is what lets
+   `-attachImage:` see the texture it was just given.
+2. **4 MiB was too small for one call.** A panel-sized `glTexImage2D` is 10,962,000 bytes; the
+   recorder arena was 4 MiB and `wire_put` drops what does not fit, silently, leaving a record whose
+   header promises more than it holds. It is 32 MiB now.
+3. **`glVertexAttribPointer`'s array was freed with the call.** The GL keeps that pointer until the
+   draw; the dispatcher freed the copy immediately, so the host draw read freed memory. The
+   dispatcher keeps up to sixteen and frees them after the draw or flush.
+4. **`frame_end()` copied the local picture over the host's.** The remote write now happens after the
+   loop that copies the local texture into the surface, not before it.
+
+The host half is now a program that can be run without a guest: `frame_record.c` builds a frame with
+the generated guest recorders (`encode.inc`, unchanged), `frame_replay.c` reads the panel's frame out
+of the RAM file, replays the records through the same `dispatch.inc` `host_glwire` uses, draws it as
+a textured quad into a panel-sized framebuffer, reads it back and writes it into the same place.
+
+```
+$ cd tools/glwire && gcc -O2 -o frame_replay frame_replay.c frame_record.c -lEGL -lGL
+$ ./frame_replay ~/DSH-desktop/iosvm-work/hakios-xnu-kernel/qemu/ram.img 0x33b9eb000
+frame_replay: llvmpipe (LLVM 20.1.2, 256 bits) | 4.5 (Compatibility Profile) Mesa 25.2.8
+frame_replay: 10962430 B of records for 10962000 B of layer; recorded in 6.8 ms, drawn in 58.0 ms;
+              0 pixels differ (0.000%), mean 0.000, worst 0
+```
+
+The 6.8 ms is the recorder (memcpy mostly), the 58 ms is the draw and the readback. The sandbox this
+session ran in refuses `/dev/dri/*` and `/dev/nvidia*`, so EGL fell back to `llvmpipe`; the same
+binary asks for the EGL device first and picks the V100 where the nodes are open, which is the 1.9 ms
+`glquad` measured. **The V100 was not reachable from this session** -- that is a sandbox limit, not a
+result about the GPU.
+
+The frame that came out is the Settings page, and it is byte-identical to the one the guest drew:
+
+```
+$ md5sum docs/demo/glwire-settings-guest.png docs/demo/glwire-settings-host.png
+a4c814e766cb0eff2d3a1c2aeee95272  docs/demo/glwire-settings-guest.png
+a4c814e766cb0eff2d3a1c2aeee95272  docs/demo/glwire-settings-host.png
+```
+
+`docs/demo/glwire-settings-guest.png` is the guest's own settled frame read from `0x33b9eb000`;
+`docs/demo/glwire-settings-host.png` is what `frame_replay` read back after the GPU pass.
+`docs/demo/glwire-settings-panel.png` is QEMU's screendump of the same moment -- the slide-in frame
+described above, not the settled one. `docs/demo/glwire-home.png` is the home screen from the same
+boot.
+
+The whole sequence is one script:
+
+```
+$ tools/glwire/panel_run.py /path/to/qemu/ram.img --log /tmp/iosvm-0202.log --out /tmp/panel-run
+```
+
+It waits for the home screen (colour below the kernel's boot band, so the band does not pass for it),
+taps Settings at (663, 1690), waits for the page to settle, pauses the machine, runs `frame_replay`,
+and takes the screendump. The tap goes over QMP, as before; the pause is what keeps the picture from
+being overwritten by the guest's next frame.
+
+### What is still between this and the interface's own calls
+
+The host now draws a real panel frame from the wire format, and the guest's local renderer keeps
+working with the recorder installed. The missing link is still the traffic itself: calls that return
+a value (`glCreateProgram`, `glGenTextures`, `glGetUniformLocation`, the fence pair) stay local on
+both sides, so the host's object names are its own. For CoreAnimation's stream the names have to
+travel with the calls, and the dispatcher needs the guest name -> host name mapping (textures,
+framebuffers, programs, shaders, uniform locations). That is the next thing to build, and it is the
+reason a `GL=1` boot of the current tree would still draw with its own renderer, not the host's.
+
+Also open, and independent: QEMU's ramfb surface should follow the guest's framebuffer (or the
+screendump will keep being a frame behind), and the IOSurface stride (4608) and the panel's (4500)
+are different numbers that the show path has to reconcile.
