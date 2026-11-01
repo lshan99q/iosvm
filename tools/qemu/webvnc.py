@@ -79,6 +79,13 @@ function endPointer(ev) {
 img.addEventListener('pointerup', endPointer);
 img.addEventListener('pointercancel', endPointer);
 
+document.addEventListener('keydown', ev => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (ev.key === 'Backspace') { send({t: 'key', k: '\b'}); ev.preventDefault(); return; }
+  if (ev.key === ' ') { send({t: 'key', k: ' '}); ev.preventDefault(); return; }
+  if (ev.key.length === 1) { send({t: 'key', k: ev.key}); ev.preventDefault(); }
+});
+
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.binaryType = 'blob';
@@ -177,6 +184,29 @@ def abs_xy(x, y):
 
 def btn(down):
     return [{"type": "btn", "data": {"down": down, "button": "left"}}]
+
+
+# Where each key of the machine's own on-screen keyboard sits, in panel pixels: measured from a
+# screendump of it (docs/demo/software-keyboard.png). Typing in the browser becomes taps here, which
+# is the only way to enter text: the port has no HID keyboard service, so QMP key events reach the
+# guest's driver and stop there (addendum 29a).
+KEYBOARD = {
+    "rows": [
+        (1650, "qwertyuiop", [56, 168, 281, 393, 506, 618, 731, 843, 956, 1068]),
+        (1810, "asdfghjkl", [111, 224, 336, 449, 563, 675, 788, 900, 1013]),
+    ],
+    "shift": (72, 1960),
+    "delete": (1053, 1960),
+    "space": (420, 2100),
+    "zrow": (1960, "zxcvbnm", [224, 336, 449, 563, 675, 788, 900]),
+}
+KEY_POS = {}
+for _y, _letters, _xs in KEYBOARD["rows"]:
+    for _letter, _x in zip(_letters, _xs):
+        KEY_POS[_letter] = (_x, _y)
+_y, _letters, _xs = KEYBOARD["zrow"]
+for _letter, _x in zip(_letters, _xs):
+    KEY_POS[_letter] = (_x, _y)
 
 
 class Screen:
@@ -300,6 +330,33 @@ class Hub:
                 time.sleep(rest)
 
 
+def tap_at(x, y, port):
+    qmp(abs_xy(x, y) + btn(True), port)
+    qmp(btn(False), port)
+
+
+def type_key(char, port):
+    """One character, as the taps that would enter it on the machine's own keyboard."""
+    if char == "\b":
+        tap_at(*KEYBOARD["delete"], port)
+        return
+    if char == " ":
+        tap_at(*KEYBOARD["space"], port)
+        return
+    if len(char) != 1:
+        return
+    lower = char.lower()
+    position = KEY_POS.get(lower)
+    if position is None:
+        return                      # not on this layout (digits and punctuation need the 123 page)
+    if char.isupper():
+        tap_at(*KEYBOARD["shift"], port)
+        tap_at(*position, port)
+        tap_at(*KEYBOARD["shift"], port)
+        return
+    tap_at(*position, port)
+
+
 def make_handler(hub, qmp_port, page):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -357,6 +414,8 @@ def make_handler(hub, qmp_port, page):
                 elif kind == "up":
                     qmp(btn(False), qmp_port)
                     pressed = False
+                elif kind == "key":
+                    type_key(message.get("k", ""), qmp_port)
 
     return Handler
 

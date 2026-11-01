@@ -1298,3 +1298,24 @@ tools/qemu/webvnc.py --port 5980 --qmp 4465 --fps 4
 then `http://127.0.0.1:5980/` -- click to tap, drag to swipe, the panel keeps its aspect in whatever
 window you give it. No viewer library is fetched: the page, the WebSocket framing and the frame
 source are all in the one file, because this machine may have no way to reach the internet.
+
+### 32a. Typing, from the browser, without a keyboard service
+
+The port has no HID keyboard service -- the virtio driver maps only the power, volume and home keys
+and drops the rest (addendum 29a) -- so a browser's letters cannot reach Darwin as key events. They
+reach it as **touches instead**: the software keyboard is drawn like everything else here
+(`docs/demo/software-keyboard.png`), and a character is the tap that would hit its key.
+
+The key positions were measured from a screendump of the keyboard itself (row by row, by the runs of
+key-coloured pixels), and `tools/qemu/webvnc.py` turns each character into one, two or three taps:
+
+| typed | what is sent |
+|---|---|
+| `a` | one tap on `a` |
+| `A` | shift, `a`, shift |
+| space | one tap on `space` |
+| backspace | one tap on the delete key |
+
+`docs/demo/webvnc-typed-abc.png` is the FaceTime sign-in field showing `abc`, typed in a browser.
+Digits and punctuation are not mapped yet: they live on the keyboard's second page, which would need
+that page's own measurement.
