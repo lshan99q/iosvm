@@ -117,25 +117,11 @@ remote_glGenTextures(void *context, GLsizei a0, const void *a1, GLsizei n1)
 	gw_glGenTextures(a0, a1, n1);
 }
 
-static GLenum
-remote_glGetError(void *context)
-{
-	/* still local: glGetError() answers a value */
-	return my_glGetError();
-}
-
 static void
 remote_glGetIntegerv(void *context, GLenum a0, const void *a1, GLsizei n1)
 {
 	(void)context;
 	gw_glGetIntegerv(a0, a1, n1);
-}
-
-static void *
-remote_glGetString(void *context, GLenum a0)
-{
-	/* still local: glGetString() answers a value */
-	return my_glGetString(a0);
 }
 
 static void
@@ -229,13 +215,6 @@ remote_glDeleteProgram(void *context, GLuint a0)
 	gw_glDeleteProgram(a0);
 }
 
-static GLuint
-remote_glCreateShader(void *context, GLenum a0)
-{
-	/* still local: glCreateShader() answers a value */
-	return my_glCreateShader(a0);
-}
-
 static void
 remote_glShaderSource(void *context, GLuint a0, GLsizei a1, const void *a2, GLsizei n2, const void *a3, GLsizei n3)
 {
@@ -248,13 +227,6 @@ remote_glCompileShader(void *context, GLuint a0)
 {
 	(void)context;
 	gw_glCompileShader(a0);
-}
-
-static GLuint
-remote_glCreateProgram(void *context)
-{
-	/* still local: glCreateProgram() answers a value */
-	return my_glCreateProgram();
 }
 
 static void
@@ -327,13 +299,6 @@ remote_glUniformMatrix4fv(void *context, GLint a0, GLsizei a1, GLboolean a2, con
 	gw_glUniformMatrix4fv(a0, a1, a2, a3, n3);
 }
 
-static GLint
-remote_glGetUniformLocation(void *context, GLuint a0, const void *a1, GLsizei n1)
-{
-	/* still local: glGetUniformLocation() answers a value */
-	return my_glGetUniformLocation(a0, a1);
-}
-
 static void
 remote_glBindAttribLocation(void *context, GLuint a0, GLuint a1, const void *a2, GLsizei n2)
 {
@@ -376,24 +341,10 @@ remote_glGenerateMipmap(void *context, GLenum a0)
 	gw_glGenerateMipmap(a0);
 }
 
-static void *
-remote_glFenceSync(void *context, GLenum a0, GLuint a1)
-{
-	/* still local: glFenceSync() answers a value */
-	return my_glFenceSync(a0, a1);
-}
-
 static void
 remote_glDeleteSync(void *context, const void *a0, GLsizei n0)
 {
 	(void)context;
 	gw_glDeleteSync(a0, n0);
-}
-
-static GLenum
-remote_glClientWaitSync(void *context, const void *a0, GLsizei n0, GLuint a1, GLuint a2)
-{
-	/* still local: glClientWaitSync() answers a value */
-	return my_glClientWaitSync(a0, a1, a2);
 }
 

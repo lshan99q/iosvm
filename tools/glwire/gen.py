@@ -98,6 +98,8 @@ def emit_slots(calls):
     entry(table[0], arguments...), so each one takes the context first and ignores it."""
     lines = []
     for opcode, (name, types, returns) in enumerate(calls):
+        if returns:
+            continue            # answers a value: it stays local (see emit_slots)
         params = []
         args = []
         for index, kind in enumerate(types):
@@ -127,10 +129,37 @@ def emit_slots(calls):
     return "\n".join(lines)
 
 
+def emit_table(calls, slots_path):
+    """Point the EAGL table's slots for these calls at the remote trampolines.
+
+    eagl_slots.txt gives each entry's byte offset; the table is filled as table[offset / 8], so the
+    override is the same indexing with a different function."""
+    offsets = {}
+    for line in open(slots_path):
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].startswith("0x"):
+            offsets[parts[2]] = int(parts[0], 16)
+    lines = ["static void", "eagl_fill_table_remote(void **table)", "{"]
+    missing = []
+    for name, types, returns in calls:
+        if returns:
+            continue            # stays local: a recorder cannot answer a value
+        if name not in offsets:
+            missing.append(name)
+            continue
+        lines.append("\ttable[%#x / 8] = (void *)remote_%s;" % (offsets[name], name))
+    lines.append("}")
+    if missing:
+        lines.append("/* no slot offset for: %s */" % " ".join(missing))
+    return "\n".join(lines)
+
+
 def main():
     calls = parse(sys.argv[1])
     mode = sys.argv[2]
-    if mode == "slots":
+    if mode == "table":
+        print(emit_table(calls, sys.argv[3]))
+    elif mode == "slots":
         print(emit_slots(calls))
     elif mode == "encode":
         print(emit_encode(calls))

@@ -24,6 +24,33 @@
 
 #include "wire.h"
 
+static GLuint frame_buffer;
+
+static double
+now_seconds(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void
+make_frame_buffer(int width, int height)
+{
+	GLuint rb = 0;
+
+	if (frame_buffer != 0) {
+		glDeleteFramebuffers(1, &frame_buffer);
+	}
+	glGenFramebuffers(1, &frame_buffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, frame_buffer);
+	glGenRenderbuffers(1, &rb);
+	glBindRenderbuffer(GL_RENDERBUFFER, rb);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, width, height);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+}
+
 static EGLDisplay
 make_display(void)
 {
@@ -121,6 +148,99 @@ main(int argc, char **argv)
 		setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
 		for (;;) {
 			uint32_t header[2];
+			/* a frame request: "R <records magic> <frame magic> <w> <h> <records> <frame>\n" */
+			{
+				char peek = 0;
+				if (recv(client, &peek, 1, MSG_PEEK) == 1 && peek == 'R') {
+					char line[160];
+					int at = 0;
+					unsigned long long records_magic = 0, frame_magic = 0;
+					int width = 0, height = 0;
+					size_t records_bytes = 0, frame_bytes = 0;
+					unsigned char *records_at = NULL, *frame_at = NULL;
+
+					while (at < (int)sizeof(line) - 1 &&
+					    recv(client, &line[at], 1, 0) == 1 && line[at] != '\n') {
+						at++;
+					}
+					line[at] = '\0';
+					if (sscanf(line, "R %llu %llu %d %d %zu %zu", &records_magic, &frame_magic,
+					    &width, &height, &records_bytes, &frame_bytes) != 6) {
+						fprintf(stderr, "host_glwire: bad request '%s'\n", line);
+						break;
+					}
+					{
+						unsigned char pattern[8];
+						for (int i = 0; i < 8; i++) {
+							pattern[i] = (unsigned char)(records_magic >> (8 * i));
+						}
+						records_at = memmem(ram, (size_t)info.st_size, pattern, 8);
+						for (int i = 0; i < 8; i++) {
+							pattern[i] = (unsigned char)(frame_magic >> (8 * i));
+						}
+						frame_at = memmem(ram, (size_t)info.st_size, pattern, 8);
+					}
+					if (records_at == NULL || frame_at == NULL) {
+						send(client, "R missing\n", 10, 0);
+						break;
+					}
+					records_at += 8;
+					frame_at += 8;
+					{
+						unsigned char *records = malloc(records_bytes);
+						double began = now_seconds(), took;
+
+						if (records == NULL ||
+						    recv(client, records, records_bytes, MSG_WAITALL) !=
+						    (ssize_t)records_bytes) {
+							free(records);
+							break;
+						}
+						/* draw into a picture of the panel's size, then put it where the
+						 * guest will read it */
+						{
+							static int have_width, have_height;
+							if (frame_buffer == 0 || have_width != width ||
+							    have_height != height) {
+								make_frame_buffer(width, height);
+								have_width = width;
+								have_height = height;
+							}
+						}
+						glBindFramebuffer(GL_FRAMEBUFFER, frame_buffer);
+						glViewport(0, 0, width, height);
+						{
+							wire_buffer r;
+							size_t at2 = 0;
+
+							while (at2 + 8 <= records_bytes) {
+								uint32_t opcode, length;
+								memcpy(&opcode, records + at2, 4);
+								memcpy(&length, records + at2 + 4, 4);
+								if (at2 + 8 + length > records_bytes) {
+									break;
+								}
+								r.base = records + at2 + 8;
+								r.capacity = length;
+								r.at = 0;
+								dispatch(&r, opcode);
+								at2 += 8 + length;
+							}
+						}
+						glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, frame_at);
+						took = now_seconds() - began;
+						{
+							char reply[64];
+							int length = snprintf(reply, sizeof(reply), "R done %.2f\n", took);
+							send(client, reply, (size_t)length, 0);
+						}
+						free(records);
+						printf("host_glwire: frame %dx%d replayed, %.2f ms\n", width, height, took);
+						fflush(stdout);
+					}
+					continue;
+				}
+			}
 			wire_buffer r;
 
 			if (recv(client, header, sizeof(header), MSG_WAITALL) != (ssize_t)sizeof(header)) {

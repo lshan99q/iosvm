@@ -82,3 +82,30 @@ the guest will read it. `eagl_remote_frame()` hands that picture to whoever pres
 Still to attach in `eagl.c`: call `eagl_remote_begin()` when the boot argument asks for it, point the
 62 table slots at `remote_*` from `remote.inc`, and call `eagl_remote_flush(width, height)` from
 `frame_end()` (line 1027) instead of presenting the picture Mesa produced.
+
+## What the first end-to-end attempt measured, and why it drew nothing
+
+The wiring works mechanically -- the guest records, the host replays on the V100 -- but the
+interface drew **no frames at all**:
+
+```
+hakios-gl: asked for string 0x1f01: softpipe
+hakios-gl: -attachImage: target 0xde1, texture 0, an IOSurface of 'BGRA': not done
+guest frames = 0
+```
+
+The cause is structural, and it is worth writing down before the next attempt: eagl.c does its own
+GL work -- it creates textures and attaches IOSurfaces to them (`attachImage`) -- and those calls go
+through the same dispatch table that was just pointed at the recorders. So the bookkeeping that makes
+a picture exist was also sent to the host, and locally there was never a texture to draw.
+
+A static split is not available: of the 57 calls the interface needs, **49 are also used by eagl.c
+itself**. The separation has to be by *who is calling*, not by which function:
+
+- eagl.c's internal GL must bypass the table and reach OSMesa directly -- `OSMesaGetProcAddress` in
+  `gl_osmesa.c` already hands out those pointers, so a macro layer over the internal calls would do it;
+- CoreAnimation's calls then arrive through the table and hit the recorders, which is the traffic
+  worth sending.
+
+Until that exists, the remote path cannot draw, and the honest frame rate of the interface is
+whatever the local renderer gives: ~1.4 fps.

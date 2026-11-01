@@ -1,0 +1,54 @@
+static void
+eagl_fill_table_remote(void **table)
+{
+	table[0x10 / 8] = (void *)remote_glAlphaFunc;
+	table[0x30 / 8] = (void *)remote_glBindTexture;
+	table[0x40 / 8] = (void *)remote_glBlendFunc;
+	table[0xa88 / 8] = (void *)remote_glBlendFuncSeparate;
+	table[0xa98 / 8] = (void *)remote_glBlendEquation;
+	table[0x58 / 8] = (void *)remote_glClear;
+	table[0x68 / 8] = (void *)remote_glClearColor;
+	table[0x80 / 8] = (void *)remote_glClearStencil;
+	table[0x1c8 / 8] = (void *)remote_glCopyTexSubImage2D;
+	table[0x1e0 / 8] = (void *)remote_glDeleteTextures;
+	table[0x200 / 8] = (void *)remote_glDisable;
+	table[0x210 / 8] = (void *)remote_glDrawArrays;
+	table[0x220 / 8] = (void *)remote_glDrawElements;
+	table[0x248 / 8] = (void *)remote_glEnable;
+	table[0x2d0 / 8] = (void *)remote_glFinish;
+	table[0x2d8 / 8] = (void *)remote_glFlush;
+	table[0x318 / 8] = (void *)remote_glGenTextures;
+	table[0x348 / 8] = (void *)remote_glGetIntegerv;
+	table[0x620 / 8] = (void *)remote_glPixelStorei;
+	table[0x7e0 / 8] = (void *)remote_glScissor;
+	table[0x970 / 8] = (void *)remote_glTexImage2D;
+	table[0x978 / 8] = (void *)remote_glTexParameterf;
+	table[0x988 / 8] = (void *)remote_glTexParameteri;
+	table[0x9a0 / 8] = (void *)remote_glTexSubImage2D;
+	table[0xa80 / 8] = (void *)remote_glViewport;
+	table[0xab8 / 8] = (void *)remote_glActiveTexture;
+	table[0xbe8 / 8] = (void *)remote_glCompressedTexImage2D;
+	table[0x1000 / 8] = (void *)remote_glVertexAttribPointer;
+	table[0x1008 / 8] = (void *)remote_glEnableVertexAttribArray;
+	table[0x1010 / 8] = (void *)remote_glDisableVertexAttribArray;
+	table[0x1280 / 8] = (void *)remote_glDeleteProgram;
+	table[0x12a0 / 8] = (void *)remote_glShaderSource;
+	table[0x12a8 / 8] = (void *)remote_glCompileShader;
+	table[0x12b8 / 8] = (void *)remote_glAttachShader;
+	table[0x12c0 / 8] = (void *)remote_glLinkProgram;
+	table[0x12c8 / 8] = (void *)remote_glUseProgram;
+	table[0x12d8 / 8] = (void *)remote_glUniform1f;
+	table[0x12f0 / 8] = (void *)remote_glUniform4f;
+	table[0x12f8 / 8] = (void *)remote_glUniform1i;
+	table[0x1328 / 8] = (void *)remote_glUniform3fv;
+	table[0x1330 / 8] = (void *)remote_glUniform4fv;
+	table[0x1360 / 8] = (void *)remote_glUniformMatrix3fv;
+	table[0x1368 / 8] = (void *)remote_glUniformMatrix4fv;
+	table[0x13b8 / 8] = (void *)remote_glBindAttribLocation;
+	table[0x1508 / 8] = (void *)remote_glBindFramebuffer;
+	table[0x1510 / 8] = (void *)remote_glDeleteFramebuffers;
+	table[0x1518 / 8] = (void *)remote_glGenFramebuffers;
+	table[0x1530 / 8] = (void *)remote_glFramebufferTexture2D;
+	table[0x1550 / 8] = (void *)remote_glGenerateMipmap;
+	table[0x1870 / 8] = (void *)remote_glDeleteSync;
+}
