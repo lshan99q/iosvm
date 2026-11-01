@@ -1,0 +1,26 @@
+diff --git a/drivers/input/hakios.virtio_input.c b/drivers/input/hakios.virtio_input.c
+index 5cb0bb7..2cd8eb6 100644
+--- a/drivers/input/hakios.virtio_input.c
++++ b/drivers/input/hakios.virtio_input.c
+@@ -211,6 +211,21 @@ input_event(struct input_device *d, const struct input_event *e)
+ {
+ 	uint32_t button;
+ 
++	/*
++	 * What actually arrives, and from which device: the host's own input (the monitor's
++	 * input-send-event) did not appear to reach the interface, and the first question is whether
++	 * it reaches the driver at all. Rate-limited to the first few so a mouse does not drown the log.
++	 */
++	{
++		static unsigned logged;
++
++		if (logged < 40) {
++			logged++;
++			printf("virtio-input: event from %d: type %u code %u value %d\n",
++			    (int) (d - devices), e->type, e->code, e->value);
++		}
++	}
++
+ 	switch (e->type) {
+ 	case EV_ABS:
+ 		if (e->code == ABS_X) {

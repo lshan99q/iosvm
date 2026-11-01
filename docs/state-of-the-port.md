@@ -79,3 +79,18 @@ What was proven, with pictures in `docs/demo/` and `docs/demo/sequence/`:
 Two things that are easy to get wrong, both written down in the research note: the events must go
 over **QMP** (the human monitor's `input-send-event` delivers buttons and no coordinates), and in a
 gesture the finger is down for the whole thing — press, move, release, in that order.
+
+## The tools that reproduce it
+
+They live in `tools/qemu/`, copied from the working tree so that this repository contains what it
+describes:
+
+| tool | what it does |
+|---|---|
+| `wait-for-ui.sh` | boots, retries until a boot reaches a drawn screen, optionally leaves the machine running (`KEEP=1`) |
+| `tap.py` | a tap or a swipe at panel coordinates, sent from the host over QMP |
+| `demo.sh` | the whole sequence in one command |
+
+`patches/0007` and `0008` carry the two changes made while proving the input path: the event logging
+that showed what the driver actually receives, and the VNC console becoming the primary display (which
+is what makes a VNC client's pointer absolute rather than relative).
