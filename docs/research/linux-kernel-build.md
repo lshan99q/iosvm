@@ -1337,3 +1337,38 @@ What does not change: the guest's own ceiling. It presents about ten frames a se
 so somewhere around seven frames a second is all the animation this machine can do. The fixes above
 make the *interface* responsive -- a drag follows the finger instead of queueing -- and stop the
 viewer from taking the guest's time; they cannot make the guest draw faster than it draws.
+
+## Addendum 33: the frame-rate ceiling is not Mesa — it is CoreAnimation's own software renderer
+
+Measured while chasing 24 fps. Scrolling a Settings list is the workload:
+
+| display scale (`fbscale`) | rasterised pixels | scroll |
+|---|---|---|
+| 3 (the default, 1125x2436) | 2 740 500 | **~1.3 frames a second** |
+| 2 (750x1624) | 1 218 000 | (this is what the machine now runs) |
+| 1 (375x812) | 304 500 | **~2-4 frames a second**, and the panel's upscaling costs the driver 17-20 ms a frame instead of 3.5 |
+
+Nine times fewer pixels bought about twice the frame rate. That ratio is the finding: the cost is not
+per-pixel work in our rasteriser, it is **the emulated CPU executing the drawing code**, and the log
+says whose code that is:
+
+```
+hakios: no accelerated renderer; the software one will draw
+```
+
+CoreAnimation has a GPU renderer and a software one, and here it takes the software one -- because
+there is no Metal device to give it. So the picture is rasterised by Apple's software renderer, running
+as ARM instructions under QEMU's TCG, and only then scaled into the panel by `MiniIOMobileFramebuffer`
+(3.5 ms at scale 3, because writing 10.5 MB a frame is cheap; the drawing is what costs).
+
+That has two consequences worth writing down before anyone optimises the wrong thing:
+
+- **llvmpipe would not have helped the interface.** Mesa is behind `libhakios.gl`, which applications
+  that ask for GL use; it is not in CoreAnimation's compositing path. A faster software rasteriser
+  there changes games and GL demos, not the home screen;
+- **the only real lever is the GPU path this project exists to build** -- Metal's command stream
+  translated to the host's Vulkan (`proto/`, `host/vkbridge/`). 24 fps needs that, not tuning.
+
+What tuning can buy, measured or bounded: `fbscale=2` (2.25x fewer pixels, softer picture, and
+SpringBoard's red service bar appears at the top), and `fb_filter=0` (bilinear to nearest, ~5 ms a
+frame in the display thread). Both are one boot argument each.
