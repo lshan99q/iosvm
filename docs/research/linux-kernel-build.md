@@ -1372,3 +1372,29 @@ That has two consequences worth writing down before anyone optimises the wrong t
 What tuning can buy, measured or bounded: `fbscale=2` (2.25x fewer pixels, softer picture, and
 SpringBoard's red service bar appears at the top), and `fb_filter=0` (bilinear to nearest, ~5 ms a
 frame in the display thread). Both are one boot argument each.
+
+## Addendum 34: putting an application on the home screen — what does not work
+
+The goal was a third-party `.app` on the springboard, and from there an installer. Four things were
+measured, and three of them closed a door:
+
+| what was tried | what happened |
+|---|---|
+| copy a bundle into `/Applications` and rebuild the system image | **no icon.** The image verifiably contains `TestApp.app` (`apfs-tool ls`), the machine boots, the home screen is unchanged, and `lsd` never mentions it |
+| `LSRegisterURL` on the bundle | **the symbol does not exist** on this system: `register_app: no LSRegisterURL in MobileCoreServices` |
+| ask the runtime what is there instead | `LSApplicationWorkspace` has 155 instance methods including **`registerApplication:`**, `LSApplicationProxy` has **`applicationProxyForBundleURL:`**, and `defaultWorkspace` answers |
+| call it | the workspace object is built, the proxy for our bundle comes back non-null -- and the next call **hangs**. These are synchronous XPC calls into `lsd`, made from a process with no entitlement for them |
+
+One more fact explains the rest: **`allApplications = 0`**. LaunchServices starts with an empty
+database, so the home screen's icons do not come from it at first; something else (MobileInstallation,
+most likely) is what puts the stock applications there, and our bundle never entered that path.
+
+So the install channel is not a configuration: it needs either a process that holds the entitlement
+to talk to `lsd` (that is `installd`, which is in the image but not in the job list), or a writer for
+the LaunchServices database itself. That is a piece of work, not a setting -- and it is the same piece
+whether the application is a test bundle or WeChat.
+
+What this also settles, for the record: **jailbreaking is not the missing piece here.** The kernel
+never judges a signature (AMFI is a stand-in that accepts anything parseable, and ad-hoc signatures
+are handed `CS_PLATFORM_BINARY`), so there is nothing for TrollStore's CoreTrust trick to bypass. What
+is missing is registration and installation, in user space.
