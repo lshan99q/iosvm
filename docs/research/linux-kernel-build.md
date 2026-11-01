@@ -1276,3 +1276,25 @@ point at all.
 ```
 tools/qemu/vncbridge.py --port 5910 --qmp 4445 --fps 1     # then any VNC viewer on 127.0.0.1:5910
 ```
+
+## Addendum 32: watching and operating it from a browser
+
+`docs/demo/webvnc-focus-page.png` is machine 2's Settings, on the Focus page, opened by a click in a
+**browser**: `tools/qemu/webvnc.py` serves the page, pushes frames over a WebSocket, and turns the
+clicks into touches over QMP.
+
+Three things had to be true, and two of them were not at first:
+
+| piece | what it took |
+|---|---|
+| a frame quickly enough to feel live | `screendump` per request through **QMP**, not the human monitor: the file lands in ~0.12 s and is read before the next one starts, so the page runs at several frames a second |
+| more than one tool at the machine | QEMU's socket chardev serves **one** client: the first gets the greeting, later ones connect and wait forever. `tools/qemu/qmpmux.py` holds that one connection and serves many, so the web viewer, `tap.py` and a screendump can all be in use at once |
+| the pointer reaching the guest | the same discovery as addendum 31: QMP absolute events, never QEMU's VNC input path |
+
+```
+tools/qemu/qmpmux.py --qmp 4455 --port 4465        # one QMP connection, many clients
+tools/qemu/webvnc.py --port 5980 --qmp 4465 --fps 4
+```
+then `http://127.0.0.1:5980/` -- click to tap, drag to swipe, the panel keeps its aspect in whatever
+window you give it. No viewer library is fetched: the page, the WebSocket framing and the frame
+source are all in the one file, because this machine may have no way to reach the internet.
