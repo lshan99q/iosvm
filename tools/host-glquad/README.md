@@ -18,3 +18,22 @@ textured quad into a renderbuffer that size, and reads it back — every frame, 
 
 **1.9 ms a frame, with a 41.7 ms budget for 24 a second.** So the host is not the problem and never
 was; what is missing is the pipe that carries the guest's drawing to it.
+
+## gpu_host — the same drawing, on a socket
+
+`gpu_host` is the prototype the guest will talk to: it listens on a port, accepts a layer
+(`"F <w> <h> <bytes>\n"` then BGRA), draws it into a panel-sized frame on the GPU, and answers with
+the composited frame (`"O <w> <h> <bytes>\n"` then BGRA).  A `Q` closes the connection.
+
+Measured on this machine, with a real client sending a full 1125x2436 layer:
+
+```
+gpu_host: Tesla V100-SXM2-16GB/PCIe/SSE2 | 4.6.0 NVIDIA 580.178.04
+gpu_host: 1125x2436 drawn in 30.82 ms
+gpu_host: 1125x2436 drawn in 25.29 ms
+```
+
+25-31 ms a frame **including every copy**: 10.96 MB of layer in over TCP, upload, draw, 10.96 MB
+frame back out. That already fits the 41.7 ms a frame that 24 a second allows -- and the copies are
+exactly what disappears when the host maps the guest's RAM instead (then it is the 1.9 ms `glquad`
+measures). The guest's half of this is the work that remains.
