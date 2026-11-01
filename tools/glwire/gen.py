@@ -93,10 +93,46 @@ def emit_dispatch(calls):
     return "\n".join(lines)
 
 
+def emit_slots(calls):
+    """Trampolines that fit the EAGL dispatch table: every entry is called as
+    entry(table[0], arguments...), so each one takes the context first and ignores it."""
+    lines = []
+    for opcode, (name, types, returns) in enumerate(calls):
+        params = []
+        args = []
+        for index, kind in enumerate(types):
+            if kind in ("P", "N"):
+                params.append("const void *a%d" % index)
+                params.append("GLsizei n%d" % index)
+                args.append("a%d" % index)
+                args.append("n%d" % index)
+            else:
+                ctype = CTYPES[kind][0]
+                params.append("%s a%d" % (ctype, index))
+                args.append("a%d" % index)
+        ret = "void" if not returns else (CTYPES.get(returns, (returns, ""))[0] if returns in CTYPES else "void *")
+        signature = "void *context" + (", " + ", ".join(params) if params else "")
+        if returns:
+            # A call that returns a value cannot be answered by a recorder: the answer has to come
+            # from somewhere local. Object names (shaders, programs, syncs) additionally have to
+            # match the host's, which needs the name travelling with the call. Until that is done
+            # these stay local: the local implementation runs and the host is not told.
+            lines.append("static %s\nremote_%s(%s)\n{\n\t/* still local: %s() answers a value */\n"
+                         "\treturn my_%s(%s);\n}\n"
+                         % (ret, name, signature, name, name,
+                            ", ".join("a%d" % index for index in range(len(types)))))
+        else:
+            lines.append("static %s\nremote_%s(%s)\n{\n\t(void)context;\n\tgw_%s(%s);\n}\n"
+                         % (ret, name, signature, name, ", ".join(args)))
+    return "\n".join(lines)
+
+
 def main():
     calls = parse(sys.argv[1])
     mode = sys.argv[2]
-    if mode == "encode":
+    if mode == "slots":
+        print(emit_slots(calls))
+    elif mode == "encode":
         print(emit_encode(calls))
     else:
         print("switch (opcode) {\n%s\n\tdefault:\n\t\tfprintf(stderr, \"glwire: opcode %%u\\n\", opcode);"

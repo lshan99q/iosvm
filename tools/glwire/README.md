@@ -46,3 +46,20 @@ A stream of `glClearColor`, `glClear`, `glViewport` executes on the V100 without
    `glInsertEventMarkerEXT`, `glCopyTexSubImage2D` is there but untested end to end).
 
 None of that changes the arithmetic: the drawing is 6–14 ms on the host against 700 ms in the guest.
+
+## Both halves compile, and the records are the right size
+
+`remote.inc` holds the trampolines in the shape the EAGL table calls (`entry(table[0], args...)`),
+so wiring them in is a matter of pointing 62 slots at them. A test that records three calls:
+
+```
+$ ./glwire_test
+recorded 60 bytes
+```
+
+which is exactly right: `glClearColor` (8 + 16), `glClear` (8 + 4) and `glViewport` (8 + 16).
+
+Calls that **return** a value stay local for now (`my_<name>`), because a recorder cannot answer one:
+`glCreateShader`/`glCreateProgram` would have to allocate a name that both sides agree on, which means
+the name travelling with the call. None of the drawing calls return anything, so the interface's path
+is unaffected by that gap.

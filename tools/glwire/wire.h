@@ -30,6 +30,7 @@ typedef struct {
 	uint8_t *base;
 	size_t capacity;
 	size_t at;
+	size_t record;   /* where the current record's header starts */
 } wire_buffer;
 
 #ifdef GLWIRE_GUEST
@@ -71,27 +72,20 @@ wire_bytes(wire_buffer *w, const void *bytes, GLsizei count)
 
 /* The opcode and length are written by the generator around the payload, so it needs a way to go
  * back and fill the length in once the arguments are known. */
-static inline void wire_open(wire_buffer *w, uint32_t opcode)
+static inline void
+wire_open(wire_buffer *w, uint32_t opcode)
 {
-	size_t start = w->at;
-
+	w->record = w->at;
 	wire_u32(w, opcode);
-	wire_u32(w, 0);
-	w->at = start + 8;
+	wire_u32(w, 0);                 /* the payload length, filled in by wire_close */
 }
 
 static inline void
 wire_close(wire_buffer *w)
 {
-	size_t end = w->at;
-	size_t start = end;
-	uint32_t length;
+	uint32_t length = (uint32_t)(w->at - (w->record + 8));
 
-	while (start > 0 && (w->at - start) != 8) {
-		start--;
-	}
-	length = (uint32_t)(end - (start + 8));
-	memcpy(w->base + start + 4, &length, 4);
+	memcpy(w->base + w->record + 4, &length, 4);
 }
 
 #else
