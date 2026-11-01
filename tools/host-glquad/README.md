@@ -118,3 +118,19 @@ S done 27.09
 behind the layer. Two things to fix before this is final: the reply should be one line, not two, and
 a 12 GB image makes a cold scan expensive -- so the host should remember where the layer was and
 verify there first, rescanning only when the magic has moved.
+
+### Steady state: 6-10 ms a frame
+
+Once the layer is already uploaded, the in-place path costs the host very little -- consecutive
+frames measured while the guest kept asking:
+
+```
+gpu_host_ram: 1125x2436 drawn in place, 21.17 ms   (first frame, layer read from guest RAM)
+gpu_host_ram: 1125x2436 drawn in place,  7.09 ms   (steady state)
+gpu_host_ram: 1125x2436 drawn in place,  6.45 ms
+gpu_host_ram: 1125x2436 drawn in place, 10.01 ms
+```
+
+Against 700 ms for the same frame drawn in the guest, and a 41.7 ms budget for 24 a second. What
+remains is not speed: it is pointing the frame at the display surface and confirming the guest reads
+it back (the guest's own verification lines are the next thing to land).
