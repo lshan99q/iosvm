@@ -63,3 +63,22 @@ Calls that **return** a value stay local for now (`my_<name>`), because a record
 `glCreateShader`/`glCreateProgram` would have to allocate a name that both sides agree on, which means
 the name travelling with the call. None of the drawing calls return anything, so the interface's path
 is unaffected by that gap.
+
+## The guest module
+
+`eagl_remote.c` is the guest half, and it compiles for arm64-iOS (42 KB object). It owns a 4 MiB
+arena whose first word is a magic, records into it through the generated `gw_*` functions, and at the
+end of a frame sends one line and the records to the host:
+
+```
+R <records magic> <frame magic> <width> <height> <record bytes> <frame bytes>
+```
+
+The host finds the records and the frame buffer by those two magics in the RAM file it has mapped --
+so no address ever travels -- replays the calls on its own GL context, and writes the picture where
+the guest will read it. `eagl_remote_frame()` hands that picture to whoever presents it, and
+`eagl_remote_stats()` reports how many frames went this way and how long each took.
+
+Still to attach in `eagl.c`: call `eagl_remote_begin()` when the boot argument asks for it, point the
+62 table slots at `remote_*` from `remote.inc`, and call `eagl_remote_flush(width, height)` from
+`frame_end()` (line 1027) instead of presenting the picture Mesa produced.

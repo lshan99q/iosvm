@@ -14,7 +14,7 @@
 #include <string.h>
 
 #ifdef GLWIRE_GUEST
-#include <GLES2/gl2.h>
+#include <OpenGLES/ES2/gl.h>
 typedef unsigned int GLenum;
 typedef unsigned int GLuint;
 typedef int GLint;
