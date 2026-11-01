@@ -1805,7 +1805,10 @@ calling the synthetic tests an end-to-end result:
 
 A second boot would need a 12 GB RAM file with the 2.4 GB system image in it. `/data3/iosvm-scratch`
 is the right place for it, but the file sandbox refuses writes there, and the fallback is `/tmp` with
-a 2 GB ceiling -- smaller than the image itself. The tree is ready for that boot, though:
+a 2 GB ceiling -- smaller than the image itself. Two other ways to hold guest RAM without a disk file
+were tried and are also closed: `/dev/shm` refuses the 12 GB file (`truncate: Permission denied`), and
+QEMU's anonymous `memory-backend-memfd` cannot be shared because `/proc/<qemu-pid>/fd` is unreadable
+from this sandbox. The tree is ready for that boot, though:
 
 `root.apfs` was rebuilt with `GL=1 EXTRA=/tmp/glremote_on`, which puts the switch at
 `/redwood/bin/glremote_on`, and `libhakios.gl.dylib` now contains the corrected recorders (582,024
