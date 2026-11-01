@@ -1545,3 +1545,58 @@ process the system designates for registering applications, which is why getting
 
 So the honest state of the install problem: not "the kernel does not care", but "the kernel does not
 verify, and user space still asks who you are".
+
+## Addendum 36: the guest reaches the internet — two bugs, both in our own plumbing
+
+Verified end to end in one boot (`/tmp/netcheck-run.log`, evidence lines in
+`/tmp/netcheck-evidence.txt`):
+
+```
+(system/com.apple.configd [21]) Successfully spawned configd[21] because speculative
+net_test: dhcp: IPConfiguration says of "setservice en0 DHCP": 0 (done), service 258795C8-…
+State:/Network/Global/DNS = { ServerAddresses = ( "10.0.2.3" ); __CONFIGURATION_ID__ = "Default: 0"; }
+net_test: resolve example.com, 0.05 s: 172.66.147.243 104.20.23.154
+net_test: reach example.com: flags 0x2: reachable
+net_test: tcp 10.0.2.2: 75329 bytes in 0.07 s, the answer begins "HTTP/1.0 200 OK"
+```
+
+**The first bug was ours.** `mkjobs.py` passed each plist's `LimitLoadToSessionType` through as it
+found it. Every job that landed in `(system/…)` (notifyd, logd, fseventsd) names it as the plain
+string `System`; configd's is a *conditional dictionary*
+(`{#Then: System, #IfFeatureFlagEnabled: UserManagement/SystemSessionD1}`). So configd was loaded
+into the per-user 501 domain, where the Mach services it publishes — `com.apple.network.IPConfiguration`
+and `com.apple.SystemConfiguration.DNSConfiguration` — are registered in the user bootstrap and
+therefore invisible to everything that could use them. Normalizing the conditional form to its `#Then`
+value puts configd back in the system domain, and the whole chain works.
+
+**The second was in the rc file.** etc/rc is run by init, and nothing init forks has a bootstrap port
+at all — so `bootstrap_look_up` in such a process fails with `0x10000003`, which is
+`MACH_SEND_INVALID_DEST`, not "the service is missing". That code was previously read as evidence that
+configd never registered anything; it said only that the caller could not talk to bootstrap. The DHCP
+and resolve steps now run as launchd jobs (system domain for the DHCP ask, user domain for the
+resolve), which is the only context where those calls mean anything.
+
+Two corrections to earlier notes, recorded because they were both confidently wrong:
+
+- `installd` does **not** start under `INSTALLD=1`: it is an on-demand Mach job and nothing demands
+  `com.apple.mobile.installd`, so no spawn happens.
+- there is no `/etc/resolv.conf` in this image, and `getaddrinfo` would not read one if there were
+  (that path belongs to `libresolv`'s `res_*` API). The resolver comes from configd's store or not at
+  all.
+
+`netcfg`'s source was also restored to `userland/src/`: the tree had none, only a copy under /tmp that
+a fresh image does not contain, while the rc still called it — a fresh build silently lost its address.
+
+## Addendum 36a: two agents, one tree — the ROOT rule
+
+Two people (or agents) cannot share a VM: `qemu/ram.img` and `qemu/payload.bin` are written by every
+boot. `ROOT` makes it survivable, since both `run-darwin.sh` and `wait-for-ui.sh` honour it:
+
+```
+cd userland && CONFIGD=1 RC=rc.netcheck ./build.sh root.apfs && cp root.apfs /tmp/root.net.apfs
+cd .. && QEMU_NET=1 ROOT=/tmp/root.net.apfs bash qemu/wait-for-ui.sh /tmp/net.png
+```
+
+The tree's `userland/root.apfs` is then never read by the boot and stays the other worker's. Two
+gotchas: `payload.bin` is still shared (write it only when no qemu is running), and `TMPDIR` is not
+honoured for the per-boot log, so the log is whichever `/tmp/tmp.*` is newest.
