@@ -1,163 +1,141 @@
+<div align="center">
+
 # IOSVM
 
-**Boot iOS on Linux in QEMU, and render SpringBoard's first frame — all of it open, all of it
-reproducible.**
+**iOS, booting in QEMU on Linux — and operable from a web browser.**
 
-Status: **M0 — foundation.** The VM half is proven upstream (see `docs/adr/ADR-008-hakios-baseline.md`);
-this repository is the project that carries it from a framebuffer to a Metal command stream on the
-host GPU.
+[![status](https://img.shields.io/badge/status-boots%20to%20the%20home%20screen-brightgreen)]()
+[![platform](https://img.shields.io/badge/host-Linux%20x86__64-blue)]()
+[![guest](https://img.shields.io/badge/guest-Darwin%2016.5%20%C2%B7%20arm64-blue)]()
+[![renderer](https://img.shields.io/badge/renderer-Mesa%20softpipe%20%C2%B7%20CPU-orange)]()
+[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-**Target: the Darwin 16.5 user space.** iOS 26 arm64e is deferred, and not for engineering reasons —
-that release delivers its OS and System-cryptex images through Apple's key service, so obtaining its
-user space would mean asking that service for a key. This project does not do that.
-`docs/adr/D1-prime-userland-version.md` records the evidence and the four conditions under which the
-decision reopens.
+<img src="docs/demo/control-center.png" width="230" alt="Control Center">
+<img src="docs/demo/settings-app.png" width="230" alt="Settings">
+<img src="docs/demo/screen-time-from-host.png" width="230" alt="Screen Time">
+
+<sub>All three are the panel of a machine booted by this project: Control Center (backdrop blur and
+all), Settings, and Screen Time — the last two reached by **clicking in a browser**.</sub>
+
+</div>
+
+---
+
+## What this is
+
+A Darwin/XNU port that boots Apple's **iOS 16.5 user space** in QEMU on ordinary Linux, draws its
+system UI, and lets you drive it from the host: taps, swipes and the software keyboard, through a QMP
+control channel and a small web/VNC bridge that this repository carries.
+
+The point is the loop, not the screenshot:
 
 ```
-$ make run
-...
-$ ./tools/screendump.sh
-$ file logs/screen.png
-logs/screen.png: PNG image data, 1179 x 2556, 8-bit/color RGB, non-interlaced
+    your browser ──► webvnc.py ──► QMP ──► virtio-tablet ──► Darwin's touch driver
+         ▲                                                        │
+         │                                                        ▼
+    JPEG frames ◄── screendump ◄── ramfb ◄── IOMobileFramebuffer ◄── CoreAnimation
+                                                       ▲
+                                        Mesa softpipe ─┘  (a CPU rasteriser, hence the frame rate)
 ```
 
-That is the v1.0 definition of done. It is not there yet. What is there is written down in
-`docs/phases.md`, one acceptance command per milestone.
+## What works today
 
-## You bring the IPSW
+| | state | evidence |
+|---|---|---|
+| boot to the home screen | **yes**, ~8 minutes, about 40 % of attempts (the rest stall inside the port) | [home screen](docs/demo/home-screen.png) |
+| tap an icon, launch an application | **yes** | [Settings](docs/demo/settings-app.png) |
+| navigate inside an application | **yes** | [Screen Time](docs/demo/screen-time-from-host.png) |
+| swipe (home gesture, pull down) | **yes** | [Control Center](docs/demo/control-center.png) |
+| operate it from the host | **yes** — QMP, `tools/qemu/tap.py` | [addendum 28](docs/research/linux-kernel-build.md) |
+| operate it from a browser | **yes** — `tools/qemu/webvnc.py` | [Focus, by browser click](docs/demo/webvnc-focus-page.png) |
+| type text | **yes**, as taps on the software keyboard | [typing `abc`](docs/demo/webvnc-typed-abc.png) |
+| networking to the host (LAN) | **yes** — `en0` 10.0.2.15, HTTP both ways | [addendum 30](docs/research/linux-kernel-build.md) |
+| names, DNS | no — configd's plugin never registers here | addendum 30 |
+| GPU acceleration | no — a CPU rasteriser is what this machine has | — |
+| animation smoothness | ~4–7 fps; ~140 ms of Mesa per composited frame | addendum 32b |
 
-This repository **ships nothing of Apple's**: no kernel, no system image, no dyld cache, no
-firmware, no font. You supply an IPSW you obtained yourself; `tools/unpack-ipsw.sh` lays it out
-locally. Nothing is uploaded, nothing is downloaded for you — `tools/` refuses to fetch Apple
-content by design.
-
-Read `PROVENANCE.md` before your first commit and `CONTRIBUTING.md` before your first PR. Three
-rules are one-strike vetoes: no Apple binaries in the tree, no code that impersonates a real
-device to Apple's servers, no credentials.
+`docs/state-of-the-port.md` is the one-page handover view of the same table.
 
 ## Quick start
 
 ```sh
-# 1. Host prerequisites (Linux x86_64)                      — works today
-sudo apt install build-essential meson ninja pkg-config \
-                 qemu-system-arm qemu-efi-aarch64 lld lz4 7zip \
-                 mesa-vulkan-drivers vulkan-tools libvulkan-dev libdrm-dev
+git clone --recursive https://github.com/lshan99q/iosvm.git
+cd iosvm
 
-# 2. The thing you must keep green                          — works today
-make test-open          # compliance + SPDX + protocol units + fake-gpu, no Apple file
+# 1. Bring your own IPSW — nothing of Apple's is in this repository
+tools/unpack-ipsw.sh ~/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw
 
-# 3. Look at your host before blaming the code              — works today
-make doctor             # what is missing here, and the apt line for it
+# 2. Build the kernel, the images and the loader (see docs/ for the pieces)
+make
 
-# 4. Take the parts out of YOUR IPSW                       — works today (dry run first)
-./tools/unpack-ipsw.sh ~/iPhone10,3_16.5_20F66_Restore.ipsw       # dry run: prints, writes nothing
-./tools/unpack-ipsw.sh ~/iPhone10,3_16.5_20F66_Restore.ipsw --apply
-./tools/make-images.sh                              # dry run; --apply needs the M1 APFS writer
+# 3. Boot, and wait until something is actually drawn (it retries: not every boot lands)
+tools/qemu/wait-for-ui.sh /tmp/home.png
 
-# 5. Boot a guest                                          — NOT YET (M0 tail / M1)
-make run
+# 4. Operate it — from a browser…
+tools/qemu/qmpmux.py --qmp 4445 --port 4465
+tools/qemu/webvnc.py --port 5980 --qmp 4465      # then http://127.0.0.1:5980/
+#    …or from a shell
+tools/qemu/tap.py 683 1689                      # the Settings icon
 ```
 
-Step 5 is the one that does not exist. `make run`, `make host`, `make guest`, `make qemu` and
-`make test-gpu` are stubs that say so; `hw/virtio-iosvm-gpu` is M2 work. What *is* proven is
-upstream, not here: a self-compiled XNU reaches BSD initialisation in 6.4 s of emulated boot on the
-reference host (`docs/m0-host-report.md`).
+The tools in `tools/qemu/` are the ones this project actually uses:
 
-What works today, exactly: `make test-open` (compliance plus the protocol cases when `proto/` is
-fetched), `make proto`, `make test-gpu` (eight probe checks on lavapipe), `make provenance`,
-`make style`, `make doctor`,
-`tools/unpack-ipsw.sh` (verified end to end against a synthetic IPSW), `tools/check-frame.py`
-(verified both ways), the CI gate on every push, and — the interesting one — this:
-
-```sh
-# an open-source XNU reaching BSD initialisation under QEMU, no Apple file anywhere.
-# needs a checkout of the upstream tree that builds it: make qemu-open-check HAKIOS=~/src/hakios
-make qemu-open-check HAKIOS=~/src/hakios
-#   [ok] loader banner   [ok] kernel banner   [ok] paged memory
-#   [ok] MAC Framework   [ok] BSD half reached pid 1 (expected panic on launchd)
-#   qemu-open: PASS
-```
-
-Two dependencies are pinned as submodules and are not in a bare clone: `proto/` (the wire protocol,
-testable with a C compiler alone) and `host/vkbridge/` (the Vulkan backend). `make submodule`
-fetches both at their commits; `make components` builds and tests them.
-
-An adversarial review of the backend found that its probe alone **does not prove the GPU did the
-work** — a patched copy with a host `memcpy` still printed every check as `[ok]`. The bytes are
-right and the code does use `vkCmdCopyBuffer`; the proof is what is missing, and a device-side
-oracle is in flight. `docs/phases.md` records the same thing, because a claim that survives in
-only one document is still a claim.
-
-And this is what the guest will mount — a real Darwin 16.5 system volume, built on Linux from a
-user-supplied IPSW, checked by `apfsck` and read back through a different parser:
-
-```
-$ ./tools/make-images.sh --apply
-  tree: 318098 entries, 8.8G
-  mkapfs.py: volume 0 "System": 179361 files, 136413 directories, 2324 symbolic links,
-             1187306 blocks of data (15735 compressed in their resource fork,
-             155371 whole in their attribute)
-  mkapfs.py: userland/system.apfs: 1233652 blocks of 4096 bytes, 256 free
-  built in 125s, 4.7G
-  apfsck: clean
-  7z read-back: volume "System.apfs"
-```
-
-It takes about eight seconds of wall clock on a 2014 Xeon: the kernel reaches the interrupt
-controller at 6.3 s of emulated boot and the expected `launchd` panic ends the run. The kernel is
-the upstream project's build, not ours — `tools/qemu-open.sh` says so, and that distinction is
-the point of the exercise.
-
-## Repositories
-
-The components have different toolchains and different gates, so they are separate repositories
-pinned by this one (ADR-010). A contributor with a C compiler can improve the protocol; one with a
-GPU can work on the backend; neither needs a Mac or an iPhone.
-
-| Repository | What | Builds with | Gate |
-|---|---|---|---|
-| `iosvm` (this one) | docs, ADRs, tools, the compliance gate, the plan | python3, make | `make test-open` |
-| `iosvm-proto` → `proto/` | the wire protocol: packed structs, ring, codec, strict fake GPU | a C compiler | `make proto` |
-| `iosvm-vkbridge` → `host/vkbridge/` | the host Vulkan backend: object tables, replay, fences, probe | C++20 + Vulkan | `make test-gpu` |
-
-```sh
-make submodule     # fetch both components at their pinned commits, and report drift
-make components    # build and test both
-```
-
-`hw/` and `guest/` stay in this repository until they need their own toolchain (ADR-010 §rules).
-
-## What lives where — planned layout
-
-Only `tools/` and `docs/` exist today; the rest is where the work will go, and `docs/phases.md`
-says which milestone creates each one.
-
-| Path | What |
+| tool | does |
 |---|---|
-| `hw/` | QEMU devices: `virtio-iosvm-gpu` and the display path |
-| `proto/` | The GPU transport protocol (versioned, packed, little-endian) |
-| `host/vkbridge/` | Vulkan backend: object tables, command replay, present |
-| `guest/metal-plugin/` | Metal API → serialized Vulkan commands, inside the guest |
-| `tools/` | Unpack, image building, screendump, provenance check |
-| `tests/fake-gpu/` | In-process command interpreter with strict validation |
-| `docs/adr/` | Every non-obvious decision, one file each, with evidence |
+| `wait-for-ui.sh` | boots, retries until a screen is drawn; `KEEP=1` leaves the machine running |
+| `tap.py` | a tap or a swipe at panel coordinates, over QMP |
+| `qmpmux.py` | QEMU serves one QMP client; this serves many |
+| `webvnc.py` | the browser viewer: frames out, clicks and keys in |
+| `vncbridge.py` | the same for a VNC viewer instead of a browser |
+| `demo.sh` | the whole sequence in one command, a picture of every step |
 
-## Design, in three sentences
+## How it came to boot
 
-Do not emulate Apple's GPU: translate **Metal to Vulkan in the guest's user space**, and carry
-encoded commands across the VM boundary over a `virtio` device of our own. Activation is not
-bypassed — it is **never entered**, because the system boots flat from a laid-out IPSW and never
-sees recovery mode. The hard wall is not activation but the GPU, and M2 (a correct blit through
-the whole channel) is a publishable result even if M3 never lands.
+Three things had to be true, and the research note records the measurement behind each:
 
-Full reasoning: `docs/architecture.md`, `docs/adr/`, and the Chinese design baseline under
-`docs/zh/` — `docs/zh/engineering.md` for the architecture and ADRs, `docs/zh/design-baseline.md`
-for the feasibility study, `docs/zh/README.md` for what has since been overturned.
+1. **the display must have a show service** — on a phone the GPU driver starts it; in QEMU nothing
+   did, so user-space painting had nowhere to land (`patches/0001`);
+2. **`fb_beat` must be 0** — the driver's on-the-beat pacing drops every frame after the first when
+   rendering is this slow, which is exactly the "boots to a logo and stops" symptom;
+3. **something must send the touch** — a launchd job of ours is not reliably executed here, so the
+   synthetic touches come from `/etc/rc`, which `init` runs before it hands process 1 to launchd.
+
+The long version — with the dead ends and three self-corrections —
+is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
+
+## Repository layout
+
+| path | what |
+|---|---|
+| `patches/` | the changes made to the port: one patch per finding, with the reason |
+| `tools/qemu/` | the boot-and-operate tooling above |
+| `tools/apfs/` | reading and writing the images without Apple's tools |
+| `guest/` | programs that run inside the machine (the painter, `netcfg`) |
+| `proto/`, `host/vkbridge/` | GPU transport and its host-side Vulkan backend (submodules) |
+| `docs/` | ADRs, the research note, the state of the port, demo screenshots |
+
+## What this is not
+
+- **Not Apple's software.** No kernel, no system image, no dyld cache, no firmware, no font lives
+  here. You supply an IPSW you obtained yourself; see `PROVENANCE.md`. Three rules are vetoes: no
+  Apple binaries in the tree, no impersonating a device to Apple's servers, no credentials.
+- **Not a jailbreak.** The port's own kernel is lenient about code signing by construction (AMFI is a
+  stand-in that accepts any parseable signature); nothing here attacks a real device.
+- **Not fast.** The renderer is a CPU rasteriser. 24 fps is a target, not a claim: the measured
+  ceiling today is about 7 fps of animation.
+
+## Documentation
+
+| | |
+|---|---|
+| [`docs/state-of-the-port.md`](docs/state-of-the-port.md) | one page: what works, what does not |
+| [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md) | the long note: every measurement, and the mistakes |
+| [`docs/architecture.md`](docs/architecture.md) | how the pieces fit |
+| [`docs/phases.md`](docs/phases.md) | milestones, one acceptance command each |
+| [`docs/adr/`](docs/adr) | the decisions, with their evidence |
+| [`docs/zh/`](docs/zh) | Chinese translations |
 
 ## License
 
-MIT for this project's original code (`LICENSE`). The QEMU fork is GPL-2.0 (`LICENSE.GPL2`),
-XNU patches are APSL-2.0 (`LICENSE.APSL`). Third-party reuse is recorded in `NOTICE`.
-
-Apple, iPhone, iOS, Metal and XNU are trademarks of Apple Inc. This project is not affiliated
-with, endorsed by, or supported by Apple.
+MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
+(`LICENSE.APSL`), and the GPL-2.0 parts (`LICENSE.GPL2`) stay GPL-2.0. See `NOTICE`.
