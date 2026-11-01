@@ -1,0 +1,73 @@
+# The GL calls QuartzCore makes, and the types they carry across the wire.
+#
+# Taken from userland/src/eagl_slots.txt: the entries marked `*` are the ones QuartzCore's OpenGL ES
+# renderer drives, 62 of them. Everything else in the table is for other callers and does not need
+# to cross the boundary for the interface to draw.
+#
+# Format: name(argtype, argtype, ...) [-> returntype]
+#   E    GLenum (u32)         I    GLint (i32)          F  GLfloat
+#   U    GLuint (u32)         S    GLsizei (i32)        B  GLboolean (u8)
+#   P    pointer to raw bytes, carried by (const void *p, S size)
+#   N    pointer to a sized buffer, carried by (const void *p, S size)
+#   X    the call binds GL state that the host must mirror before the draw (no argument)
+#
+# `P`/`N` arguments are always written as two C parameters: the pointer and the byte count. The
+# encoder sends the count and the bytes; the host allocates, runs the call, frees.
+
+glAlphaFunc(E, F)
+glBindTexture(E, U)
+glBlendFunc(E, E)
+glBlendFuncSeparate(E, E, E, E)
+glBlendEquation(E)
+glClear(U)
+glClearColor(F, F, F, F)
+glClearStencil(I)
+glCopyTexSubImage2D(E, I, I, I, I, I, S, S)
+glDeleteTextures(S, N)
+glDisable(E)
+glDrawArrays(E, I, S)
+glDrawElements(E, S, E, P)
+glEnable(E)
+glFinish()
+glFlush()
+glGenTextures(S, N)
+glGetError() -> E
+glGetIntegerv(E, N)
+glGetString(E) -> P
+glPixelStorei(E, I)
+glScissor(I, I, S, S)
+glTexImage2D(E, I, I, S, S, I, E, E, P)
+glTexParameterf(E, E, F)
+glTexParameteri(E, E, I)
+glTexSubImage2D(E, I, I, I, S, S, E, E, P)
+glViewport(I, I, S, S)
+glActiveTexture(E)
+glCompressedTexImage2D(E, I, E, S, S, I, S, P)
+glVertexAttribPointer(U, I, E, B, S, P)
+glEnableVertexAttribArray(U)
+glDisableVertexAttribArray(U)
+glDeleteProgram(U)
+glCreateShader(E) -> U
+glShaderSource(U, S, P, P)
+glCompileShader(U)
+glCreateProgram() -> U
+glAttachShader(U, U)
+glLinkProgram(U)
+glUseProgram(U)
+glUniform1f(I, F)
+glUniform4f(I, F, F, F, F)
+glUniform1i(I, I)
+glUniform3fv(I, S, P)
+glUniform4fv(I, S, P)
+glUniformMatrix3fv(I, S, B, P)
+glUniformMatrix4fv(I, S, B, P)
+glGetUniformLocation(U, P) -> I
+glBindAttribLocation(U, U, P)
+glBindFramebuffer(E, U)
+glDeleteFramebuffers(S, N)
+glGenFramebuffers(S, N)
+glFramebufferTexture2D(E, E, E, U, I)
+glGenerateMipmap(E)
+glFenceSync(E, U) -> P
+glDeleteSync(P)
+glClientWaitSync(P, U, U) -> E

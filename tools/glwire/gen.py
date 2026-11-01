@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Generate both halves of the GL wire from spec.def.
+
+One description, two programs that cannot drift apart: the guest's recorder that appends each call
+to a byte buffer, and the host's dispatcher that reads the buffer and makes the same call on the
+real GL. The format is deliberately dumb -- a little-endian length-prefixed record per call:
+
+    u32 opcode, u32 payload bytes, payload
+
+with integers as they are, floats as their bits, and pointers as a u32 byte count followed by the
+bytes. A record the host does not understand is a bug on the guest side, so it stops loudly.
+"""
+import re
+import sys
+
+CTYPES = {
+    "E": ("GLenum", "u32"),
+    "I": ("GLint", "i32"),
+    "F": ("GLfloat", "f32"),
+    "U": ("GLuint", "u32"),
+    "S": ("GLsizei", "i32"),
+    "B": ("GLboolean", "u8"),
+}
+
+
+def parse(path):
+    calls = []
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"(\w+)\(([^)]*)\)(\s*->\s*(\w+))?", line)
+        if not match:
+            raise SystemExit("bad spec line: %s" % line)
+        name, args, _, returns = match.groups()
+        types = [t.strip() for t in args.split(",") if t.strip()]
+        calls.append((name, types, returns))
+    return calls
+
+
+def c_params(types):
+    out = []
+    for index, kind in enumerate(types):
+        if kind in ("P", "N"):
+            out.append("const void *a%d" % index)
+            out.append("GLsizei n%d" % index)
+        else:
+            ctype = CTYPES[kind][0]
+            out.append("%s a%d" % (ctype, index))
+    return ", ".join(out) if out else "void"
+
+
+def emit_encode(calls):
+    lines = []
+    for opcode, (name, types, returns) in enumerate(calls):
+        params = c_params(types)
+        body = []
+        for index, kind in enumerate(types):
+            if kind in ("P", "N"):
+                body.append("\twire_bytes(&w, a%d, n%d);" % (index, index))
+            else:
+                body.append("\twire_%s(&w, a%d);" % (CTYPES[kind][1], index))
+        if returns:
+            lines.append("/* %s returns %s: the caller reads it back after a flush */" % (name, returns))
+        lines.append("void gw_%s(%s)\n{\n\twire_open(&w, %d);\n%s\n\twire_close(&w);\n}\n"
+                     % (name, params, opcode, "\n".join(body)))
+    return "\n".join(lines)
+
+
+def emit_dispatch(calls):
+    lines = []
+    for opcode, (name, types, returns) in enumerate(calls):
+        decl = []
+        args = []
+        pre = []
+        post = []
+        for index, kind in enumerate(types):
+            if kind in ("P", "N"):
+                decl.append("\t\tGLsizei n%d = 0;" % index)
+                decl.append("\t\tvoid *p%d = wire_take(r, &n%d);" % (index, index))
+                args.append("p%d" % index)
+                post.append("\t\tfree(p%d);" % index)
+            else:
+                ctype = CTYPES[kind][0]
+                decl.append("\t\t%s a%d = wire_get_%s(r);" % (ctype, index, CTYPES[kind][1]))
+                args.append("a%d" % index)
+        call = "%s(%s)" % (name, ", ".join(args))
+        if returns:
+            call = "(void)" + call
+        lines.append("\tcase %d: {\n%s\n\t\t%s;\n%s\t\tbreak;\n\t}\n"
+                     % (opcode, "\n".join(decl) if decl else "\t\t/* no arguments */",
+                        call, "\n".join(post) + ("\n" if post else "")))
+    return "\n".join(lines)
+
+
+def main():
+    calls = parse(sys.argv[1])
+    mode = sys.argv[2]
+    if mode == "encode":
+        print(emit_encode(calls))
+    else:
+        print("switch (opcode) {\n%s\n\tdefault:\n\t\tfprintf(stderr, \"glwire: opcode %%u\\n\", opcode);"
+              "\n\t\treturn -1;\n\t}" % emit_dispatch(calls))
+
+
+main()
