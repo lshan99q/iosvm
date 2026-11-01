@@ -124,6 +124,9 @@ def emit_slots(calls):
                          % (ret, name, signature, name, name,
                             ", ".join("a%d" % index for index in range(len(types)))))
         else:
+            # Record it for the host *and* still do it here: the local renderer keeps working,
+            # which is what lets the host's handling of real CoreAnimation traffic be measured
+            # before the handover is complete.
             lines.append("static %s\nremote_%s(%s)\n{\n\t(void)context;\n\tgw_%s(%s);\n}\n"
                          % (ret, name, signature, name, ", ".join(args)))
     return "\n".join(lines)

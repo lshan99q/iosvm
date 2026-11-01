@@ -1521,3 +1521,27 @@ Two of them were worth trying, and neither helps:
 
 So the emulator is not where the seventeen times are hiding either. Recorded here so the next
 attempt does not spend another evening on it.
+
+### 34c. A correction: the kernel does not check signatures, user space does
+
+An earlier addendum here said signing was not the blocker because the port's AMFI stand-in accepts
+anything. That was half the story, and the missing half matters: the stand-in still **reads the
+entitlements out of the signature** — `xnu/files/libkern/amfi/miniamfi_entitlements.cpp` says a
+process holds the entitlements its program's signature lists, and one without a signature holds none.
+User space then enforces them on its own account. `userland/build.sh` ldid-signs `record_test`,
+`battery_test` and `keychain_test` for exactly this reason.
+
+That reframes the LaunchServices result. `lsd` answering a plain tool with zero applications while
+SpringBoard sees 173 is better explained by entitlements than by an empty database: SpringBoard holds
+`com.apple.private.coreservices.canmaplsdatabase` and friends, and a tool signed with nothing holds
+none. The useful entitlements, read out of the dyld shared cache:
+`com.apple.private.coreservices.can-register-install-results`,
+`can-perform-rebuild-registration`, `canmaplsdatabase`, `can-send-install-notifications`,
+`canmapbundleidtouuid`, plus `com.apple.private.mobileinstall.allowedSPI`.
+
+`installd` carries `can-register-install-results` and `can-perform-rebuild-registration` — it is the
+process the system designates for registering applications, which is why getting it into the job list
+(`INSTALLD=1`) was the right move.
+
+So the honest state of the install problem: not "the kernel does not care", but "the kernel does not
+verify, and user space still asks who you are".
