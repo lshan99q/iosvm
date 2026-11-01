@@ -58,3 +58,24 @@ The two numbers say where the work is now. **Drawing: 32 ms on the V100. Transfe
 21.9 MB (a layer out, a frame back) is being copied twice through an emulated network stack that runs
 as ARM instructions under TCG. That copy is the thing shared memory removes: when the host maps the
 guest's RAM, the layer never moves, and the frame is written straight into the display surface.
+
+## rammap — and why sharing had to be turned on
+
+`qemu/ram.img` is the guest's memory as a host file, which is what makes a copy-free transport
+possible at all: the host can map the file, read the layer where the guest wrote it, and write a
+finished frame straight into the surface the display reads.
+
+It only works if QEMU maps that file **shared**. It was `share=off`, a private mapping, so the file
+held no live guest memory -- `rammap` found nothing in it. `qemu/run-darwin.sh` now takes
+`QEMU_RAM_SHARE` (default `off`, unchanged behaviour), and with `on` the same tool finds the guest's
+kernel image in the file:
+
+```
+$ QEMU_RAM_SHARE=on qemu/run-darwin.sh ...
+$ ./rammap qemu/ram.img "XNU"
+rammap: mapped qemu/ram.img, 12884901888 bytes
+rammap: "XNU" found
+```
+
+That is the premise the next step stands on: with sharing on, the 21.9 MB of copying that made the
+round trip 6.8 s has no reason to exist.
