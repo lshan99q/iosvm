@@ -1431,3 +1431,31 @@ resolved in SpringBoard's own privileged context -- not from the empty database 
 Which leaves the honest position: an application can be put into the image, it cannot yet be made to
 appear. Doing so needs the installation path Apple uses (installd, in the image but not in the job
 list) or a writer for the LaunchServices database, and both are userland work rather than a setting.
+
+### 34b. Registering from inside SpringBoard: the call blocks, and it takes the UI with it
+
+Addendum 34a left one door open -- entitlements can be forged here, so perhaps the registration
+call only needed to come from a process the system trusts. SpringBoard is that process, and this
+port already injects a library into it (`libhakios.sb.dylib`), so the call was moved there.
+
+What it answered is worth having:
+
+```
+hakios: register: SpringBoard sees 173 applications
+hakios: register: proxy 0x28257ea00 for /Applications/TestApp.app
+```
+
+**173 applications**, where a plain tool saw 0: LaunchServices is not empty, it simply does not
+answer an unprivileged caller. So the database is fine, the stock icons are real, and our bundle is
+one proxy away from being in it.
+
+And then `registerApplication:` **never returns** -- not from a plain tool, not from an entitled one,
+not from inside SpringBoard, and the last of those is the part that matters: with the call on
+SpringBoard's main queue the whole interface froze behind it (the panel went black and stayed black);
+moved to a background queue the call still never returns, and the interface came up but the call
+never completed either.
+
+So this is not a permissions problem and not a queueing problem. `registerApplication:` waits for
+something this port does not provide -- most likely the MobileInstallation/installd side of the same
+transaction, which is not running here. The hook was removed from the boot path; the function stays,
+unused, because the next attempt should start from those two lines rather than from nothing.
