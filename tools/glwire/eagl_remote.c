@@ -27,7 +27,9 @@
 
 #define REMOTE_MAGIC_RECORDS 0x52454d4f54453130ULL   /* "REMOTE10" */
 #define REMOTE_MAGIC_FRAME   0x52454d4f54453230ULL
-#define REMOTE_ARENA_BYTES   (4u << 20)
+/* A frame's texture upload is the size of the panel (10.96 MB), and a page can upload more than one
+ * layer; 4 MiB silently dropped the rest of the frame, so the host was sent a truncated record. */
+#define REMOTE_ARENA_BYTES   (32u << 20)
 
 static unsigned char remote_arena[REMOTE_ARENA_BYTES] __attribute__((aligned(4096)));
 static wire_buffer w;  /* the generated recorders append here */
@@ -38,8 +40,8 @@ static int remote_enabled;
 static int remote_frames;
 static long remote_total_us;
 
-extern int remote_host_port;
-extern char remote_host_address[64];
+int remote_host_port = 9110;
+char remote_host_address[64] = "10.0.2.2";
 
 static double
 remote_now_ms(void)
@@ -52,9 +54,36 @@ remote_now_ms(void)
 
 /* The picture the host draws lands directly after the frame's magic word, in guest memory the host
  * has mapped as the RAM file. The guest only has to read it. */
+/* Where the host is, and whether to use it at all: the file exists only when the boot was set up
+ * for it, so a machine without it behaves exactly as it did before. */
 void
 eagl_remote_begin(void)
 {
+	FILE *file;
+	char host[64] = "10.0.2.2";
+	int port = 9110;
+
+	if (remote_enabled) {
+		return;
+	}
+	/* the switch is a file's existence: a boot that ships /redwood/bin/glremote_on wants the host */
+	if (access("/redwood/bin/glremote_on", F_OK) != 0) {
+		return;
+	}
+	file = fopen("/redwood/etc/glremote", "r");
+	if (file == NULL) {
+		remote_enabled = 1;
+		wire_reset(&w, remote_arena + 8, REMOTE_ARENA_BYTES - 8);
+		memcpy(remote_arena, &(unsigned long long){REMOTE_MAGIC_RECORDS}, 8);
+		return;
+	}
+	if (fscanf(file, "%63s %d", host, &port) != 2) {
+		fclose(file);
+		return;
+	}
+	fclose(file);
+	strncpy(remote_host_address, host, sizeof(remote_host_address) - 1);
+	remote_host_port = port;
 	remote_enabled = 1;
 	wire_reset(&w, remote_arena + 8, REMOTE_ARENA_BYTES - 8);
 	memcpy(remote_arena, &(unsigned long long){REMOTE_MAGIC_RECORDS}, 8);
@@ -158,3 +187,18 @@ eagl_remote_stats(long *frames, long *average_us)
 }
 
 #include "encode.inc"
+#include "remote_table.inc"
+#include "remote.inc"
+
+
+/* Called once the EAGL table has been filled: when the host is in use, the calls QuartzCore makes
+ * are recorded instead of run here. */
+void
+eagl_remote_install(void **table)
+{
+	eagl_remote_begin();
+	if (!remote_enabled) {
+		return;
+	}
+	eagl_fill_table_remote(table);
+}

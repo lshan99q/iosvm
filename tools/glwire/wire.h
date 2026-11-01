@@ -14,7 +14,11 @@
 #include <string.h>
 
 #ifdef GLWIRE_GUEST
+#ifndef GLWIRE_GL_TYPES
+/* The recorder is also built on the host, against GL/gl.h, so that a frame can be made and replayed
+ * without a guest (frame_record.c). The types below are then already there. */
 #include <OpenGLES/ES2/gl.h>
+#endif
 typedef unsigned int GLenum;
 typedef unsigned int GLuint;
 typedef int GLint;
@@ -150,6 +154,34 @@ wire_take(wire_buffer *r, GLsizei *count)
 	}
 	r->at += size;
 	return copy;
+}
+
+/* A pointer the GL keeps after the call returns -- the vertex arrays of glVertexAttribPointer -- must
+ * live until the draw that reads it. The dispatcher keeps up to sixteen of them and frees them after
+ * the next draw or flush; freeing them with the call itself made the host draw read freed memory. */
+#define WIRE_KEPT_MAX 16
+static void *wire_kept[WIRE_KEPT_MAX];
+static int wire_kept_count;
+
+static inline void
+wire_keep(void *pointer)
+{
+	if (pointer == NULL) {
+		return;
+	}
+	if (wire_kept_count < WIRE_KEPT_MAX) {
+		wire_kept[wire_kept_count++] = pointer;
+	} else {
+		free(pointer);
+	}
+}
+
+static inline void
+wire_release(void)
+{
+	while (wire_kept_count > 0) {
+		free(wire_kept[--wire_kept_count]);
+	}
 }
 
 #endif

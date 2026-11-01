@@ -109,3 +109,50 @@ itself**. The separation has to be by *who is calling*, not by which function:
 
 Until that exists, the remote path cannot draw, and the honest frame rate of the interface is
 whatever the local renderer gives: ~1.4 fps.
+
+## The first frame with content: the Settings page
+
+The recorder now does what the 22:44 note said it had to, but not by a static split: each of the 62
+trampolines calls the entry its slot held **before** the override (`local_entry[]`, saved by
+`eagl_fill_table_remote()`), then records. eagl.c's own wrappers stay in the local path, so
+`-attachImage:` sees the texture it was just asked to attach. The other three fixes found while
+making it draw: the arena is 32 MiB (one panel-sized `glTexImage2D` is 10.96 MB, and the old 4 MiB
+dropped the rest of the record silently), the dispatcher keeps `glVertexAttribPointer`'s array until
+the draw instead of freeing it with the call, and `frame_end()` writes the host's picture after the
+local surface copy, not before.
+
+The host half can be exercised without a guest:
+
+```
+$ gcc -O2 -o frame_replay frame_replay.c frame_record.c -lEGL -lGL
+$ ./frame_replay /path/to/qemu/ram.img 0x33b9eb000
+frame_replay: llvmpipe ... | 4.5 (Compatibility Profile) Mesa ...
+frame_replay: 10962430 B of records for 10962000 B of layer; recorded in 6.8 ms, drawn in 58.0 ms;
+              0 pixels differ (0.000%), mean 0.000, worst 0
+```
+
+`frame_record.c` builds the frame with the generated recorders (`encode.inc`, unmodified);
+`frame_replay.c` reads the layer out of the guest's framebuffer in the RAM file, replays the records
+through the same `dispatch.inc` `host_glwire` uses, draws it as a textured quad, reads it back and
+puts it back in the same memory. The result is byte-identical to the guest's own Settings frame
+(`docs/demo/glwire-settings-guest.png` and `-host.png`).
+
+`panel_run.py` drives a running machine through that: it waits for the home screen by the colour
+below the kernel's boot band, taps Settings over QMP, waits for the page, pauses the machine, runs
+`frame_replay` and takes a screendump.
+
+```
+$ ./panel_run.py /path/to/qemu/ram.img --log /tmp/iosvm-0202.log --out /tmp/panel-run
+```
+
+The EGL context asks for the device first, so on a host where `/dev/dri` and `/dev/nvidia*` are open
+it lands on the V100; in a sandbox that refuses them it falls back to llvmpipe and says so.
+
+## What the guest still has to send
+
+Calls that return a value (`glCreateProgram`, `glGenTextures`, `glGetUniformLocation`, the fence
+pair) stay local on both sides, so the names they produce are not the same numbers on the host. For
+CoreAnimation's own traffic the names have to travel with the calls (`opcode, length, args, result`)
+and the dispatcher needs a guest-name -> host-name table for textures, framebuffers, programs,
+shaders and uniform locations. Until then the wire carries a frame the host can draw, but not the
+interface's own calls.

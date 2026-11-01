@@ -38,6 +38,7 @@ switch (opcode) {
 	case 5: {
 		GLuint a0 = wire_get_u32(r);
 		glClear(a0);
+		wire_release();
 		break;
 	}
 
@@ -89,6 +90,7 @@ switch (opcode) {
 		GLint a1 = wire_get_i32(r);
 		GLsizei a2 = wire_get_i32(r);
 		glDrawArrays(a0, a1, a2);
+		wire_release();
 		break;
 	}
 
@@ -100,6 +102,7 @@ switch (opcode) {
 		void *p3 = wire_take(r, &n3);
 		glDrawElements(a0, a1, a2, p3);
 		free(p3);
+		wire_release();
 		break;
 	}
 
@@ -112,12 +115,14 @@ switch (opcode) {
 	case 14: {
 		/* no arguments */
 		glFinish();
+		wire_release();
 		break;
 	}
 
 	case 15: {
 		/* no arguments */
 		glFlush();
+		wire_release();
 		break;
 	}
 
@@ -254,7 +259,7 @@ switch (opcode) {
 		GLsizei n5 = 0;
 		void *p5 = wire_take(r, &n5);
 		glVertexAttribPointer(a0, a1, a2, a3, a4, p5);
-		free(p5);
+		wire_keep(p5);
 		break;
 	}
 
