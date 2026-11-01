@@ -1244,3 +1244,35 @@ fed its servers by configd -- and configd's plugin is exactly what is missing. I
 And the reason the checks run at all: they are started from `/etc/rc`, which `init` executes before it
 hands process 1 to launchd, with `&` so each one waits in the background. A launchd job of ours is not
 reliably executed here (the xpcproxy pattern, addendum 4), and this way nothing depends on it.
+
+## Addendum 31: a VNC viewer can operate the machine, through a bridge of our own
+
+QEMU's VNC console shows this guest but cannot drive it: with the console as the machine's only
+display (`-display vnc=127.0.0.1:9`) a client's pointer still arrives at the driver as `type 2`
+(EV_REL) and `type 1` buttons, never `type 3` (EV_ABS) -- measured again after making VNC the primary
+display, so the earlier conclusion was not about being a second console. The touch driver has nothing
+to do with relative motion.
+
+So the bridge does the job itself. `tools/qemu/vncbridge.py` is an RFB server on 127.0.0.1:5910 that
+
+- **serves the screen itself**: one `screendump` per request, at the panel's own 1125x2436 (the frame
+  is BGRX on the wire; that is what a client asks for and what this hands it);
+- **turns the client's pointer into touches**: a press becomes absolute x/y plus the button, a drag
+  becomes absolute x/y while the button is held, a release becomes the button up -- all of it through
+  QMP, the interface that is known to reach this guest (addendum 28), never through QEMU's own VNC
+  input path.
+
+Two pictures of it working, both driven by a VNC client connected to the bridge:
+
+| file | what the client did | what the machine did |
+|---|---|---|
+| `docs/demo/vnc-long-press-menu.png` | pressed and held for a second | the home screen's context menu for the Settings icon: Remove App, Battery, Wi-Fi, Bluetooth, with the backdrop blurred |
+| `docs/demo/vnc-click-settings.png` | dismissed the menu, then a quick click | Settings, restored to the last page it had open |
+
+A press of 0.08 s is a tap; a press of a second is a long press. Both arrive, so the whole gesture
+vocabulary of the interface is available from a VNC viewer -- on a machine that QEMU's VNC cannot
+point at all.
+
+```
+tools/qemu/vncbridge.py --port 5910 --qmp 4445 --fps 1     # then any VNC viewer on 127.0.0.1:5910
+```
