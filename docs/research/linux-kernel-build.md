@@ -1994,3 +1994,31 @@ from outside the guest and dumps each vCPU's PC/SP and kernel stack through `xp`
 that actually panics; the 07:24 boot stayed idle at the spinner and had not panicked at 12 minutes.
 Until such a dump, the workaround is a smaller machine (`cpus=1` or `cpus=2`), which removes the
 four-vCPU scheduler contention this lock timeout grows out of.
+
+### The 07:08 panic: a second lock, and its owner is already 0
+
+The 07:00 resume produced another Ticket panic at 07:08, on a **different** word:
+
+```
+Ticket spinlock[0xfffffff007b0d380] timeout after 154091095 ticks;
+cticket 0x40, nticket 0x41, waiting for 0x40,
+current owner: 0 (on CPU -1), orig owner: 0xfffffff62b250608
+Panicked task: pid 0 kernel_task
+```
+
+`0xfffffff007b0d380` is `thread_call_groups[THREAD_CALL_INDEX_HIGH].tcg_lock`: the array starts at
+`0xfffffff007b0d100`, the group is 0x280 bytes, and `tcg_lock` is the first field. The owner field is
+**0** while the ticket is still 0x40 — there is no thread holding it. That is a lost unlock (the
+owner cleared but the ticket never advanced), not a thread that forgot to unlock.
+
+So the two panic families are:
+
+| lock | symbol | owner | panicked task |
+|---|---|---|---|
+| `0xfffffff007b68880` | `pset0.sched_lock` (+0x100) | a thread on CPU 3 | `fseventsd` / `backboardd` |
+| `0xfffffff007b0d380` | `thread_call_groups[HIGH].tcg_lock` | **0 (CPU -1)** | `kernel_task` |
+
+One line for the second: **the high-priority thread-call ticket lock is stuck with no owner; its
+ticket never advanced, so the 60-second timeout is a lost unlock, not a held lock.** Both locks are
+ticket locks whose wait/unlock path uses `wfe`/`sev` and atomics; under TCG that is the common
+factor to test next, before blaming either subsystem.
