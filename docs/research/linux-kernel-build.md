@@ -1507,3 +1507,17 @@ MTLCreateSystemDefaultDevice() = "HakiOS Adreno 642L (Metal: a device that exist
 
 So a device exists, buffers and libraries verify, and the missing piece is named in the diagnostic
 itself: no GPU queue, because that needs `hakios-metal` -- and behind it a GPU that can execute.
+
+### 35a. The emulator-side knobs, measured and rejected
+
+Two of them were worth trying, and neither helps:
+
+- **`-cpu max`** (with `tb-size=4096`): the machine produced no frame in seven minutes, where
+  `cortex-a76` reaches the home screen in five or six. `max` turns on SVE and the rest of the
+  optional architecture, and TCG emulates those slowly -- slower than whatever it gains.
+- **`tb-size=4096`** instead of 1536: tried with the above, so it cannot be separated from it, and
+  the effect of a larger translation cache this far above the working set is small by construction.
+  Not worth another boot cycle to isolate.
+
+So the emulator is not where the seventeen times are hiding either. Recorded here so the next
+attempt does not spend another evening on it.
