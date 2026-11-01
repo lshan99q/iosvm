@@ -1319,3 +1319,21 @@ key-coloured pixels), and `tools/qemu/webvnc.py` turns each character into one, 
 `docs/demo/webvnc-typed-abc.png` is the FaceTime sign-in field showing `abc`, typed in a browser.
 Digits and punctuation are not mapped yet: they live on the keyboard's second page, which would need
 that page's own measurement.
+
+### 32b. Making it tolerable to use: five measurements, five fixes
+
+Watching the machine was fine until something moved -- then it dragged. Measured, not guessed:
+
+| what was wrong | measured | what it is now |
+|---|---|---|
+| every pointer event opened its own QMP connection | ~20 ms each, so a drag of thirty events queued for most of a second -- **this is what "laggy" felt like** | one connection, kept open: **2 ms** an event |
+| frames were PNG from QEMU | 0.251 s a frame | PPM, raw: **0.066 s** -- QEMU writing pixels is four times faster than compressing them |
+| frames were the whole panel at full quality | 132 KB each | 75% of the panel, quality 70: **30 KB** |
+| frames were written to disk | 8 MB a frame, several a second | `/dev/shm` |
+| the viewer ran at one rate whatever happened | 19.5% of a core, all the time, competing with the guest | **1 fps idle** (and identical frames are not sent at all), **8 fps for 2.5 s after any touch**, ~4-7 fps of fresh frames during a drag; **7%** of a core |
+
+What does not change: the guest's own ceiling. It presents about ten frames a second and reports
+3.2-3.5 ms a frame in the driver, but a composited frame costs ~140 ms in Mesa's software rasteriser,
+so somewhere around seven frames a second is all the animation this machine can do. The fixes above
+make the *interface* responsive -- a drag follows the finger instead of queueing -- and stop the
+viewer from taking the guest's time; they cannot make the guest draw faster than it draws.

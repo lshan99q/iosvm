@@ -35,11 +35,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>iosvm</title>
 <style>
-  html,body{margin:0;height:100%;background:#111;color:#ccc;font:13px system-ui,sans-serif;overflow:hidden}
-  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
-  #screen{max-width:100%;max-height:100%;touch-action:none;cursor:pointer;image-rendering:auto}
-  #bar{position:fixed;left:8px;bottom:6px;font-size:12px;opacity:.6}
-  #status{position:fixed;right:8px;top:6px;font-size:12px;opacity:.6}
+  html,body{margin:0;height:100%;background:#0b0b0d;color:#bbb;font:13px system-ui,sans-serif;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:8px;box-sizing:border-box}
+  #screen{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;
+          touch-action:none;cursor:pointer;border-radius:10px;box-shadow:0 0 0 1px #222,0 12px 40px #000a}
+  #bar{position:fixed;left:10px;bottom:8px;font-size:12px;opacity:.55}
+  #status{position:fixed;right:10px;top:8px;font-size:12px;opacity:.55}
 </style></head>
 <body>
 <div id="wrap"><img id="screen" alt=""></div>
@@ -64,11 +65,19 @@ img.addEventListener('pointerdown', ev => {
   down = true; moved = false;
   send({t: 'down', x: startX, y: startY});
 });
+let pendingMove = null, moveTimer = null;
+function flushMove() {
+  moveTimer = null;
+  if (pendingMove) { send({t: 'move', x: pendingMove[0], y: pendingMove[1]}); pendingMove = null; }
+}
 img.addEventListener('pointermove', ev => {
   if (!down) return;
   const [x, y] = toPanel(ev);
   if (Math.abs(x - startX) > 4 || Math.abs(y - startY) > 4) moved = true;
-  if (moved) { send({t: 'move', x, y}); lastX = x; lastY = y; }
+  if (!moved) return;
+  lastX = x; lastY = y;
+  pendingMove = [x, y];                      // one message per ~25 ms, not one per event
+  if (moveTimer === null) moveTimer = setTimeout(flushMove, 25);
 });
 function endPointer(ev) {
   if (!down) return;
@@ -89,12 +98,13 @@ document.addEventListener('keydown', ev => {
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.binaryType = 'blob';
-  ws.onopen = () => status.textContent = 'connected';
+  let frames = 0;
+  ws.onopen = () => { status.textContent = 'connected'; };
   ws.onclose = () => { status.textContent = 'disconnected, retrying…'; setTimeout(connect, 1000); };
   ws.onmessage = ev => {
     if (typeof ev.data === 'string') { status.textContent = ev.data; return; }
     const url = URL.createObjectURL(ev.data);
-    img.onload = () => URL.revokeObjectURL(url);
+    img.onload = () => { URL.revokeObjectURL(url); frames++; status.textContent = frames + ' frames'; };
     img.src = url;
   };
 }
@@ -146,6 +156,52 @@ def ws_recv(conn):
     if masked:
         payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
     return opcode, payload
+
+
+class Pointer:
+    """One connection for input, kept open: a drag is dozens of events."""
+
+    def __init__(self, port):
+        self.port = port
+        self.lock = threading.RLock()
+        self.conn = None
+        self.file = None
+
+    def _connect(self):
+        try:
+            self.conn = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            self.file = self.conn.makefile("rwb", buffering=0)
+            time.sleep(0.1)
+            self._call({"execute": "qmp_capabilities"})
+            return True
+        except OSError:
+            self.conn = self.file = None
+            return False
+
+    def _call(self, obj):
+        self.file.write((json.dumps(obj) + "\n").encode())
+        while True:
+            line = self.file.readline()
+            if not line:
+                raise OSError("qmp closed")
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "return" in message or "error" in message:
+                return message
+
+    def send(self, events):
+        with self.lock:
+            for _ in range(2):
+                if self.conn is None and not self._connect():
+                    return False
+                try:
+                    self._call({"execute": "input-send-event", "arguments": {"events": events}})
+                    return True
+                except OSError:
+                    self.conn = self.file = None
+            return False
 
 
 def qmp(events, port):
@@ -210,22 +266,30 @@ for _letter, _x in zip(_letters, _xs):
 
 
 class Screen:
-    """One frame at a time, through QMP -- not the human monitor, which allows a single client and
-    would then be unavailable to everything else (screendump.sh, tap.py's neighbours)."""
+    """One frame at a time through QMP, as PPM -- not PNG: QEMU writes the raw pixels 4x faster
+    than it compresses them (0.066 s against 0.251 s on this machine), and the JPEG is made here
+    anyway. The picture is sent at a fraction of the panel's size: the browser scales it back up,
+    clicks are scaled to the panel independently, and the smaller frame is cheaper to encode and
+    to push."""
 
-    def __init__(self, qmp_port, quality=72):
+    def __init__(self, qmp_port, quality=70, scale=0.75):
         self.qmp_port = qmp_port
         self.quality = quality
+        self.scale = max(0.25, min(1.0, scale))
         self.lock = threading.RLock()
-        self.path = f"/tmp/webvnc-{qmp_port}.png"
+        # in memory, not on disk: a frame is 8 MB and at several a second the writes would be the
+        # slowest thing in the loop
+        base = "/dev/shm" if os.path.isdir("/dev/shm") else "/tmp"
+        self.path = f"{base}/webvnc-{qmp_port}.ppm"
         self.conn = None
         self.file = None
+        self.last = None
 
     def _connect(self):
         try:
             self.conn = socket.create_connection(("127.0.0.1", self.qmp_port), timeout=8)
             self.file = self.conn.makefile("rwb", buffering=0)
-            time.sleep(0.15)          # QMP greets first; a write that overtakes it reads as a timeout
+            time.sleep(0.15)
             self._call({"execute": "qmp_capabilities"})
             return True
         except OSError:
@@ -247,16 +311,12 @@ class Screen:
 
     def grab(self):
         with self.lock:
-            try:
-                os.unlink(self.path)
-            except OSError:
-                pass
             for _ in range(2):
                 if self.conn is None and not self._connect():
                     return None
                 try:
                     self._call({"execute": "screendump",
-                                "arguments": {"filename": self.path, "format": "png"}})
+                                "arguments": {"filename": self.path, "format": "ppm"}})
                 except OSError:
                     try:
                         self.conn.close()
@@ -265,34 +325,55 @@ class Screen:
                     self.conn = None
                     continue
                 try:
-                    from PIL import Image
-                    with Image.open(self.path) as image:
-                        image = image.convert("RGB")
-                        if image.size != (PANEL_W, PANEL_H):
-                            image = image.crop((0, 0, min(image.width, PANEL_W),
-                                                min(image.height, PANEL_H)))
-                            image = image.resize((PANEL_W, PANEL_H))
-                        out = io.BytesIO()
-                        image.save(out, "JPEG", quality=self.quality)
-                    try:
-                        os.unlink(self.path)
-                    except OSError:
-                        pass
-                    return out.getvalue()
-                except Exception as problem:              # noqa: BLE001 - a frame we could not make
-                    print(f"webvnc: no frame ({problem})", flush=True)
+                    with open(self.path, "rb") as handle:
+                        data = handle.read()
+                    os.unlink(self.path)
+                except OSError:
+                    continue
+                frame = self._to_jpeg(data)
+                if frame is None:
                     return None
+                # a frame identical to the last one need not travel again: when nothing moves the
+                # browser keeps what it has, and the socket stays quiet
+                if frame == self.last:
+                    return b""
+                self.last = frame
+                return frame
+            return None
+
+    def _to_jpeg(self, data):
+        try:
+            from PIL import Image
+            header_end = data.index(b"255\n") + 4
+            magic, size_line = data[:header_end].split(b"\n")[:2]
+            width, height = (int(v) for v in size_line.split())
+            pixels = data[header_end:]
+            stride = len(pixels) // height
+            rows = b"".join(pixels[y * stride:y * stride + width * 3] for y in range(height))
+            image = Image.frombytes("RGB", (width, height), rows)
+            if image.width > PANEL_W or image.height > PANEL_H:
+                image = image.crop((0, 0, min(image.width, PANEL_W), min(image.height, PANEL_H)))
+            if self.scale < 1.0:
+                image = image.resize((max(1, int(image.width * self.scale)),
+                                      max(1, int(image.height * self.scale))), Image.BILINEAR)
+            out = io.BytesIO()
+            image.save(out, "JPEG", quality=self.quality)
+            return out.getvalue()
+        except Exception as problem:                      # noqa: BLE001 - a frame we could not make
+            print(f"webvnc: no frame ({problem})", flush=True)
             return None
 
 
 class Hub:
     """The frame a client should see, and who is listening."""
 
-    def __init__(self, screen, fps):
+    def __init__(self, screen, fps, idle_fps=1.0):
         self.screen = screen
         self.interval = 1.0 / max(0.2, fps)
+        self.idle_interval = 1.0 / max(0.2, idle_fps)
+        self.burst_until = 0.0
         self.clients = []
-        self.clients_lock = threading.Lock()
+        self.clients_lock = threading.RLock()
         self.latest = None
         self.frames = 0
         threading.Thread(target=self._loop, daemon=True).start()
@@ -312,6 +393,10 @@ class Hub:
             if conn in self.clients:
                 self.clients.remove(conn)
 
+    def kick(self, seconds=2.5):
+        """Something was touched: send frames faster for a moment, because that is when it matters."""
+        self.burst_until = time.time() + seconds
+
     def _loop(self):
         while True:
             started = time.time()
@@ -320,19 +405,23 @@ class Hub:
                 self.latest = frame
                 self.frames += 1
                 with self.clients_lock:
-                    for conn in list(self.clients):
-                        try:
-                            conn.sendall(ws_frame(frame))
-                        except OSError:
-                            self.remove(conn)
-            rest = self.interval - (time.time() - started)
+                    clients = list(self.clients)
+                for conn in clients:
+                    try:
+                        conn.sendall(ws_frame(frame))
+                    except OSError:
+                        self.remove(conn)          # a client that went away takes no frame
+
+
+            pace = self.interval if time.time() < self.burst_until else self.idle_interval
+            rest = pace - (time.time() - started)
             if rest > 0:
                 time.sleep(rest)
 
 
 def tap_at(x, y, port):
-    qmp(abs_xy(x, y) + btn(True), port)
-    qmp(btn(False), port)
+    port.send(abs_xy(x, y) + btn(True))
+    port.send(btn(False))
 
 
 def type_key(char, port):
@@ -357,7 +446,7 @@ def type_key(char, port):
     tap_at(*position, port)
 
 
-def make_handler(hub, qmp_port, page):
+def make_handler(hub, qmp_port, page, pointer):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -406,16 +495,17 @@ def make_handler(hub, qmp_port, page):
                 except json.JSONDecodeError:
                     continue
                 kind = message.get("t")
+                hub.kick()
                 if kind == "down":
-                    qmp(abs_xy(message["x"], message["y"]) + btn(True), qmp_port)
+                    pointer.send(abs_xy(message["x"], message["y"]) + btn(True))
                     pressed = True
                 elif kind == "move":
-                    qmp(abs_xy(message["x"], message["y"]), qmp_port)
+                    pointer.send(abs_xy(message["x"], message["y"]))
                 elif kind == "up":
-                    qmp(btn(False), qmp_port)
+                    pointer.send(btn(False))
                     pressed = False
                 elif kind == "key":
-                    type_key(message.get("k", ""), qmp_port)
+                    type_key(message.get("k", ""), pointer)
 
     return Handler
 
@@ -425,13 +515,16 @@ def main(argv):
     parser.add_argument("--port", type=int, default=5980)
     parser.add_argument("--monitor", type=int, default=4444)
     parser.add_argument("--qmp", type=int, default=4445)
-    parser.add_argument("--fps", type=float, default=1.0)
+    parser.add_argument("--fps", type=float, default=8.0, help="frames a second while being used")
+    parser.add_argument("--idle-fps", type=float, default=1.0, help="frames a second when left alone")
+    parser.add_argument("--scale", type=float, default=0.75, help="fraction of the panel to send")
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args(argv)
 
     page = PAGE.replace("%W%", str(PANEL_W)).replace("%H%", str(PANEL_H))
-    hub = Hub(Screen(args.qmp), args.fps)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(hub, args.qmp, page))
+    hub = Hub(Screen(args.qmp, scale=args.scale), args.fps, args.idle_fps)
+    pointer = Pointer(args.qmp)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(hub, args.qmp, page, pointer))
     print(f"webvnc: http://{args.host}:{args.port}/  (monitor {args.monitor}, qmp {args.qmp})", flush=True)
     server.serve_forever()
 
