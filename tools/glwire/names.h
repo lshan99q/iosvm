@@ -47,6 +47,8 @@ struct glstate {
 	uint32_t current_program;       /* the guest's, for the uniform-location key */
 	GLuint current_host_program;
 	struct attrib_state attribs[16];
+	unsigned char *panel;           /* the last 1125x2436 BGRA upload, packed to 4500 */
+	int panel_width, panel_height;
 };
 
 static uint64_t
@@ -216,6 +218,8 @@ names_init(struct glstate *g)
 static void
 names_free(struct glstate *g)
 {
+	free(g->panel);
+	g->panel = NULL;
 	for (unsigned i = 0; i < 16; i++) {
 		free(g->attribs[i].data);
 		g->attribs[i].data = NULL;
@@ -244,10 +248,112 @@ names_texture_put(struct glstate *g, uint64_t guest, uint64_t host)
 	name_map_put(&g->textures, guest, host);
 }
 
+/* An upload may have created the texture before the stream's glGenTextures record is replayed;
+ * that record must not throw the uploaded host texture away. */
+static void
+names_texture_put_new(struct glstate *g, uint64_t guest, uint64_t host)
+{
+	uint64_t present;
+
+	if (!name_map_get(&g->textures, guest, &present)) {
+		name_map_put(&g->textures, guest, host);
+	}
+}
+
 static GLuint
 names_texture_take(struct glstate *g, GLuint guest)
 {
 	return (GLuint)name_map_take(&g->textures, guest);
+}
+
+/* An IOSurface upload from eagl.c: create the host texture if the guest made it outside the table,
+ * then give it the pixels with the surface's own row stride. */
+static void
+names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint internal,
+    GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei row_bytes,
+    GLsizei pixel_bytes, void *data)
+{
+	uint64_t mapped = 0;
+	GLuint host;
+	GLint previous = 0;
+
+	if (data == NULL || width <= 0 || height <= 0) {
+		free(data);
+		return;
+	}
+	/* GL_BGRA is a format, not a desktop internal format; the guest's ES driver accepts it. */
+	if (internal == GL_BGRA) {
+		internal = GL_RGBA;
+	}
+	if (!name_map_get(&g->textures, guest, &mapped)) {
+		glGenTextures(1, &host);
+		names_texture_put(g, guest, host);
+		glBindTexture(target, host);
+		glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	} else {
+		host = (GLuint)mapped;
+	}
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+	{
+		/* The texture may be attached to the framebuffer that is bound; redefining it there
+		 * makes llvmpipe 25.2.8 fault. Detach the framebuffer for the upload and put it back. */
+		GLsizei row = pixel_bytes > 0 ? width * pixel_bytes : row_bytes;
+		unsigned char *packed = malloc((size_t)row * (size_t)height);
+
+		/* llvmpipe also mishandles a large GL_UNPACK_ROW_LENGTH: pack the rows first. */
+		if (packed != NULL && row_bytes >= row) {
+			for (GLsizei y = 0; y < height; y++) {
+				memcpy(packed + (size_t)y * row, (const unsigned char *)data + (size_t)y * row_bytes, row);
+			}
+			if (width == 1125 && height == 2436) {
+				free(g->panel);
+				g->panel = malloc((size_t)row * (size_t)height);
+				if (g->panel != NULL) {
+					memcpy(g->panel, packed, (size_t)row * (size_t)height);
+					g->panel_width = width;
+					g->panel_height = height;
+				}
+			}
+			if (format == GL_BGRA) {
+				/* llvmpipe's BGRA upload path faulted on the second large texture; hand it RGBA. */
+				for (size_t at = 0; at + 4 <= (size_t)row * (size_t)height; at += 4) {
+					unsigned char b = packed[at];
+
+					packed[at] = packed[at + 2];
+					packed[at + 2] = b;
+				}
+				if (g->panel != NULL) {
+					for (size_t at = 0; at + 4 <= (size_t)row * (size_t)height; at += 4) {
+						unsigned char b = g->panel[at];
+
+						g->panel[at] = g->panel[at + 2];
+						g->panel[at + 2] = b;
+					}
+				}
+				format = GL_RGBA;
+			}
+		} else {
+			free(packed);
+			packed = NULL;
+		}
+		glBindTexture(target, host);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		glTexImage2D(target, 0, internal, width, height, 0, format, type,
+		    packed != NULL ? packed : data);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		glBindTexture(target, (GLuint)previous);
+		if (packed != NULL) {
+			free(data);
+			data = packed;  /* kept until the frame's release */
+		}
+	}
+	/* llvmpipe may keep the client pointer until the next draw/flush; freeing it here was a
+	 * use-after-free (the crash came on the next GL call). The frame's release frees it. */
+	wire_keep(data);
 }
 
 static GLuint
@@ -404,6 +510,8 @@ names_attrib_enabled(struct glstate *g, GLuint index, int enabled)
 static void
 names_attribs_release(struct glstate *g)
 {
+	free(g->panel);
+	g->panel = NULL;
 	for (unsigned i = 0; i < 16; i++) {
 		free(g->attribs[i].data);
 		g->attribs[i].data = NULL;

@@ -25,11 +25,9 @@
 
 #include "wire.h"
 
-#define REMOTE_MAGIC_RECORDS 0x52454d4f54453130ULL   /* "REMOTE10" */
-#define REMOTE_MAGIC_FRAME   0x52454d4f54453230ULL
 /* A frame's texture upload is the size of the panel (10.96 MB), and a page can upload more than one
  * layer; 4 MiB silently dropped the rest of the frame, so the host was sent a truncated record. */
-#define REMOTE_ARENA_BYTES   (32u << 20)
+#define REMOTE_ARENA_BYTES   (64u << 20)
 
 static unsigned char remote_arena[REMOTE_ARENA_BYTES] __attribute__((aligned(4096)));
 static wire_buffer w;  /* the generated recorders append here */
@@ -39,14 +37,6 @@ static int remote_fd = -1;
 static int remote_enabled;
 static int remote_frames;
 static long remote_total_us;
-/*
- * Every process that loads this library has its own arena and its own picture, and the host finds
- * them by these words in the RAM file. One fixed pair would make every process's buffer look alike,
- * and the host would always read the first one it found; the process id makes each pair unique.
- */
-static uint64_t remote_records_magic = REMOTE_MAGIC_RECORDS;
-static uint64_t remote_frame_magic = REMOTE_MAGIC_FRAME;
-
 /* The vertex arrays of the attributes that are on, as the guest last gave them to glVertexAttribPointer. */
 static struct {
 	const void *pointer;
@@ -88,12 +78,6 @@ eagl_remote_begin(void)
 	if (access("/redwood/bin/glremote_on", F_OK) != 0) {
 		return;
 	}
-	{
-		uint32_t tag = (uint32_t)getpid() & 0xffffffu;
-
-		remote_records_magic = 0x52454d4f00000000ULL | tag;
-		remote_frame_magic = 0x52454d4f01000000ULL | tag;
-	}
 	file = fopen("/redwood/etc/glremote", "r");
 	if (file != NULL) {
 		if (fscanf(file, "%63s %d", host, &port) != 2) {
@@ -105,8 +89,7 @@ eagl_remote_begin(void)
 		remote_host_port = port;
 	}
 	remote_enabled = 1;
-	wire_reset(&w, remote_arena + 8, REMOTE_ARENA_BYTES - 8);
-	memcpy(remote_arena, &remote_records_magic, 8);
+	wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 }
 
 void
@@ -121,10 +104,6 @@ eagl_remote_resize(size_t bytes)
 		remote_frame_bytes = 0;
 		return;
 	}
-	/* A new allocation gets a new word: the host may still have the old buffer's address cached,
-	 * and its magic may still be in the freed pages. */
-	remote_frame_magic += 1ULL << 24;
-	memcpy(remote_frame, &remote_frame_magic, 8);
 	remote_frame_bytes = bytes;
 }
 
@@ -140,9 +119,9 @@ eagl_remote_pending(void)
 	return w.at;
 }
 
-/* Hand the frame to the host and wait for it to say the picture is there. The host replays the
- * records on its own GL context and writes the pixels into our frame buffer, which it finds by the
- * magic in front of it -- so no address travels over the wire. */
+/* Hand the frame to the host and wait for the picture. The host replays the records on its own GL
+ * context and sends the panel's pixels back; this side copies them into the display's surface. No
+ * address travels, and the host needs no access to the guest's RAM. */
 int
 eagl_remote_flush(int width, int height)
 {
@@ -175,8 +154,7 @@ eagl_remote_flush(int width, int height)
 		setsockopt(remote_fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
 	}
 	started = remote_now_ms();
-	snprintf(request, sizeof(request), "R %llu %llu %d %d %zu %zu\n",
-	    (unsigned long long)remote_records_magic, (unsigned long long)remote_frame_magic,
+	snprintf(request, sizeof(request), "R %d %d %zu %zu\n",
 	    width, height, w.at, (size_t)width * height * 4);
 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
 	    send(remote_fd, w.base, w.at, 0) != (ssize_t)w.at) {
@@ -188,10 +166,61 @@ eagl_remote_flush(int width, int height)
 		at++;
 	}
 	reply[at] = '\0';
-	remote_total_us += (long)((remote_now_ms() - started) * 1000.0);
-	remote_frames++;
-	wire_reset(&w, remote_arena + 8, REMOTE_ARENA_BYTES - 8);
-	return reply[0] == 'R' ? 1 : 0;
+	{
+		size_t picture_bytes = 0;
+		int received = 0;
+
+		if (sscanf(reply, "R %zu", &picture_bytes) == 1 &&
+		    picture_bytes == (size_t)width * height * 4) {
+			while (received < (int)picture_bytes) {
+				ssize_t got = recv(remote_fd, remote_frame + 8 + received,
+				    picture_bytes - (size_t)received, 0);
+
+				if (got <= 0) {
+					break;
+				}
+				received += (int)got;
+			}
+		}
+		remote_total_us += (long)((remote_now_ms() - started) * 1000.0);
+		remote_frames++;
+		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
+		return received == (int)picture_bytes && picture_bytes != 0 ? 1 : 0;
+	}
+}
+
+/*
+ * An IOSurface's pixels, for the host. eagl.c uploads these with its own glTexImage2D -- outside
+ * the EAGL table, so the ordinary recorder never sees them. Without this the host has the texture's
+ * name but no pixels, and every frame it draws is black. The row stride travels because an IOSurface
+ * is usually wider than the picture (4608 bytes a row for a 1125-pixel panel).
+ */
+void
+eagl_remote_upload(GLuint texture, GLenum target, GLint internal, GLsizei width, GLsizei height,
+    GLenum format, GLenum type, const void *pixels, GLsizei row_bytes, GLsizei pixel_bytes)
+{
+	size_t bytes;
+
+	if (!remote_enabled || pixels == NULL || width <= 0 || height <= 0 ||
+	    row_bytes <= 0 || pixel_bytes <= 0) {
+		return;
+	}
+	bytes = (size_t)row_bytes * (size_t)height;
+	if (bytes == 0 || bytes > (24u << 20)) {
+		return;
+	}
+	wire_open(&w, 201);
+	wire_u32(&w, texture);
+	wire_u32(&w, target);
+	wire_i32(&w, internal);
+	wire_i32(&w, width);
+	wire_i32(&w, height);
+	wire_u32(&w, format);
+	wire_u32(&w, type);
+	wire_i32(&w, row_bytes);
+	wire_i32(&w, pixel_bytes);
+	wire_bytes(&w, pixels, (GLsizei)bytes);
+	wire_close(&w);
 }
 
 /* The picture the host drew, for whoever presents it. */

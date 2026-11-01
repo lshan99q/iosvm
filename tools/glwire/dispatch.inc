@@ -135,7 +135,7 @@ switch (opcode) {
 		glGenTextures(a0, host_names);
 		if (host_names != NULL && p1 != NULL) {
 			for (GLsizei i = 0; i < a0; i++) {
-				names_texture_put(g, ((GLuint *)p1)[i], host_names[i]);
+				names_texture_put_new(g, ((GLuint *)p1)[i], host_names[i]);
 			}
 		}
 		free(host_names);
@@ -538,6 +538,26 @@ switch (opcode) {
 		GLsync host_sync = (GLsync)(uintptr_t)names_sync(g, v0);
 		(void)glClientWaitSync(host_sync, a1, a2);
 		(void)guest_result;
+		break;
+	}
+	case 201: {
+		/* eagl.c's own IOSurface upload: pixels the table never saw */
+		GLuint texture = wire_get_u32(r);
+		GLenum target = wire_get_u32(r);
+		GLint internal = wire_get_i32(r);
+		GLsizei width = wire_get_i32(r);
+		GLsizei height = wire_get_i32(r);
+		GLenum format = wire_get_u32(r);
+		GLenum type = wire_get_u32(r);
+		GLsizei row_bytes = wire_get_i32(r);
+		GLsizei pixel_bytes = wire_get_i32(r);
+		GLsizei bytes = 0;
+		void *data = wire_take(r, &bytes);
+		printf("glwire: upload texture %u target %#x internal %#x %dx%d format %#x type %#x row %d pixel %d bytes %d\n",
+		    texture, target, internal, width, height, format, type, row_bytes, pixel_bytes, bytes);
+		fflush(stdout);
+		names_texture_upload(g, texture, target, internal, width, height, format, type,
+		    row_bytes, pixel_bytes, data);
 		break;
 	}
 	case 200: {

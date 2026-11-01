@@ -1916,3 +1916,81 @@ The guest's real pitch is 4500 (the panel's, and the loader's ramfb stride); the
 IOSurface is 4608, but that is the layer's memory, not what ramfb scans. `tools/screendump.sh` and
 `tools/glwire/panel_probe.py` already drop the PPM padding; `tools/qemu/screendump.sh` and
 `webvnc.py` already did. The raw PPM still needs a stride-aware reader.
+
+## Addendum 41: the black frame was a missing IOSurface, and the texture path now draws
+
+The 04:26 frames the host saved were 10,962,000 bytes of RGB **zero**: 0 nonzero pixels, one colour.
+That is not a black scene; it is the absence of every texture. The records for those frames were 25
+KB, not the 10.9 MB a panel-sized `glTexImage2D` would need.
+
+The reason is a boundary the table does not cross. `glBindTexture` and the draw calls come through
+the 62 EAGL slots and are recorded; the pixels do not. `eagl.c`'s `surface_to_texture()` calls
+`glTexImage2D` **itself**, directly into Mesa, so the recorder never sees the upload and the host
+keeps the name but not the content. The same is true for a target texture: it is drawn into, and
+`surface_to_texture()` is never called for it, so its content exists only on the guest.
+
+What was added, and where:
+
+- `eagl_remote_upload()` in `eagl_remote.c`, called from `surface_to_texture()` right after the
+  local `glTexImage2D`, with the guest texture name, internal format, size, format/type, row stride
+  and bytes-per-pixel. It is wire opcode 201.
+- The host's `names_texture_upload()` maps or creates the host texture, packs the rows (the IOSurface
+  is 4608 bytes a row for a 1125-pixel picture), converts BGRA to RGBA for llvmpipe, and uploads.
+- A target texture is drawn into, so `frame_end()` now also uploads the **composed panel surface**
+  (`0xFFFF0001`, 1125 x 2436, the IOSurface's own stride) before the host hand-over. That is the
+  texture the host's panel draw uses.
+- The copies back into the CA surface are row-wise now: the surface is 4608 bytes a row, the host
+  picture 4500; the old flat `memcpy` sheared every row and corrupted the window server's surface.
+
+llvmpipe 25.2.8 faulted a few calls after replaying the CA draw stream once a large texture had been
+uploaded and attached (`SIGSEGV` in `libgallium`, after `glFramebufferTexture2D`; the failing call
+was `glClearColor`). The host therefore processes opcode 201 **first, with no framebuffer bound**, and
+when a panel-sized upload is present draws that composed surface as a textured quad. This is the
+"panel" path, not a replay of CA's FBO graph; it produces the guest's composed picture.
+
+Evidence from the live guest (gl=1, glcopy=1):
+
+```
+host_glwire: upload texture 4294901761 target 0xde1 internal 0x1908 1125x2436
+             format 0x80e1 type 0x1401 row 4608 pixel 4 bytes 11225088
+host_glwire: saved frame-6-1125x2436.bgra
+frame 6: 88,371 nonzero RGB pixels, 251 colours  -> docs/demo/host-live-textured-frame.png
+frame 11: 3,876 nonzero RGB pixels, 142 colours  -> docs/demo/host-live-spinner.png
+```
+
+The Apple logo and the spinner are drawn by the host from a real texture upload; the earlier black
+frame is `docs/demo/host-live-frame-black.png`. `host-live-textured-frame.png` is not the Settings
+page: the gl=1/glcopy=1 boot stayed at the boot spinner past eleven minutes (the original guest's
+Settings page is drawn by the CPU renderer, no GL). So the texture path is fixed and demonstrated;
+the Settings-page acceptance still needs a boot that reaches SpringBoard's home screen.
+
+## Addendum 42: the Ticket spinlock is pset0's scheduler lock
+
+Both panics name the same word: `0xfffffff007b68880`. The kernel symbols put `_pset0` at
+`0xfffffff007b68780`, and `struct processor_set` has `sched_lock` at +0x100 (a
+`lck_ticket_t`, `SCHED_PSET_TLOCK`). The lock is the **processor set's scheduler ticket lock**.
+
+The waiting thread's backtrace (symbolized from `mach.development.bcm2837`):
+
+```
+thread_select -> lck_ticket_contended -> hw_lck_ticket_contended
+  -> hw_lck_ticket_timeout_panic -> panic
+```
+
+It is in `thread_block_reason` / `ipc_mqueue_receive`, i.e. an ordinary Mach message receive that
+needs the scheduler lock to block. The owner is a thread on **CPU 3** (tickets: cticket 0x41,
+waiting 0x44, nticket 0x45 in one panic; 0xee/0xef/0xf2 in the other), and the owner did not release
+for 60,000,024 ticks. The panicked task is whoever waited longest (`fseventsd`, `backboardd`), not the
+holder.
+
+One line: **a thread on CPU 3 holds `pset0.sched_lock` and never releases it; the visible panic is
+only the 60-second timeout of another thread waiting for the scheduler.**
+
+The holder's PC cannot be recovered from the in-guest stackshot: the panic log says "Attempting to
+forcibly halt cpu 3; cpu 3 failed to halt with error -5: halt not supported for this configuration"
+and then "debugger synchronization failed, no stackshot". `tools/qemu/panic_probe.py` is the way
+around it: it waits for the panic line in the serial log, then uses QMP `stop` + `info registers -a`
+from outside the guest and dumps each vCPU's PC/SP and kernel stack through `xp`. That needs a boot
+that actually panics; the 07:24 boot stayed idle at the spinner and had not panicked at 12 minutes.
+Until such a dump, the workaround is a smaller machine (`cpus=1` or `cpus=2`), which removes the
+four-vCPU scheduler contention this lock timeout grows out of.

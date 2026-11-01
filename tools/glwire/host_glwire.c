@@ -1,15 +1,15 @@
 /* host_glwire: make CoreAnimation's GL calls on the host's GPU.
  *
  * The guest records the calls QuartzCore makes (62 of them, see spec.def) and this replays them on
- * a real context -- a Tesla V100 here -- then copies the resulting picture straight into the guest's
- * memory, which is mapped as the RAM file. Nothing is read back into the guest's CPU.
+ * a real context -- a Tesla V100 here -- then sends the picture back over the same socket. The guest
+ * copies it into the surface its display reads; the host needs no mapping of the guest's RAM, so a
+ * guest with anonymous RAM is enough.
  *
  * Each guest process that loads the library is one connection, and each connection gets its own GL
  * context and its own name maps: the guest's object names are per process, and two processes may
- * well both call their first texture 1. The request carries the magic words the guest put in front
- * of its record arena and its picture, so the host can find both without an address travelling.
+ * well both call their first texture 1.
  *
- *   host_glwire <ram.img> <port>
+ *   host_glwire [port]          (default 9110)
  */
 #define GL_GLEXT_PROTOTYPES
 #include <EGL/egl.h>
@@ -17,14 +17,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,17 +37,13 @@ struct client {
 	GLuint framebuffer;
 	int width, height;
 	struct glstate names;
-	unsigned char *frame_at;        /* the magic word in the RAM file, if seen */
-	uint64_t frame_magic;
-	int have_frame_at;
 };
 
 static EGLDisplay display;
 static EGLConfig config;
-static unsigned char *ram;
-static size_t ram_bytes;
 static struct client clients[MAX_CLIENTS];
 static unsigned long long frames_replayed;
+static const char *save_dir;
 
 static double
 now_seconds(void)
@@ -59,6 +52,40 @@ now_seconds(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static int
+send_all(int fd, const void *data, size_t bytes)
+{
+	const char *p = data;
+
+	while (bytes > 0) {
+		ssize_t sent = send(fd, p, bytes, 0);
+
+		if (sent <= 0) {
+			return 0;
+		}
+		p += sent;
+		bytes -= (size_t)sent;
+	}
+	return 1;
+}
+
+static int
+recv_all(int fd, void *data, size_t bytes)
+{
+	char *p = data;
+
+	while (bytes > 0) {
+		ssize_t got = recv(fd, p, bytes, 0);
+
+		if (got <= 0) {
+			return 0;
+		}
+		p += got;
+		bytes -= (size_t)got;
+	}
+	return 1;
 }
 
 static int
@@ -94,38 +121,38 @@ make_frame_buffer(struct client *client, int width, int height)
 	client->height = height;
 }
 
-static uint64_t
-read_magic(const unsigned char *at)
+/* The panel-sized texture eagl.c uploaded is the picture the guest composed. Draw it as a quad;
+ * the CA draw stream's framebuffer state is not needed (and llvmpipe faulted replaying it after
+ * the upload). */
+static void
+draw_panel(struct client *client, const unsigned char *panel, int width, int height)
 {
-	uint64_t word;
+	GLuint texture = 0;
 
-	memcpy(&word, at, sizeof(word));
-	return word;
-}
-
-/* The guest's picture buffer has a magic word in front of it; the magic is unique to the process,
- * so more than one guest can be served. The first scan of the 12 GB file is a second or two, after
- * that the address is cached and checked with one load. */
-static unsigned char *
-find_frame(struct client *client, uint64_t magic)
-{
-	unsigned char pattern[8];
-
-	if (client->have_frame_at && client->frame_at + 8 <= ram + ram_bytes &&
-	    read_magic(client->frame_at) == magic) {
-		return client->frame_at;
-	}
-	for (int i = 0; i < 8; i++) {
-		pattern[i] = (unsigned char)(magic >> (8 * i));
-	}
-	client->frame_at = memmem(ram, ram_bytes, pattern, 8);
-	client->have_frame_at = client->frame_at != NULL;
-	if (client->frame_at != NULL) {
-		printf("host_glwire: picture %016llx at offset %#zx\n",
-		    (unsigned long long)magic, (size_t)(client->frame_at - ram));
-		fflush(stdout);
-	}
-	return client->frame_at;
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, panel);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glDisable(GL_BLEND);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_SCISSOR_TEST);
+	glEnable(GL_TEXTURE_2D);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	glBegin(GL_QUADS);
+	glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
+	glTexCoord2f(1.0f, 0.0f); glVertex2f(1.0f, -1.0f);
+	glTexCoord2f(1.0f, 1.0f); glVertex2f(1.0f, 1.0f);
+	glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
+	glEnd();
+	glDisable(GL_TEXTURE_2D);
+	glDeleteTextures(1, &texture);
 }
 
 static int
@@ -138,22 +165,21 @@ dispatch(struct glstate *g, wire_buffer *r, uint32_t opcode)
 static void
 reply(struct client *client, const char *line)
 {
-	send(client->fd, line, strlen(line), 0);
+	send_all(client->fd, line, strlen(line));
 }
 
-/* One frame: "R <records magic> <frame magic> <w> <h> <records> <frame>\n", the records, and the
- * reply once the picture is in the guest's buffer. */
+/* One frame: "R <w> <h> <records bytes> <picture bytes>\n", the records, then the picture:
+ * "R <picture bytes>\n" and the BGRA pixels. */
 static int
 serve_frame(struct client *client)
 {
 	char line[192];
 	int at = 0;
-	unsigned long long records_magic = 0, frame_magic = 0;
 	int width = 0, height = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
 	double began, took;
 	unsigned char *records;
-	unsigned char *frame_at;
+	unsigned char *picture;
 
 	while (at < (int)sizeof(line) - 1) {
 		char c;
@@ -168,43 +194,70 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %llu %llu %d %d %zu %zu", &records_magic, &frame_magic,
-		&width, &height, &records_bytes, &frame_bytes) != 6) {
+	if (sscanf(line, "R %d %d %zu %zu", &width, &height, &records_bytes, &frame_bytes) != 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
-	(void)records_magic;
 	if (width <= 0 || height <= 0 || (size_t)width * (size_t)height * 4 != frame_bytes) {
 		reply(client, "R badsize\n");
 		return 0;
 	}
 	records = malloc(records_bytes);
-	if (records == NULL) {
+	picture = malloc(frame_bytes);
+	if (records == NULL || picture == NULL) {
+		free(records);
+		free(picture);
 		reply(client, "R nomem\n");
 		return 0;
 	}
-	if (recv(client->fd, records, records_bytes, MSG_WAITALL) != (ssize_t)records_bytes) {
+	if (!recv_all(client->fd, records, records_bytes)) {
 		free(records);
+		free(picture);
 		return -1;
 	}
 	began = now_seconds();
-	frame_at = find_frame(client, frame_magic);
-	if (frame_at == NULL || frame_at + 8 + frame_bytes > ram + ram_bytes) {
-		free(records);
-		reply(client, "R missing\n");
-		return 0;
-	}
 	if (!make_client_current(client)) {
 		free(records);
+		free(picture);
 		reply(client, "R nocontext\n");
 		return 0;
 	}
 	if (client->framebuffer == 0 || client->width != width || client->height != height) {
 		make_frame_buffer(client, width, height);
 	}
+	/*
+	 * Uploads first, with no framebuffer bound: redefining a texture that an FBO has attached
+	 * corrupts llvmpipe's state tracker (the crash came a few calls later, in glClearColor).
+	 * The stream's later glGenTextures must not replace the uploaded texture (names_*_put_new).
+	 */
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	{
+		wire_buffer upload;
+		size_t offset = 0;
+
+		while (offset + 8 <= records_bytes) {
+			uint32_t opcode, length;
+
+			memcpy(&opcode, records + offset, 4);
+			memcpy(&length, records + offset + 4, 4);
+			if (offset + 8 + length > records_bytes) {
+				break;
+			}
+			if (opcode == 201) {
+				upload.base = records + offset + 8;
+				upload.capacity = length;
+				upload.at = 0;
+				dispatch(&client->names, &upload, opcode);
+			}
+			offset += 8 + length;
+		}
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
 	glViewport(0, 0, width, height);
-	{
+	if (client->names.panel != NULL && client->names.panel_width == width &&
+	    client->names.panel_height == height) {
+		draw_panel(client, client->names.panel, width, height);
+	} else {
 		wire_buffer r;
 		size_t offset = 0;
 
@@ -217,6 +270,10 @@ serve_frame(struct client *client)
 				fprintf(stderr, "host_glwire: a record runs past the frame\n");
 				break;
 			}
+			if (opcode == 201) {
+				offset += 8 + length;
+				continue;       /* already uploaded before the framebuffer was bound */
+			}
 			r.base = records + offset + 8;
 			r.capacity = length;
 			r.at = 0;
@@ -227,20 +284,40 @@ serve_frame(struct client *client)
 		}
 	}
 	glFinish();
-	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, frame_at + 8);
+	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+	if (save_dir != NULL) {
+		char path[512];
+		FILE *file;
+
+		snprintf(path, sizeof(path), "%s/frame-%llu-%dx%d.bgra", save_dir, frames_replayed + 1,
+		    width, height);
+		file = fopen(path, "wb");
+		if (file != NULL) {
+			fwrite(picture, 1, frame_bytes, file);
+			fclose(file);
+			printf("host_glwire: saved %s\n", path);
+		}
+	}
 	names_attribs_release(&client->names);
 	wire_release();
 	took = now_seconds() - began;
 	frames_replayed++;
 	{
 		char done[64];
-		int length = snprintf(done, sizeof(done), "R done %.2f\n", took);
-		send(client->fd, done, (size_t)length, 0);
+		int length = snprintf(done, sizeof(done), "R %zu\n", frame_bytes);
+
+		if (!send_all(client->fd, done, (size_t)length) ||
+		    !send_all(client->fd, picture, frame_bytes)) {
+			free(records);
+			free(picture);
+			return -1;
+		}
 	}
 	printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms\n",
 	    frames_replayed, width, height, records_bytes, frame_bytes, took);
 	fflush(stdout);
 	free(records);
+	free(picture);
 	return 0;
 }
 
@@ -261,8 +338,7 @@ serve_record(struct client *client)
 	r.base = malloc(header[1]);
 	r.capacity = header[1];
 	r.at = 0;
-	if (r.base == NULL ||
-	    recv(client->fd, r.base, header[1], MSG_WAITALL) != (ssize_t)header[1]) {
+	if (r.base == NULL || !recv_all(client->fd, r.base, header[1])) {
 		free(r.base);
 		return -1;
 	}
@@ -300,8 +376,6 @@ close_client(struct client *client)
 	client->context = EGL_NO_CONTEXT;
 	client->surface = EGL_NO_SURFACE;
 	client->framebuffer = 0;
-	client->have_frame_at = 0;
-	client->frame_at = NULL;
 }
 
 static EGLDisplay
@@ -333,28 +407,22 @@ make_display(void)
 int
 main(int argc, char **argv)
 {
-	const char *ram_path = argc > 1 ? argv[1] : "qemu/ram.img";
-	int port = argc > 2 ? atoi(argv[2]) : 9110;
-	int fd = open(ram_path, O_RDWR);
-	struct stat info;
+	int port = 9110;
+
+	if (argc > 1 && strcmp(argv[1], "--save") == 0 && argc > 2) {
+		save_dir = argv[2];
+		if (argc > 3) {
+			port = atoi(argv[3]);
+		}
+	} else if (argc > 1) {
+		port = atoi(argv[1]);
+	}
 	int listener;
 	int count = 0;
 	static const EGLint attributes[] = {
 	    EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
 	    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE,
 	};
-
-	if (fd < 0 || fstat(fd, &info) != 0) {
-		fprintf(stderr, "host_glwire: cannot open %s\n", ram_path);
-		return 1;
-	}
-	ram = mmap(NULL, (size_t)info.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (ram == MAP_FAILED) {
-		fprintf(stderr, "host_glwire: cannot map %s\n", ram_path);
-		return 1;
-	}
-	ram_bytes = (size_t)info.st_size;
-	printf("host_glwire: %s mapped, %zu bytes\n", ram_path, ram_bytes);
 
 	display = make_display();
 	eglBindAPI(EGL_OPENGL_API);
@@ -363,7 +431,6 @@ main(int argc, char **argv)
 		fprintf(stderr, "host_glwire: no GL configuration\n");
 		return 1;
 	}
-	/* a context to report what the host's GL is before a guest connects */
 	{
 		EGLContext probe = eglCreateContext(display, config, EGL_NO_CONTEXT, NULL);
 		EGLSurface surface = eglCreatePbufferSurface(display, config,
