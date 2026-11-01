@@ -1,0 +1,26 @@
+From: iosvm glwire
+Subject: [PATCH] screendump: write a PPM row's pixels, not pixman's padded stride
+
+ppm_save() fills a line buffer of PIXMAN_BE_r8g8b8 and then writes
+pixman_image_get_stride(linebuf) bytes of it. Pixman may pad a row (for a
+1125-pixel wide image the stride is 3376, not 1125 * 3 = 3375), and P6 has no
+padding: a reader that follows the format sees every row start one byte early,
+which shears the picture by one pixel per row. On a 2436-row panel that looks
+like a diagonal wipe -- in this project it was mistaken for a frame from a
+slide-in animation, and a live console surface was called a snapshot because of
+it.
+
+Write width * 3 bytes per row.
+
+diff --git a/ui/ui-qmp-cmds.c b/ui/ui-qmp-cmds.c
+--- a/ui/ui-qmp-cmds.c
++++ b/ui/ui-qmp-cmds.c
+@@ -318,7 +318,7 @@ static bool ppm_save(int fd, pixman_image_t *image, Error **errp)
+         qemu_pixman_linebuf_fill(linebuf, image, width, 0, y);
+         if (qio_channel_write_all(QIO_CHANNEL(ioc),
+                                   (char *)pixman_image_get_data(linebuf),
+-                                  pixman_image_get_stride(linebuf), errp) < 0) {
++                                  (size_t)width * 3, errp) < 0) {
+             return false;
+         }
+     }

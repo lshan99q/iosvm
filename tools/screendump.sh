@@ -75,10 +75,13 @@ pos += 1
 magic, w, h, maxv = fields[0], int(fields[1]), int(fields[2]), int(fields[3])
 assert magic == b"P6", f"expected a binary PPM (P6), got {magic!r}"
 assert maxv == 255, f"only 8-bit PPM is handled, got maxval {maxv}"
-raw = data[pos:pos + w * h * 3]
-assert len(raw) == w * h * 3, f"truncated PPM: {len(raw)} of {w*h*3} bytes"
-stride = w * 3
-rows = b"".join(b"\x00" + raw[y * stride:(y + 1) * stride] for y in range(h))
+# QEMU writes pixman's line stride per row, not width * 3: for 1125 pixels that is 3376 bytes a
+# row, one more than the pixels need. A reader that assumes packed RGB gets a sheared picture (and
+# once looked like a frame from a slide-in animation); the padding is dropped here.
+pixels = data[pos:]
+stride = len(pixels) // h
+assert stride >= w * 3, f"a PPM row is shorter than its pixels ({stride} < {w*3})"
+rows = b"".join(b"\x00" + pixels[y * stride:y * stride + w * 3] for y in range(h))
 def chunk(tag, payload):
     return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
 out = (b"\x89PNG\r\n\x1a\n"

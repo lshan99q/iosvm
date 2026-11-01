@@ -56,6 +56,26 @@ def tap(x, y):
     qmp(events)
 
 
+def ppm_to_png(ppm, png):
+    """QEMU's P6 rows are pixman's stride (width * 3 rounded up), not packed RGB."""
+    data = open(ppm, "rb").read()
+    fields, pos = [], 0
+    while len(fields) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        start = pos
+        while not data[pos:pos + 1].isspace():
+            pos += 1
+        fields.append(data[start:pos])
+    pos += 1
+    width, height = int(fields[1]), int(fields[2])
+    pixels = data[pos:]
+    stride = len(pixels) // height
+    rows = b"".join(pixels[y * stride:y * stride + width * 3] for y in range(height))
+    Image.frombytes("RGB", (width, height), rows).save(png)
+    return width, height
+
+
 class Frog:
     def __init__(self, path, base):
         self.file = open(path, "rb")
@@ -190,6 +210,8 @@ def main():
     # 5. what the display device itself has
     r = qmp([{"execute": "screendump", "arguments": {"filename": os.path.join(args.out, "panel.ppm")}}])
     print("panel_run: screendump", r, flush=True)
+    print("panel_run: panel.png", *ppm_to_png(os.path.join(args.out, "panel.ppm"),
+                                              os.path.join(args.out, "panel.png")), flush=True)
     print("panel_run: the machine is paused at %#x; pictures in %s" % (base, args.out), flush=True)
 
 
