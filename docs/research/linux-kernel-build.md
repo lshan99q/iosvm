@@ -1209,3 +1209,38 @@ with the letters.
 
 So the input story is: touches, gestures and the hardware buttons work from the host; text entry does
 not, and would need the same kind of virtual HID service that addendum 25 shows working for touches.
+
+## Addendum 30: the machine is on the network
+
+```
+netcfg: en0 10.0.2.15, default route through 10.0.2.2
+net_test: en0: flags 0x8843 up running, type 0x6, address 52:54:00:12:34:56
+net_test: en0: inet 10.0.2.15 netmask 255.255.255.0
+net_test: tcp 10.0.2.2 port 18080: connected in 0.05 s
+net_test: tcp 10.0.2.2: 447 bytes in 0.06 s, the answer begins "HTTP/1.1 401 Unauthorized"
+```
+
+That is Darwin in the guest holding an IPv4 address on `en0`, with a default route, opening a TCP
+connection to the host and reading an HTTP answer back -- through QEMU's user-mode network, with no
+root on the host and no tap device.
+
+The pieces, and which of them were already there:
+
+| piece | state |
+|---|---|
+| the card: `QEMU_NET=1` adds `virtio-net-device` and the boot argument `virtio_net=1` | in the port; the test machine simply was not started with it |
+| the driver: `net: en0 attached on QEMU's virtio network device, address 52:54:00:12:34:56, link up` | in the port, works untouched |
+| the address: configd's IPConfiguration plugin, asked for DHCP by `net_test dhcp en0` | **does not work here**: configd starts (launchd reports `Successfully spawned configd[17]`) but never registers `com.apple.network.IPConfiguration`, so the lookup returns `0x10000003` and `net_test: store` says `no session with configd` |
+
+So the address is set by hand instead: `guest/netcfg.c` does what the plugin would have done --
+`SIOCAIFADDR` with 10.0.2.15/255.255.255.0, `IFF_UP|IFF_RUNNING`, and an `RTM_ADD` default route
+through 10.0.2.2 (those being QEMU's user-mode network: guest 10.0.2.15, host 10.0.2.2). It is built
+like the other guest programs and lands in `/redwood/bin` through `EXTRA=`.
+
+One thing this does not give: **names**. `net_test resolve example.com` needs mDNSResponder, which is
+fed its servers by configd -- and configd's plugin is exactly what is missing. IP literals work;
+`example.com` does not.
+
+And the reason the checks run at all: they are started from `/etc/rc`, which `init` executes before it
+hands process 1 to launchd, with `&` so each one waits in the background. A launchd job of ours is not
+reliably executed here (the xpcproxy pattern, addendum 4), and this way nothing depends on it.

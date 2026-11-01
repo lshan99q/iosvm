@@ -1,0 +1,19 @@
+# The network check, run by init itself -- not by launchd, because a launchd job of ours is not
+# reliably executed here (the xpcproxy pattern): each line goes off in the background with "&", and
+# net_test's own "wait N" is the delay, so the checks start once launchd has had time to bring
+# configd up (it is configd's IPConfiguration that answers DHCP; see src/net_test.m).
+#
+# Interface, then an address from DHCP, then the routes and DNS configd publishes, then a name,
+# then a page over plain TCP and over CFNetwork's HTTPS.
+# configd's IPConfiguration plugin is what would answer DHCP, and in this image configd starts but
+# never registers that service ("net_test: dhcp: configd's IPConfiguration is not there"), so the
+# address is set the way the plugin would have set it: QEMU's user-mode network puts the guest at
+# 10.0.2.15 and the host at 10.0.2.2. Then the interface, a page from a listener on the host, and a
+# name (which needs mDNSResponder and configd's DNS keys, so it may well be the thing that fails).
+/redwood/bin/netcfg en0 10.0.2.15 10.0.2.2 &
+/redwood/bin/net_test wait 60 show store &
+/redwood/bin/net_test wait 90 tcp 10.0.2.2 18080 &
+/redwood/bin/net_test wait 120 resolve example.com &
+
+# and then hand process 1 to the real launchd, as rc.launchd does
+exec /sbin/launchd.darwin
