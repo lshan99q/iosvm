@@ -1,3 +1,4 @@
+/* glAlphaFunc */
 void gw_glAlphaFunc(GLenum a0, GLfloat a1)
 {
 	wire_open(&w, 0);
@@ -6,6 +7,7 @@ void gw_glAlphaFunc(GLenum a0, GLfloat a1)
 	wire_close(&w);
 }
 
+/* glBindTexture */
 void gw_glBindTexture(GLenum a0, GLuint a1)
 {
 	wire_open(&w, 1);
@@ -14,6 +16,7 @@ void gw_glBindTexture(GLenum a0, GLuint a1)
 	wire_close(&w);
 }
 
+/* glBlendFunc */
 void gw_glBlendFunc(GLenum a0, GLenum a1)
 {
 	wire_open(&w, 2);
@@ -22,6 +25,7 @@ void gw_glBlendFunc(GLenum a0, GLenum a1)
 	wire_close(&w);
 }
 
+/* glBlendFuncSeparate */
 void gw_glBlendFuncSeparate(GLenum a0, GLenum a1, GLenum a2, GLenum a3)
 {
 	wire_open(&w, 3);
@@ -32,6 +36,7 @@ void gw_glBlendFuncSeparate(GLenum a0, GLenum a1, GLenum a2, GLenum a3)
 	wire_close(&w);
 }
 
+/* glBlendEquation */
 void gw_glBlendEquation(GLenum a0)
 {
 	wire_open(&w, 4);
@@ -39,6 +44,7 @@ void gw_glBlendEquation(GLenum a0)
 	wire_close(&w);
 }
 
+/* glClear */
 void gw_glClear(GLuint a0)
 {
 	wire_open(&w, 5);
@@ -46,6 +52,7 @@ void gw_glClear(GLuint a0)
 	wire_close(&w);
 }
 
+/* glClearColor */
 void gw_glClearColor(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3)
 {
 	wire_open(&w, 6);
@@ -56,6 +63,7 @@ void gw_glClearColor(GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3)
 	wire_close(&w);
 }
 
+/* glClearStencil */
 void gw_glClearStencil(GLint a0)
 {
 	wire_open(&w, 7);
@@ -63,6 +71,7 @@ void gw_glClearStencil(GLint a0)
 	wire_close(&w);
 }
 
+/* glCopyTexSubImage2D */
 void gw_glCopyTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLsizei a6, GLsizei a7)
 {
 	wire_open(&w, 8);
@@ -77,14 +86,16 @@ void gw_glCopyTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, G
 	wire_close(&w);
 }
 
-void gw_glDeleteTextures(GLsizei a0, const void *a1, GLsizei n1)
+/* glDeleteTextures */
+void gw_glDeleteTextures(GLsizei a0, const GLuint * a1)
 {
 	wire_open(&w, 9);
 	wire_i32(&w, a0);
-	wire_bytes(&w, a1, n1);
+	wire_bytes(&w, a1, a0 > 0 ? (GLsizei)(a0 * 4) : 0);
 	wire_close(&w);
 }
 
+/* glDisable */
 void gw_glDisable(GLenum a0)
 {
 	wire_open(&w, 10);
@@ -92,6 +103,7 @@ void gw_glDisable(GLenum a0)
 	wire_close(&w);
 }
 
+/* glDrawArrays */
 void gw_glDrawArrays(GLenum a0, GLint a1, GLsizei a2)
 {
 	wire_open(&w, 11);
@@ -101,16 +113,18 @@ void gw_glDrawArrays(GLenum a0, GLint a1, GLsizei a2)
 	wire_close(&w);
 }
 
-void gw_glDrawElements(GLenum a0, GLsizei a1, GLenum a2, const void *a3, GLsizei n3)
+/* glDrawElements */
+void gw_glDrawElements(GLenum a0, GLsizei a1, GLenum a2, const void * a3)
 {
 	wire_open(&w, 12);
 	wire_u32(&w, a0);
 	wire_i32(&w, a1);
 	wire_u32(&w, a2);
-	wire_bytes(&w, a3, n3);
+	wire_bytes(&w, a3, wire_index_bytes(a1, a2));
 	wire_close(&w);
 }
 
+/* glEnable */
 void gw_glEnable(GLenum a0)
 {
 	wire_open(&w, 13);
@@ -118,52 +132,56 @@ void gw_glEnable(GLenum a0)
 	wire_close(&w);
 }
 
-void gw_glFinish(void)
+/* glFinish */
+void gw_glFinish()
 {
 	wire_open(&w, 14);
 
 	wire_close(&w);
 }
 
-void gw_glFlush(void)
+/* glFlush */
+void gw_glFlush()
 {
 	wire_open(&w, 15);
 
 	wire_close(&w);
 }
 
-void gw_glGenTextures(GLsizei a0, const void *a1, GLsizei n1)
+/* glGenTextures */
+void gw_glGenTextures(GLsizei a0, const GLuint * a1)
 {
 	wire_open(&w, 16);
 	wire_i32(&w, a0);
-	wire_bytes(&w, a1, n1);
+	wire_bytes(&w, a1, a0 > 0 ? (GLsizei)(a0 * 4) : 0);
 	wire_close(&w);
 }
 
-/* glGetError returns E: the caller reads it back after a flush */
-void gw_glGetError(void)
+/* glGetError -> E */
+void gw_glGetError(GLenum result)
 {
 	wire_open(&w, 17);
-
+	wire_u32(&w, result);
 	wire_close(&w);
 }
 
-void gw_glGetIntegerv(GLenum a0, const void *a1, GLsizei n1)
+/* glGetIntegerv */
+void gw_glGetIntegerv(GLenum a0, GLint * a1)
 {
 	wire_open(&w, 18);
 	wire_u32(&w, a0);
-	wire_bytes(&w, a1, n1);
 	wire_close(&w);
 }
 
-/* glGetString returns P: the caller reads it back after a flush */
-void gw_glGetString(GLenum a0)
+/* glGetString -> P */
+void gw_glGetString(GLenum a0, void * result)
 {
 	wire_open(&w, 19);
 	wire_u32(&w, a0);
 	wire_close(&w);
 }
 
+/* glPixelStorei */
 void gw_glPixelStorei(GLenum a0, GLint a1)
 {
 	wire_open(&w, 20);
@@ -172,6 +190,7 @@ void gw_glPixelStorei(GLenum a0, GLint a1)
 	wire_close(&w);
 }
 
+/* glScissor */
 void gw_glScissor(GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 {
 	wire_open(&w, 21);
@@ -182,7 +201,8 @@ void gw_glScissor(GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 	wire_close(&w);
 }
 
-void gw_glTexImage2D(GLenum a0, GLint a1, GLint a2, GLsizei a3, GLsizei a4, GLint a5, GLenum a6, GLenum a7, const void *a8, GLsizei n8)
+/* glTexImage2D */
+void gw_glTexImage2D(GLenum a0, GLint a1, GLint a2, GLsizei a3, GLsizei a4, GLint a5, GLenum a6, GLenum a7, const void * a8)
 {
 	wire_open(&w, 22);
 	wire_u32(&w, a0);
@@ -193,10 +213,11 @@ void gw_glTexImage2D(GLenum a0, GLint a1, GLint a2, GLsizei a3, GLsizei a4, GLin
 	wire_i32(&w, a5);
 	wire_u32(&w, a6);
 	wire_u32(&w, a7);
-	wire_bytes(&w, a8, n8);
+	wire_bytes(&w, a8, wire_image_bytes(a3, a4, a6, a7));
 	wire_close(&w);
 }
 
+/* glTexParameterf */
 void gw_glTexParameterf(GLenum a0, GLenum a1, GLfloat a2)
 {
 	wire_open(&w, 23);
@@ -206,6 +227,7 @@ void gw_glTexParameterf(GLenum a0, GLenum a1, GLfloat a2)
 	wire_close(&w);
 }
 
+/* glTexParameteri */
 void gw_glTexParameteri(GLenum a0, GLenum a1, GLint a2)
 {
 	wire_open(&w, 24);
@@ -215,7 +237,8 @@ void gw_glTexParameteri(GLenum a0, GLenum a1, GLint a2)
 	wire_close(&w);
 }
 
-void gw_glTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLsizei a4, GLsizei a5, GLenum a6, GLenum a7, const void *a8, GLsizei n8)
+/* glTexSubImage2D */
+void gw_glTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLsizei a4, GLsizei a5, GLenum a6, GLenum a7, const void * a8)
 {
 	wire_open(&w, 25);
 	wire_u32(&w, a0);
@@ -226,10 +249,11 @@ void gw_glTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLsizei a4, GLs
 	wire_i32(&w, a5);
 	wire_u32(&w, a6);
 	wire_u32(&w, a7);
-	wire_bytes(&w, a8, n8);
+	wire_bytes(&w, a8, wire_image_bytes(a4, a5, a6, a7));
 	wire_close(&w);
 }
 
+/* glViewport */
 void gw_glViewport(GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 {
 	wire_open(&w, 26);
@@ -240,6 +264,7 @@ void gw_glViewport(GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 	wire_close(&w);
 }
 
+/* glActiveTexture */
 void gw_glActiveTexture(GLenum a0)
 {
 	wire_open(&w, 27);
@@ -247,7 +272,8 @@ void gw_glActiveTexture(GLenum a0)
 	wire_close(&w);
 }
 
-void gw_glCompressedTexImage2D(GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsizei a4, GLint a5, GLsizei a6, const void *a7, GLsizei n7)
+/* glCompressedTexImage2D */
+void gw_glCompressedTexImage2D(GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsizei a4, GLint a5, GLsizei a6, const void * a7)
 {
 	wire_open(&w, 28);
 	wire_u32(&w, a0);
@@ -257,11 +283,12 @@ void gw_glCompressedTexImage2D(GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsiz
 	wire_i32(&w, a4);
 	wire_i32(&w, a5);
 	wire_i32(&w, a6);
-	wire_bytes(&w, a7, n7);
+	wire_bytes(&w, a7, a6 > 0 ? a6 : 0);
 	wire_close(&w);
 }
 
-void gw_glVertexAttribPointer(GLuint a0, GLint a1, GLenum a2, GLboolean a3, GLsizei a4, const void *a5, GLsizei n5)
+/* glVertexAttribPointer */
+void gw_glVertexAttribPointer(GLuint a0, GLint a1, GLenum a2, GLboolean a3, GLsizei a4, const void * a5)
 {
 	wire_open(&w, 29);
 	wire_u32(&w, a0);
@@ -269,10 +296,10 @@ void gw_glVertexAttribPointer(GLuint a0, GLint a1, GLenum a2, GLboolean a3, GLsi
 	wire_u32(&w, a2);
 	wire_u8(&w, a3);
 	wire_i32(&w, a4);
-	wire_bytes(&w, a5, n5);
 	wire_close(&w);
 }
 
+/* glEnableVertexAttribArray */
 void gw_glEnableVertexAttribArray(GLuint a0)
 {
 	wire_open(&w, 30);
@@ -280,6 +307,7 @@ void gw_glEnableVertexAttribArray(GLuint a0)
 	wire_close(&w);
 }
 
+/* glDisableVertexAttribArray */
 void gw_glDisableVertexAttribArray(GLuint a0)
 {
 	wire_open(&w, 31);
@@ -287,6 +315,7 @@ void gw_glDisableVertexAttribArray(GLuint a0)
 	wire_close(&w);
 }
 
+/* glDeleteProgram */
 void gw_glDeleteProgram(GLuint a0)
 {
 	wire_open(&w, 32);
@@ -294,24 +323,33 @@ void gw_glDeleteProgram(GLuint a0)
 	wire_close(&w);
 }
 
-/* glCreateShader returns U: the caller reads it back after a flush */
-void gw_glCreateShader(GLenum a0)
+/* glCreateShader -> U */
+void gw_glCreateShader(GLenum a0, GLuint result)
 {
 	wire_open(&w, 33);
 	wire_u32(&w, a0);
+	wire_u32(&w, result);
 	wire_close(&w);
 }
 
-void gw_glShaderSource(GLuint a0, GLsizei a1, const void *a2, GLsizei n2, const void *a3, GLsizei n3)
+/* glShaderSource */
+void gw_glShaderSource(GLuint a0, GLsizei a1, const GLchar *const * a2, const GLint * a3)
 {
 	wire_open(&w, 34);
 	wire_u32(&w, a0);
 	wire_i32(&w, a1);
-	wire_bytes(&w, a2, n2);
-	wire_bytes(&w, a3, n3);
+	for (GLsizei i = 0; i < a1; i++) {
+		const GLchar *text = a2 != NULL ? a2[i] : NULL;
+		GLint length = a3 != NULL ? a3[i] : -1;
+		if (text == NULL) { wire_u32(&w, 0); continue; }
+		if (length < 0) { length = (GLint)strlen(text); }
+		wire_u32(&w, (uint32_t)length);
+		if (length > 0) { wire_put(&w, text, (size_t)length); }
+	}
 	wire_close(&w);
 }
 
+/* glCompileShader */
 void gw_glCompileShader(GLuint a0)
 {
 	wire_open(&w, 35);
@@ -319,14 +357,15 @@ void gw_glCompileShader(GLuint a0)
 	wire_close(&w);
 }
 
-/* glCreateProgram returns U: the caller reads it back after a flush */
-void gw_glCreateProgram(void)
+/* glCreateProgram -> U */
+void gw_glCreateProgram(GLuint result)
 {
 	wire_open(&w, 36);
-
+	wire_u32(&w, result);
 	wire_close(&w);
 }
 
+/* glAttachShader */
 void gw_glAttachShader(GLuint a0, GLuint a1)
 {
 	wire_open(&w, 37);
@@ -335,6 +374,7 @@ void gw_glAttachShader(GLuint a0, GLuint a1)
 	wire_close(&w);
 }
 
+/* glLinkProgram */
 void gw_glLinkProgram(GLuint a0)
 {
 	wire_open(&w, 38);
@@ -342,6 +382,7 @@ void gw_glLinkProgram(GLuint a0)
 	wire_close(&w);
 }
 
+/* glUseProgram */
 void gw_glUseProgram(GLuint a0)
 {
 	wire_open(&w, 39);
@@ -349,6 +390,7 @@ void gw_glUseProgram(GLuint a0)
 	wire_close(&w);
 }
 
+/* glUniform1f */
 void gw_glUniform1f(GLint a0, GLfloat a1)
 {
 	wire_open(&w, 40);
@@ -357,6 +399,7 @@ void gw_glUniform1f(GLint a0, GLfloat a1)
 	wire_close(&w);
 }
 
+/* glUniform4f */
 void gw_glUniform4f(GLint a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4)
 {
 	wire_open(&w, 41);
@@ -368,6 +411,7 @@ void gw_glUniform4f(GLint a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4)
 	wire_close(&w);
 }
 
+/* glUniform1i */
 void gw_glUniform1i(GLint a0, GLint a1)
 {
 	wire_open(&w, 42);
@@ -376,62 +420,69 @@ void gw_glUniform1i(GLint a0, GLint a1)
 	wire_close(&w);
 }
 
-void gw_glUniform3fv(GLint a0, GLsizei a1, const void *a2, GLsizei n2)
+/* glUniform3fv */
+void gw_glUniform3fv(GLint a0, GLsizei a1, const GLfloat * a2)
 {
 	wire_open(&w, 43);
 	wire_i32(&w, a0);
 	wire_i32(&w, a1);
-	wire_bytes(&w, a2, n2);
+	wire_bytes(&w, a2, a1 > 0 ? (GLsizei)(a1 * 12) : 0);
 	wire_close(&w);
 }
 
-void gw_glUniform4fv(GLint a0, GLsizei a1, const void *a2, GLsizei n2)
+/* glUniform4fv */
+void gw_glUniform4fv(GLint a0, GLsizei a1, const GLfloat * a2)
 {
 	wire_open(&w, 44);
 	wire_i32(&w, a0);
 	wire_i32(&w, a1);
-	wire_bytes(&w, a2, n2);
+	wire_bytes(&w, a2, a1 > 0 ? (GLsizei)(a1 * 16) : 0);
 	wire_close(&w);
 }
 
-void gw_glUniformMatrix3fv(GLint a0, GLsizei a1, GLboolean a2, const void *a3, GLsizei n3)
+/* glUniformMatrix3fv */
+void gw_glUniformMatrix3fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3)
 {
 	wire_open(&w, 45);
 	wire_i32(&w, a0);
 	wire_i32(&w, a1);
 	wire_u8(&w, a2);
-	wire_bytes(&w, a3, n3);
+	wire_bytes(&w, a3, a1 > 0 ? (GLsizei)(a1 * 36) : 0);
 	wire_close(&w);
 }
 
-void gw_glUniformMatrix4fv(GLint a0, GLsizei a1, GLboolean a2, const void *a3, GLsizei n3)
+/* glUniformMatrix4fv */
+void gw_glUniformMatrix4fv(GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3)
 {
 	wire_open(&w, 46);
 	wire_i32(&w, a0);
 	wire_i32(&w, a1);
 	wire_u8(&w, a2);
-	wire_bytes(&w, a3, n3);
+	wire_bytes(&w, a3, a1 > 0 ? (GLsizei)(a1 * 64) : 0);
 	wire_close(&w);
 }
 
-/* glGetUniformLocation returns I: the caller reads it back after a flush */
-void gw_glGetUniformLocation(GLuint a0, const void *a1, GLsizei n1)
+/* glGetUniformLocation -> I */
+void gw_glGetUniformLocation(GLuint a0, const GLchar * a1, GLint result)
 {
 	wire_open(&w, 47);
 	wire_u32(&w, a0);
-	wire_bytes(&w, a1, n1);
+	wire_string(&w, a1);
+	wire_i32(&w, result);
 	wire_close(&w);
 }
 
-void gw_glBindAttribLocation(GLuint a0, GLuint a1, const void *a2, GLsizei n2)
+/* glBindAttribLocation */
+void gw_glBindAttribLocation(GLuint a0, GLuint a1, const GLchar * a2)
 {
 	wire_open(&w, 48);
 	wire_u32(&w, a0);
 	wire_u32(&w, a1);
-	wire_bytes(&w, a2, n2);
+	wire_string(&w, a2);
 	wire_close(&w);
 }
 
+/* glBindFramebuffer */
 void gw_glBindFramebuffer(GLenum a0, GLuint a1)
 {
 	wire_open(&w, 49);
@@ -440,22 +491,25 @@ void gw_glBindFramebuffer(GLenum a0, GLuint a1)
 	wire_close(&w);
 }
 
-void gw_glDeleteFramebuffers(GLsizei a0, const void *a1, GLsizei n1)
+/* glDeleteFramebuffers */
+void gw_glDeleteFramebuffers(GLsizei a0, const GLuint * a1)
 {
 	wire_open(&w, 50);
 	wire_i32(&w, a0);
-	wire_bytes(&w, a1, n1);
+	wire_bytes(&w, a1, a0 > 0 ? (GLsizei)(a0 * 4) : 0);
 	wire_close(&w);
 }
 
-void gw_glGenFramebuffers(GLsizei a0, const void *a1, GLsizei n1)
+/* glGenFramebuffers */
+void gw_glGenFramebuffers(GLsizei a0, const GLuint * a1)
 {
 	wire_open(&w, 51);
 	wire_i32(&w, a0);
-	wire_bytes(&w, a1, n1);
+	wire_bytes(&w, a1, a0 > 0 ? (GLsizei)(a0 * 4) : 0);
 	wire_close(&w);
 }
 
+/* glFramebufferTexture2D */
 void gw_glFramebufferTexture2D(GLenum a0, GLenum a1, GLenum a2, GLuint a3, GLint a4)
 {
 	wire_open(&w, 52);
@@ -467,6 +521,7 @@ void gw_glFramebufferTexture2D(GLenum a0, GLenum a1, GLenum a2, GLuint a3, GLint
 	wire_close(&w);
 }
 
+/* glGenerateMipmap */
 void gw_glGenerateMipmap(GLenum a0)
 {
 	wire_open(&w, 53);
@@ -474,29 +529,32 @@ void gw_glGenerateMipmap(GLenum a0)
 	wire_close(&w);
 }
 
-/* glFenceSync returns P: the caller reads it back after a flush */
-void gw_glFenceSync(GLenum a0, GLuint a1)
+/* glFenceSync -> q */
+void gw_glFenceSync(GLenum a0, GLuint a1, void * result)
 {
 	wire_open(&w, 54);
 	wire_u32(&w, a0);
 	wire_u32(&w, a1);
+	wire_u64(&w, (uint64_t)(uintptr_t)result);
 	wire_close(&w);
 }
 
-void gw_glDeleteSync(const void *a0, GLsizei n0)
+/* glDeleteSync */
+void gw_glDeleteSync(void * a0)
 {
 	wire_open(&w, 55);
-	wire_bytes(&w, a0, n0);
+	wire_u64(&w, (uint64_t)(uintptr_t)a0);
 	wire_close(&w);
 }
 
-/* glClientWaitSync returns E: the caller reads it back after a flush */
-void gw_glClientWaitSync(const void *a0, GLsizei n0, GLuint a1, GLuint a2)
+/* glClientWaitSync -> E */
+void gw_glClientWaitSync(void * a0, GLuint a1, GLuint a2, GLenum result)
 {
 	wire_open(&w, 56);
-	wire_bytes(&w, a0, n0);
+	wire_u64(&w, (uint64_t)(uintptr_t)a0);
 	wire_u32(&w, a1);
 	wire_u32(&w, a2);
+	wire_u32(&w, result);
 	wire_close(&w);
 }
 

@@ -62,6 +62,7 @@ static inline void wire_u32(wire_buffer *w, uint32_t v) { wire_put(w, &v, 4); }
 static inline void wire_i32(wire_buffer *w, int32_t v) { wire_put(w, &v, 4); }
 static inline void wire_f32(wire_buffer *w, float v) { wire_put(w, &v, 4); }
 static inline void wire_u8(wire_buffer *w, uint8_t v) { wire_put(w, &v, 1); }
+static inline void wire_u64(wire_buffer *w, uint64_t v) { wire_put(w, &v, 8); }
 
 static inline void
 wire_bytes(wire_buffer *w, const void *bytes, GLsizei count)
@@ -72,6 +73,96 @@ wire_bytes(wire_buffer *w, const void *bytes, GLsizei count)
 	if (size != 0) {
 		wire_put(w, bytes, size);
 	}
+}
+
+/* A NUL-terminated string: the bytes without the NUL, which the host puts back. */
+static inline void
+wire_string(wire_buffer *w, const char *string)
+{
+	uint32_t size = string != NULL ? (uint32_t)strlen(string) : 0;
+
+	wire_u32(w, size);
+	if (size != 0) {
+		wire_put(w, string, size);
+	}
+}
+
+/*
+ * How many bytes a pointer argument stands for. The GL signature does not carry a size, so it is
+ * worked out from the other arguments -- the count of an index array, the width and height of a
+ * texture, the number of uniform vectors. The unpack alignment matters for the last row of a
+ * texture: the caller's glPixelStorei has been seen, so the recorder knows it too.
+ */
+static int wire_unpack_alignment = 4;
+
+static inline GLsizei
+wire_type_size(GLenum type)
+{
+	switch (type) {
+	case GL_UNSIGNED_BYTE:
+		return 1;
+	case GL_UNSIGNED_SHORT:
+	case GL_SHORT:
+		return 2;
+	case GL_UNSIGNED_INT:
+	case GL_INT:
+	case GL_FLOAT:
+		return 4;
+	default:
+		return 4;
+	}
+}
+
+static inline GLsizei
+wire_format_bpp(GLenum format, GLenum type)
+{
+	switch (format) {
+	case GL_ALPHA:
+	case GL_LUMINANCE:
+		return wire_type_size(type);
+	case GL_LUMINANCE_ALPHA:
+		return 2 * wire_type_size(type);
+	case GL_RGB:
+		return 3 * wire_type_size(type);
+	case GL_RGBA:
+	case 0x80E1:                   /* GL_BGRA / GL_BGRA_EXT */
+		return 4 * wire_type_size(type);
+	default:
+		/* the packed 16-bit formats (5_6_5 and friends) are two bytes a pixel */
+		switch (type) {
+		case GL_UNSIGNED_SHORT_5_6_5:
+		case GL_UNSIGNED_SHORT_4_4_4_4:
+		case GL_UNSIGNED_SHORT_5_5_5_1:
+			return 2;
+		default:
+			return 4 * wire_type_size(type);
+		}
+	}
+}
+
+static inline GLsizei
+wire_index_bytes(GLsizei count, GLenum type)
+{
+	if (count <= 0) {
+		return 0;
+	}
+	return count * wire_type_size(type);
+}
+
+static inline GLsizei
+wire_image_bytes(GLsizei width, GLsizei height, GLenum format, GLenum type)
+{
+	GLsizei bpp, row;
+
+	if (width <= 0 || height <= 0) {
+		return 0;
+	}
+	bpp = wire_format_bpp(format, type);
+	row = width * bpp;
+	if (wire_unpack_alignment > 1) {
+		row = (row + wire_unpack_alignment - 1) & ~(wire_unpack_alignment - 1);
+	}
+	return row * height;
 }
 
 /* The opcode and length are written by the generator around the payload, so it needs a way to go
@@ -108,6 +199,18 @@ wire_get_u32(wire_buffer *r)
 }
 
 static inline int32_t wire_get_i32(wire_buffer *r) { return (int32_t)wire_get_u32(r); }
+
+static inline uint64_t
+wire_get_u64(wire_buffer *r)
+{
+	uint64_t v = 0;
+
+	if (r->at + 8 <= r->capacity) {
+		memcpy(&v, r->base + r->at, 8);
+		r->at += 8;
+	}
+	return v;
+}
 
 static inline float
 wire_get_f32(wire_buffer *r)
@@ -152,6 +255,29 @@ wire_take(wire_buffer *r, GLsizei *count)
 	if (copy != NULL) {
 		memcpy(copy, r->base + r->at, size);
 	}
+	r->at += size;
+	return copy;
+}
+
+/* The same, for a NUL-terminated string: a byte more than the wire carries, and a NUL in it. */
+static inline char *
+wire_take_string(wire_buffer *r)
+{
+	uint32_t size = wire_get_u32(r);
+	char *copy;
+
+	if (r->at + size > r->capacity) {
+		r->at = r->capacity;
+		size = 0;
+	}
+	copy = malloc((size_t)size + 1);
+	if (copy == NULL) {
+		return NULL;
+	}
+	if (size != 0) {
+		memcpy(copy, r->base + r->at, size);
+	}
+	copy[size] = '\0';
 	r->at += size;
 	return copy;
 }

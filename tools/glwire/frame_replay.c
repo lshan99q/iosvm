@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "wire.h"
+#include "names.h"
 
 #define PANEL_WIDTH  1125
 #define PANEL_HEIGHT 2436
@@ -60,7 +61,7 @@ make_display(void)
 }
 
 static int
-dispatch(wire_buffer *r, uint32_t opcode)
+dispatch(struct glstate *g, wire_buffer *r, uint32_t opcode)
 {
 #include "dispatch.inc"
 	return 0;
@@ -139,6 +140,7 @@ main(int argc, char **argv)
 	EGLint config_count = 0;
 	GLuint texture, program;
 	GLint texture_uniform = -1, position = 0, texcoord = 1;
+	struct glstate names;
 	double began, recorded, replayed;
 
 	for (int i = 3; i < argc; i++) {
@@ -213,6 +215,11 @@ main(int argc, char **argv)
 		return 1;
 	}
 	glGenTextures(1, &texture);
+	/* The stream names the objects this context has just made, as the guest names its own. The
+	 * identity mapping says so explicitly, instead of relying on both starting at 1. */
+	names_init(&names);
+	names_program_put(&names, program, program);
+	names_texture_put(&names, texture, texture);
 	glDisable(GL_DITHER);
 	glDisable(GL_BLEND);
 	glDisable(GL_SCISSOR_TEST);
@@ -255,7 +262,7 @@ main(int argc, char **argv)
 			r.base = records + at + 8;
 			r.capacity = length;
 			r.at = 0;
-			if (dispatch(&r, opcode) != 0) {
+			if (dispatch(&names, &r, opcode) != 0) {
 				return 1;
 			}
 			at += 8 + length;
@@ -305,6 +312,7 @@ main(int argc, char **argv)
 	}
 	munmap(ram, (size_t)info.st_size);
 	close(fd);
+	names_free(&names);
 	free(picture);
 	free(records);
 	return 0;

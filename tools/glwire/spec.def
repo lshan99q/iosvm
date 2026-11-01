@@ -5,14 +5,37 @@
 # to cross the boundary for the interface to draw.
 #
 # Format: name(argtype, argtype, ...) [-> returntype]
+#
+# The argument list is the *real GL signature*: a trampoline that overrides an EAGL table slot is
+# called with exactly these arguments, so it must not invent a size parameter (an earlier version
+# did, and read a garbage register for the pointer arguments).
+#
+# Scalars
 #   E    GLenum (u32)         I    GLint (i32)          F  GLfloat
 #   U    GLuint (u32)         S    GLsizei (i32)        B  GLboolean (u8)
-#   P    pointer to raw bytes, carried by (const void *p, S size)
-#   N    pointer to a sized buffer, carried by (const void *p, S size)
-#   X    the call binds GL state that the host must mirror before the draw (no argument)
 #
-# `P`/`N` arguments are always written as two C parameters: the pointer and the byte count. The
-# encoder sends the count and the bytes; the host allocates, runs the call, frees.
+# Pointers, each with its own way of knowing how many bytes it is
+#   s    NUL-terminated string            -> u32 length + bytes
+#   v    vertex-array pointer             -> no bytes here; the arrays travel with the draw (opcode 200)
+#   d    index array (glDrawElements)     -> a1 (count) * sizeof(a2)
+#   x    texture pixels                   -> a3 x a4, format a6, type a7
+#   y    sub-texture pixels               -> a4 x a5, format a6, type a7
+#   z    compressed pixels                -> a6 bytes
+#   t    texture-name array               -> a0 * 4
+#   r    framebuffer-name array           -> a0 * 4
+#   g    glGetIntegerv's output           -> no bytes: the host answers with its own state
+#   q    GLsync (an opaque pointer)       -> 8 bytes
+#   3    3-float uniform array            -> a1 * 12
+#   4    4-float uniform array            -> a1 * 16
+#   m    3x3 matrix array                 -> a1 * 36
+#   M    4x4 matrix array                 -> a1 * 64
+#   V    glShaderSource's two pointers    -> a1 strings, each with its length (a3, or strlen)
+#
+# Return values
+#   E/U/I are appended to the record after the arguments: the guest's local call has already
+#   answered them, and the host uses them to learn the guest's object names.
+#   q is appended as 8 bytes (glFenceSync's guest GLsync).
+#   P is a C pointer the host answers for itself (glGetString); nothing is appended.
 
 glAlphaFunc(E, F)
 glBindTexture(E, U)
@@ -23,32 +46,32 @@ glClear(U)
 glClearColor(F, F, F, F)
 glClearStencil(I)
 glCopyTexSubImage2D(E, I, I, I, I, I, S, S)
-glDeleteTextures(S, N)
+glDeleteTextures(S, t)
 glDisable(E)
 glDrawArrays(E, I, S)
-glDrawElements(E, S, E, P)
+glDrawElements(E, S, E, d)
 glEnable(E)
 glFinish()
 glFlush()
-glGenTextures(S, N)
+glGenTextures(S, t)
 glGetError() -> E
-glGetIntegerv(E, N)
+glGetIntegerv(E, g)
 glGetString(E) -> P
 glPixelStorei(E, I)
 glScissor(I, I, S, S)
-glTexImage2D(E, I, I, S, S, I, E, E, P)
+glTexImage2D(E, I, I, S, S, I, E, E, x)
 glTexParameterf(E, E, F)
 glTexParameteri(E, E, I)
-glTexSubImage2D(E, I, I, I, S, S, E, E, P)
+glTexSubImage2D(E, I, I, I, S, S, E, E, y)
 glViewport(I, I, S, S)
 glActiveTexture(E)
-glCompressedTexImage2D(E, I, E, S, S, I, S, P)
-glVertexAttribPointer(U, I, E, B, S, P)
+glCompressedTexImage2D(E, I, E, S, S, I, S, z)
+glVertexAttribPointer(U, I, E, B, S, v)
 glEnableVertexAttribArray(U)
 glDisableVertexAttribArray(U)
 glDeleteProgram(U)
 glCreateShader(E) -> U
-glShaderSource(U, S, P, P)
+glShaderSource(U, S, V)
 glCompileShader(U)
 glCreateProgram() -> U
 glAttachShader(U, U)
@@ -57,17 +80,17 @@ glUseProgram(U)
 glUniform1f(I, F)
 glUniform4f(I, F, F, F, F)
 glUniform1i(I, I)
-glUniform3fv(I, S, P)
-glUniform4fv(I, S, P)
-glUniformMatrix3fv(I, S, B, P)
-glUniformMatrix4fv(I, S, B, P)
-glGetUniformLocation(U, P) -> I
-glBindAttribLocation(U, U, P)
+glUniform3fv(I, S, 3)
+glUniform4fv(I, S, 4)
+glUniformMatrix3fv(I, S, B, m)
+glUniformMatrix4fv(I, S, B, M)
+glGetUniformLocation(U, s) -> I
+glBindAttribLocation(U, U, s)
 glBindFramebuffer(E, U)
-glDeleteFramebuffers(S, N)
-glGenFramebuffers(S, N)
+glDeleteFramebuffers(S, r)
+glGenFramebuffers(S, r)
 glFramebufferTexture2D(E, E, E, U, I)
 glGenerateMipmap(E)
-glFenceSync(E, U) -> P
-glDeleteSync(P)
-glClientWaitSync(P, U, U) -> E
+glFenceSync(E, U) -> q
+glDeleteSync(q)
+glClientWaitSync(q, U, U) -> E

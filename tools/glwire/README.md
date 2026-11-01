@@ -7,152 +7,159 @@ host draws the same frame in 6–14 ms (see `tools/host-glquad`). This is the pi
 
 `userland/src/eagl_slots.txt` is the GL function table Darwin's userland dispatches through, and the
 entries marked `*` are exactly the ones QuartzCore's OpenGL ES renderer drives: **62 calls**, not the
-whole API. `spec.def` writes those signatures down once.
+whole API. `spec.def` writes those signatures down once, as the real GL functions have them.
+
+An earlier version added a size parameter to every pointer argument. That does not fit an EAGL slot:
+the table is called as `entry(context, glArguments...)`, so the extra parameter read whatever was in
+the next register. `glVertexAttribPointer`, `glDrawElements` and `glShaderSource` were all affected
+before this was found. The argument list is now exactly the GL one, and each pointer type says how
+its byte count is worked out:
+
+| token | meaning | bytes on the wire |
+|---|---|---|
+| `s` | `const GLchar *` | `strlen`, NUL put back by the host |
+| `v` | `glVertexAttribPointer`'s array | none here; sent with the draw (opcode 200) |
+| `d` | index array | `count * sizeof(type)` |
+| `x`, `y` | texture / sub-texture pixels | `width * height * bpp`, unpack alignment applied |
+| `z` | compressed pixels | `imageSize` |
+| `t`, `r` | texture / framebuffer name arrays | `count * 4` |
+| `g` | `glGetIntegerv`'s output | none; the host answers from its own state |
+| `q` | `GLsync` | 8 bytes |
+| `3`, `4`, `m`, `M` | uniform vectors / matrices | `count * (3, 4, 9, 16) * 4` |
+| `V` | `glShaderSource`'s string vector | each string's length and bytes |
 
 ## One description, two programs
 
 `gen.py` reads `spec.def` and emits both halves, so they cannot drift apart:
 
-- `gw_<name>(...)` — the guest's recorder, one function per call, appending a record to a buffer
-- a `switch` dispatching the same opcodes to the real GL functions on the host
+```
+$ python3 gen.py spec.def encode   > encode.inc      # guest recorders
+$ python3 gen.py spec.def dispatch > dispatch.inc    # host switch
+$ python3 gen.py spec.def slots    > remote.inc      # EAGL slot trampolines
+$ python3 gen.py spec.def table userland/src/eagl_slots.txt > remote_table.inc
+```
 
 The wire format is one record per call: `u32 opcode, u32 length, payload`, integers as they lie,
-floats as their bits, pointers as a `u32` count followed by the bytes.
+floats as their bits, and each pointer as a `u32` byte count followed by the bytes.
+
+## Names: the guest's are the real ones
+
+The guest runs every call locally as well as recording it: the trampoline calls the entry the slot
+held before it was overridden (`local_entry[]`). That keeps `eagl.c`'s own wrappers in the path, and
+it means the guest's answers are authoritative. The host must not make up its own numbers, because a
+name is not a value that a recorder can return.
+
+So calls that answer with an object name carry that answer at the end of their record:
+
+| call | appended |
+|---|---|
+| `glCreateProgram`, `glCreateShader` | the guest's `GLuint` |
+| `glGetUniformLocation` | the guest's `GLint` (per program) |
+| `glFenceSync` | the guest's `GLsync` as 8 bytes |
+| `glGenTextures`, `glGenFramebuffers` | the filled name array, which the `t`/`r` argument already carries |
+
+`names.h` is the host's map: textures, framebuffers, programs, shaders and syncs, plus uniform
+locations keyed by `(guest program, guest location)` — two programs may both call their sampler
+location 3, and those are two different locations on the host too. Every call that consumes a name
+translates it first; `glGen*` puts both names in, `glDelete*` takes them out.
+
+`frame_record.c`'s synthetic frame still works: its stream names the objects its own context made,
+and a missing map entry falls back to the same number.
+
+## Vertex arrays
+
+`glVertexAttribPointer` has no size in its signature and the GL only reads the array at the draw.
+The recorder remembers the pointer, size, type and stride; at `glDrawArrays` / `glDrawElements` it
+works out how many elements the draw reads (the count, or the largest index in the index buffer) and
+emits an opcode-200 record with the bytes. The host applies that record with `glVertexAttribPointer`
+and keeps the copy until the draw returns. The earlier code copied an arbitrary length at pointer
+time, which is why a real stream could not have worked.
+
+## The host half
+
+`host_glwire` maps the guest's RAM file, listens on port 9110, and gives **each connection its own GL
+context and name maps**: the guest's names are per process, and two processes may both call their
+first texture 1. The request line carries the magic words in front of the guest's record arena and
+picture; the guest makes them unique per process (the pid is in them) so the host can find the right
+buffer when several processes are drawing.
 
 ```
-$ python3 gen.py spec.def encode   > encode.inc      # 57 recorders
-$ python3 gen.py spec.def dispatch > dispatch.inc    # 57 cases
-```
-
-## The host half runs
-
-`host_glwire` maps the guest's RAM file, opens a real GL context, and replays whatever arrives:
-
-```
-host_glwire: /tmp/fakeram.img mapped, 67108864 bytes
-host_glwire: Tesla V100-SXM2-16GB/PCIe/SSE2 | 4.6.0 NVIDIA 580.178.04
+host_glwire: /path/to/qemu/ram.img mapped, 12884901888 bytes
+host_glwire: llvmpipe (LLVM 20.1.2, 256 bits) | 4.5 (Compatibility Profile) Mesa 25.2.8
 host_glwire: listening on 9110
 ```
 
-A stream of `glClearColor`, `glClear`, `glViewport` executes on the V100 without complaint.
+The reply is `R done <ms>` after the records are replayed and the picture is in the guest's buffer.
 
-## What is left
-
-1. The guest side has to call `gw_*` instead of GL inside `eagl.c` (the recorders are generated; the
-   plumbing of when to flush — at `glFlush`/the frame's end — is not written yet).
-2. The dispatch needs the picture copied into the guest's surface, the way `gpu_host_ram` already
-   writes a frame in place.
-3. Five calls in the table are not in `spec.def` yet (`glFinishObjectAPPLE`, the sync-object pair,
-   `glInsertEventMarkerEXT`, `glCopyTexSubImage2D` is there but untested end to end).
-
-None of that changes the arithmetic: the drawing is 6–14 ms on the host against 700 ms in the guest.
-
-## Both halves compile, and the records are the right size
-
-`remote.inc` holds the trampolines in the shape the EAGL table calls (`entry(table[0], args...)`),
-so wiring them in is a matter of pointing 62 slots at them. A test that records three calls:
+## Tests
 
 ```
-$ ./glwire_test
-recorded 60 bytes
+$ cc -O2 -o frame_replay frame_replay.c frame_record.c -lEGL -lGL
+$ cc -O2 -o host_glwire host_glwire.c -lEGL -lGL
+$ cc -O2 -o map_test   map_test.c map_stream.c -lEGL -lGL
+
+$ ./map_test
+map_test: 1267 bytes of records
+map_test: current program 3 (linked 1), framebuffer 2 (status 0x8cd5), 2 shaders: 4(compile 1) 5(compile 1)
+map_test: tint at 1 is 1 0.5 0 1
+map_test: layer unit at 0 is 0; position attribute 0; error 0
+map_test: centre pixel 51 51 0 255; maps: 2 textures, 1 framebuffers, 1 programs, 2 shaders, 1 syncs, 2 uniform locations
+map_test: PASS
+
+$ ./e2e_test.py
+e2e_test: reply 'R done 0.09'
+e2e_test: centre pixel B=0 G=51 R=51 A=255
+e2e_test: PASS
 ```
 
-which is exactly right: `glClearColor` (8 + 16), `glClear` (8 + 4) and `glViewport` (8 + 16).
+`map_stream.c` deliberately names its objects 77, 88/89, 101/102 and 303 and its uniforms 5/6; the
+test first makes dummy objects so the host's names are different again. The picture only comes out
+right if every one of those names travelled. `e2e_test.py` sends that same stream through the socket
+to `host_glwire` and checks the pixels in the fake RAM file.
 
-Calls that **return** a value stay local for now (`my_<name>`), because a recorder cannot answer one:
-`glCreateShader`/`glCreateProgram` would have to allocate a name that both sides agree on, which means
-the name travelling with the call. None of the drawing calls return anything, so the interface's path
-is unaffected by that gap.
-
-## The guest module
-
-`eagl_remote.c` is the guest half, and it compiles for arm64-iOS (42 KB object). It owns a 4 MiB
-arena whose first word is a magic, records into it through the generated `gw_*` functions, and at the
-end of a frame sends one line and the records to the host:
+`frame_replay` still checks the panel path: it reads the guest's framebuffer, makes a frame with the
+guest recorders, replays it and writes the picture back. On the paused Settings page:
 
 ```
-R <records magic> <frame magic> <width> <height> <record bytes> <frame bytes>
-```
-
-The host finds the records and the frame buffer by those two magics in the RAM file it has mapped --
-so no address ever travels -- replays the calls on its own GL context, and writes the picture where
-the guest will read it. `eagl_remote_frame()` hands that picture to whoever presents it, and
-`eagl_remote_stats()` reports how many frames went this way and how long each took.
-
-Still to attach in `eagl.c`: call `eagl_remote_begin()` when the boot argument asks for it, point the
-62 table slots at `remote_*` from `remote.inc`, and call `eagl_remote_flush(width, height)` from
-`frame_end()` (line 1027) instead of presenting the picture Mesa produced.
-
-## What the first end-to-end attempt measured, and why it drew nothing
-
-The wiring works mechanically -- the guest records, the host replays on the V100 -- but the
-interface drew **no frames at all**:
-
-```
-hakios-gl: asked for string 0x1f01: softpipe
-hakios-gl: -attachImage: target 0xde1, texture 0, an IOSurface of 'BGRA': not done
-guest frames = 0
-```
-
-The cause is structural, and it is worth writing down before the next attempt: eagl.c does its own
-GL work -- it creates textures and attaches IOSurfaces to them (`attachImage`) -- and those calls go
-through the same dispatch table that was just pointed at the recorders. So the bookkeeping that makes
-a picture exist was also sent to the host, and locally there was never a texture to draw.
-
-A static split is not available: of the 57 calls the interface needs, **49 are also used by eagl.c
-itself**. The separation has to be by *who is calling*, not by which function:
-
-- eagl.c's internal GL must bypass the table and reach OSMesa directly -- `OSMesaGetProcAddress` in
-  `gl_osmesa.c` already hands out those pointers, so a macro layer over the internal calls would do it;
-- CoreAnimation's calls then arrive through the table and hit the recorders, which is the traffic
-  worth sending.
-
-Until that exists, the remote path cannot draw, and the honest frame rate of the interface is
-whatever the local renderer gives: ~1.4 fps.
-
-## The first frame with content: the Settings page
-
-The recorder now does what the 22:44 note said it had to, but not by a static split: each of the 62
-trampolines calls the entry its slot held **before** the override (`local_entry[]`, saved by
-`eagl_fill_table_remote()`), then records. eagl.c's own wrappers stay in the local path, so
-`-attachImage:` sees the texture it was just asked to attach. The other three fixes found while
-making it draw: the arena is 32 MiB (one panel-sized `glTexImage2D` is 10.96 MB, and the old 4 MiB
-dropped the rest of the record silently), the dispatcher keeps `glVertexAttribPointer`'s array until
-the draw instead of freeing it with the call, and `frame_end()` writes the host's picture after the
-local surface copy, not before.
-
-The host half can be exercised without a guest:
-
-```
-$ gcc -O2 -o frame_replay frame_replay.c frame_record.c -lEGL -lGL
-$ ./frame_replay /path/to/qemu/ram.img 0x33b9eb000
-frame_replay: llvmpipe ... | 4.5 (Compatibility Profile) Mesa ...
-frame_replay: 10962430 B of records for 10962000 B of layer; recorded in 6.8 ms, drawn in 58.0 ms;
+frame_replay: 10962480 B of records for 10962000 B of layer; recorded in 6.7 ms, drawn in 59.0 ms;
               0 pixels differ (0.000%), mean 0.000, worst 0
 ```
 
-`frame_record.c` builds the frame with the generated recorders (`encode.inc`, unmodified);
-`frame_replay.c` reads the layer out of the guest's framebuffer in the RAM file, replays the records
-through the same `dispatch.inc` `host_glwire` uses, draws it as a textured quad, reads it back and
-puts it back in the same memory. The result is byte-identical to the guest's own Settings frame
-(`docs/demo/glwire-settings-guest.png` and `-host.png`).
+## The panel's surface is live
 
-`panel_run.py` drives a running machine through that: it waits for the home screen by the colour
-below the kernel's boot band, taps Settings over QMP, waits for the page, pauses the machine, runs
-`frame_replay` and takes a screendump.
+`panel_probe.py` is the screendump acceptance test, and it also records why the previous note was
+wrong. QEMU's PPM writer writes `pixman_image_get_stride` bytes per row — for 1125 RGB pixels that is
+3376, not 3375 — and a reader that assumes packed RGB sees a one-byte-per-row shear that looks like a
+frame from a slide-in animation. Read with the stride QEMU actually wrote, the surface is a live view
+of the guest framebuffer:
 
 ```
-$ ./panel_run.py /path/to/qemu/ram.img --log /tmp/iosvm-0202.log --out /tmp/panel-run
+$ ./panel_probe.py qemu/ram.img
+panel_probe: 1. the settled screen
+panel_probe:    screendump vs guest framebuffer: 0 differing pixels
+panel_probe: 2. a magenta rectangle at 40,40 120x120
+panel_probe:    magenta pixels in the screendump: 14400 of 14400; other differing pixels: 0
+panel_probe: 3. restoring the framebuffer
+panel_probe:    after restore: 0 differing pixels
+panel_probe: PASS: the console surface is live
 ```
 
-The EGL context asks for the device first, so on a host where `/dev/dri` and `/dev/nvidia*` are open
-it lands on the V100; in a sandbox that refuses them it falls back to llvmpipe and says so.
+`tools/qemu/qemu-ppm-stride.patch` is the one-line QEMU fix (write `width * 3` rather than the
+padded stride) for a build that wants standard PPMs; the readers here handle QEMU's current output.
 
-## What the guest still has to send
+## What is left
 
-Calls that return a value (`glCreateProgram`, `glGenTextures`, `glGetUniformLocation`, the fence
-pair) stay local on both sides, so the names they produce are not the same numbers on the host. For
-CoreAnimation's own traffic the names have to travel with the calls (`opcode, length, args, result`)
-and the dispatcher needs a guest-name -> host-name table for textures, framebuffers, programs,
-shaders and uniform locations. Until then the wire carries a frame the host can draw, but not the
-interface's own calls.
+1. **A live stream from a boot that has the switch.** The current guest was booted without a network
+   device and before `/redwood/bin/glremote_on` existed in the image, so its `eagl_remote_begin()`
+   never ran. A boot with `QEMU_NET=1` and that file in `root.apfs` is what exercises the host with
+   CoreAnimation's own calls; see `docs/research/linux-kernel-build.md` for the disk constraint that
+   kept this round from starting one.
+2. **Textures `eagl.c` makes itself.** `-attachImage:` creates textures for IOSurfaces outside the
+   table, so their names never travel. A frame that samples such a texture can only be right if the
+   host learns about it (an explicit record when eagl.c makes one), or if the IOSurface's memory is
+   shared with the host.
+3. **One context per process.** The recorder's arena is process-global; two EAGL contexts used
+   alternately in one process would interleave. CoreAnimation appears to use one.
+4. **GLSL ES to desktop GLSL.** The host is a desktop GL 4.5 compatibility context. `names.h` strips
+   `#version 100`, `precision` lines and `lowp`/`mediump`/`highp`; shaders that rely on
+   `EXT_shader_framebuffer_fetch` still need a plan.

@@ -39,6 +39,24 @@ static int remote_fd = -1;
 static int remote_enabled;
 static int remote_frames;
 static long remote_total_us;
+/*
+ * Every process that loads this library has its own arena and its own picture, and the host finds
+ * them by these words in the RAM file. One fixed pair would make every process's buffer look alike,
+ * and the host would always read the first one it found; the process id makes each pair unique.
+ */
+static uint64_t remote_records_magic = REMOTE_MAGIC_RECORDS;
+static uint64_t remote_frame_magic = REMOTE_MAGIC_FRAME;
+
+/* The vertex arrays of the attributes that are on, as the guest last gave them to glVertexAttribPointer. */
+static struct {
+	const void *pointer;
+	GLint size;
+	GLenum type;
+	GLsizei stride;
+	GLboolean normalized;
+} remote_attribs[16];
+static int remote_attrib_enabled[16];
+
 
 int remote_host_port = 9110;
 char remote_host_address[64] = "10.0.2.2";
@@ -70,23 +88,25 @@ eagl_remote_begin(void)
 	if (access("/redwood/bin/glremote_on", F_OK) != 0) {
 		return;
 	}
+	{
+		uint32_t tag = (uint32_t)getpid() & 0xffffffu;
+
+		remote_records_magic = 0x52454d4f00000000ULL | tag;
+		remote_frame_magic = 0x52454d4f01000000ULL | tag;
+	}
 	file = fopen("/redwood/etc/glremote", "r");
-	if (file == NULL) {
-		remote_enabled = 1;
-		wire_reset(&w, remote_arena + 8, REMOTE_ARENA_BYTES - 8);
-		memcpy(remote_arena, &(unsigned long long){REMOTE_MAGIC_RECORDS}, 8);
-		return;
-	}
-	if (fscanf(file, "%63s %d", host, &port) != 2) {
+	if (file != NULL) {
+		if (fscanf(file, "%63s %d", host, &port) != 2) {
+			fclose(file);
+			return;
+		}
 		fclose(file);
-		return;
+		strncpy(remote_host_address, host, sizeof(remote_host_address) - 1);
+		remote_host_port = port;
 	}
-	fclose(file);
-	strncpy(remote_host_address, host, sizeof(remote_host_address) - 1);
-	remote_host_port = port;
 	remote_enabled = 1;
 	wire_reset(&w, remote_arena + 8, REMOTE_ARENA_BYTES - 8);
-	memcpy(remote_arena, &(unsigned long long){REMOTE_MAGIC_RECORDS}, 8);
+	memcpy(remote_arena, &remote_records_magic, 8);
 }
 
 void
@@ -101,7 +121,10 @@ eagl_remote_resize(size_t bytes)
 		remote_frame_bytes = 0;
 		return;
 	}
-	memcpy(remote_frame, &(unsigned long long){REMOTE_MAGIC_FRAME}, 8);
+	/* A new allocation gets a new word: the host may still have the old buffer's address cached,
+	 * and its magic may still be in the freed pages. */
+	remote_frame_magic += 1ULL << 24;
+	memcpy(remote_frame, &remote_frame_magic, 8);
 	remote_frame_bytes = bytes;
 }
 
@@ -153,7 +176,7 @@ eagl_remote_flush(int width, int height)
 	}
 	started = remote_now_ms();
 	snprintf(request, sizeof(request), "R %llu %llu %d %d %zu %zu\n",
-	    (unsigned long long)REMOTE_MAGIC_RECORDS, (unsigned long long)REMOTE_MAGIC_FRAME,
+	    (unsigned long long)remote_records_magic, (unsigned long long)remote_frame_magic,
 	    width, height, w.at, (size_t)width * height * 4);
 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
 	    send(remote_fd, w.base, w.at, 0) != (ssize_t)w.at) {
@@ -184,6 +207,115 @@ eagl_remote_stats(long *frames, long *average_us)
 	*frames = remote_frames;
 	*average_us = remote_frames > 0 ? remote_total_us / remote_frames : 0;
 	return remote_enabled;
+}
+
+/*
+ * Vertex arrays. The GL signature of glVertexAttribPointer has no size, and the array is only read
+ * when a draw is submitted -- so the pointer alone travels with that call, and the bytes travel with
+ * the draw, when the count (or the largest index) says how many of them there are.
+ */
+static size_t
+remote_max_index(const void *indices, GLsizei count, GLenum type)
+{
+	size_t max = 0;
+
+	if (indices == NULL || count <= 0) {
+		return 0;
+	}
+	for (GLsizei i = 0; i < count; i++) {
+		size_t value;
+
+		switch (type) {
+		case GL_UNSIGNED_BYTE:
+			value = ((const uint8_t *)indices)[i];
+			break;
+		case GL_UNSIGNED_SHORT:
+			value = ((const uint16_t *)indices)[i];
+			break;
+		case GL_UNSIGNED_INT:
+			value = ((const uint32_t *)indices)[i];
+			break;
+		default:
+			value = (size_t)i;
+			break;
+		}
+		if (value + 1 > max) {
+			max = value + 1;
+		}
+	}
+	return max;
+}
+
+static void
+remote_emit_vertex_data(GLint first, GLsizei count, const void *indices, GLenum type)
+{
+	size_t elements;
+
+	if (!remote_enabled) {
+		return;
+	}
+	if (indices != NULL) {
+		elements = remote_max_index(indices, count, type);
+	} else {
+		elements = count > 0 ? (size_t)first + (size_t)count : 0;
+	}
+	if (elements == 0) {
+		return;
+	}
+	for (unsigned index = 0; index < 16; index++) {
+		GLsizei stride;
+		size_t bytes;
+
+		if (!remote_attrib_enabled[index] || remote_attribs[index].pointer == NULL) {
+			continue;
+		}
+		stride = remote_attribs[index].stride;
+		if (stride <= 0) {
+			stride = remote_attribs[index].size * wire_type_size(remote_attribs[index].type);
+		}
+		bytes = elements * (size_t)stride;
+		if (bytes == 0 || bytes > (8u << 20)) {
+			continue;
+		}
+		wire_open(&w, 200);
+		wire_u32(&w, index);
+		wire_i32(&w, remote_attribs[index].size);
+		wire_u32(&w, remote_attribs[index].type);
+		wire_u8(&w, remote_attribs[index].normalized);
+		wire_i32(&w, remote_attribs[index].stride);
+		wire_bytes(&w, remote_attribs[index].pointer, (GLsizei)bytes);
+		wire_close(&w);
+	}
+}
+
+static void
+remote_note_vertex_pointer(GLuint index, GLint size, GLenum type, GLboolean normalized,
+    GLsizei stride, const void *pointer)
+{
+	if (index < 16) {
+		remote_attribs[index].pointer = pointer;
+		remote_attribs[index].size = size;
+		remote_attribs[index].type = type;
+		remote_attribs[index].stride = stride;
+		remote_attribs[index].normalized = normalized;
+	}
+}
+
+static void
+remote_note_attrib_enabled(GLuint index, int enabled)
+{
+	if (index < 16) {
+		remote_attrib_enabled[index] = enabled;
+	}
+}
+
+/* glPixelStorei's unpack alignment decides how many bytes the last row of a texture takes. */
+static void
+remote_note_pixel_store(GLenum pname, GLint value)
+{
+	if (pname == GL_UNPACK_ALIGNMENT && value > 0) {
+		wire_unpack_alignment = value;
+	}
 }
 
 #include "encode.inc"
