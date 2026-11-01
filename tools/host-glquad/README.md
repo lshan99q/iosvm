@@ -79,3 +79,25 @@ rammap: "XNU" found
 
 That is the premise the next step stands on: with sharing on, the 21.9 MB of copying that made the
 round trip 6.8 s has no reason to exist.
+
+## gpu_host_ram — the copy is gone
+
+With sharing on, the same drawing needs no payload at all. `gpu_host_ram` maps the RAM file, takes a
+one-line request naming where the layer already is and where the frame should go, draws on the GPU
+and writes the frame **in place**:
+
+```
+$ ./gpu_host_ram /tmp/fakeram.img 9101
+gpu_host_ram: /tmp/fakeram.img mapped, 67108864 bytes
+gpu_host_ram: Tesla V100-SXM2-16GB/PCIe/SSE2 | 4.6.0 NVIDIA 580.178.04
+
+$ python3 -c 'import socket; s=socket.create_connection(("127.0.0.1",9101)); s.sendall(b"S 1125 2436 8388608 25165824\n"); print(s.recv(64))'
+reply: S done 28.45
+```
+
+Verified against the file afterwards: the pixels where the frame was written are the layer's own
+gradient (GL's origin is bottom-left, so the first pixel is the layer's bottom-left corner --
+`(0,0,90)` for a layer built as `x*255/width, y*255/height, 90`).
+
+**28 ms, no bytes on the wire.** The socket transport took 6.8 s because it copied 21.9 MB through an
+emulated stack; this copies nothing. The request is one line.
