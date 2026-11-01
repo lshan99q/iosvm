@@ -1624,10 +1624,13 @@ the interface there, and the CoreAnimation IOSurfaces behind it are 1125 x 2436 
 a row** (`MiniIOSurface: backboardd[15] created surface 1 ... 4608 bytes per row`) — 1152 pixels, not
 1125. Reading `0x33b9eb000` as 1125 x 2436 BGRA gives the UI exactly.
 
-QEMU's display surface is **not** that memory. With the machine paused, a screendump returned a frame
-from the middle of the Settings slide-in, and a magenta pixel written into `0x33b9eb000` (a marker,
-adjusted to both 4500 and 4608 strides) never appeared in it. The surface is a copy of a frame the
-guest pushed earlier: the guest's own screen had settled, the panel still showed the animation. That
+QEMU's display surface is **not** that memory, and after the first update it is not a live view of
+it either. With the machine paused on the settled Settings page, a screendump returned a frame from
+the middle of the slide-in, and magenta probes written into `0x33b9eb000` (at both 4500 and 4608
+strides) never appeared in it. Further resumes and screendumps returned the *same bytes*, so the
+console surface is a copy taken at the first update after the loader's mode set, and later updates
+do not refresh it. The guest went on drawing into its framebuffer; the display device kept the
+snapshot. That
 is worth separating from the guest's rendering, and it is very likely part of what the earlier notes
 called "the screen does not appear on every boot": the machine often *has* drawn, and the display
 device is showing an older push.
