@@ -1459,3 +1459,51 @@ So this is not a permissions problem and not a queueing problem. `registerApplic
 something this port does not provide -- most likely the MobileInstallation/installd side of the same
 transaction, which is not running here. The hook was removed from the boot path; the function stays,
 unused, because the next attempt should start from those two lines rather than from nothing.
+
+## Addendum 35: the accelerated renderer can be turned on, and on this machine it is slower
+
+The interface draws at 1.3 frames a second while scrolling because CoreAnimation has no accelerated
+renderer (addendum 33). There is a switch for that, and it works: build the userland with `GL=1`
+(`libhakios.gl.dylib` and `libOSMesa.8.dylib` go into the image), boot with `metal=1`, and the window
+server takes the other path:
+
+```
+hakios: the server has an accelerated renderer (0x103204330)
+```
+
+CoreAnimation no longer says `Failed to initialize Metal or OpenGLES`, and no longer falls back to its
+software renderer. So the architectural switch the project wants is reachable from where we are --
+and that is where the good news ends.
+
+**Measured, the same boot argument, the same image, only the two libraries different:**
+
+| | first frame |
+|---|---|
+| software renderer (no GL libraries) | ~6 min to the home screen |
+| "accelerated" renderer (GL + OSMesa in the image) | **none in 7 minutes**, twice: the boot aborts with `no frames after 420 s` |
+
+Because the accelerated renderer here draws through Mesa's `softpipe`, which runs inside the guest as
+AArch64 instructions under QEMU's TCG -- and that pipeline is *slower* than Apple's own software
+rasteriser doing the same rectangles. Turning the GPU path on does not make this machine faster; it
+makes it too slow to reach the home screen.
+
+Two numbers to keep the goal honest: 24 frames a second is 41.7 ms a frame; scrolling now costs about
+700 ms a frame. That is a factor of about seventeen, and no boot argument, resolution or QEMU tunable
+found in this project spans it. It needs the drawing to happen **outside** the emulated CPU -- the
+Metal-to-Vulkan bridge (`proto/` carries the commands, `host/vkbridge/` replays them on the host,
+where the code is native x86). The host half builds and passes its own probe; the **guest half, which
+would have to encode Metal into those commands, does not exist yet.**
+
+Metal itself is farther along than the renderer switch suggests, which is worth recording because it
+is the foundation the bridge stands on. From the port's own diagnostic (`metal=1`, `metal_test`):
+
+```
+MTLCreateSystemDefaultDevice() = "HakiOS Adreno 642L (Metal: a device that exists, nothing more)"
+  a buffer of 65536 bytes: written and read back, 0 words wrong
+  the GL renderer's library: 274 functions, 3 vertex, 271 fragment
+  queue made, buffers at GPU addresses 0x0 and 0x0, command buffer nil
+  no blits: the device has no GPU queue (gpu=1, and the plug-in built with hakios-metal)
+```
+
+So a device exists, buffers and libraries verify, and the missing piece is named in the diagnostic
+itself: no GPU queue, because that needs `hakios-metal` -- and behind it a GPU that can execute.
