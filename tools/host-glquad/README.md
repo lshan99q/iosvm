@@ -101,3 +101,20 @@ gradient (GL's origin is bottom-left, so the first pixel is the layer's bottom-l
 
 **28 ms, no bytes on the wire.** The socket transport took 6.8 s because it copied 21.9 MB through an
 emulated stack; this copies nothing. The request is one line.
+
+### Finding the layer instead of addressing it
+
+The guest should not have to know a physical address to use any of this. It writes a magic word in
+front of its layer, and the host finds the layer by scanning the RAM file for that word:
+
+```
+$ ./gpu_host_ram /tmp/fakeram2.img 9102
+$ python3 -c '... send(b"M 1125 2436 %d\n" % 0x1122334455667788)'
+M found 12582920 23544920 in 4 ms
+S done 27.09
+```
+
+4 ms to find the layer in a 64 MB image, 27 ms to draw it in place, and the frame lands directly
+behind the layer. Two things to fix before this is final: the reply should be one line, not two, and
+a 12 GB image makes a cold scan expensive -- so the host should remember where the layer was and
+verify there first, rescanning only when the magic has moved.

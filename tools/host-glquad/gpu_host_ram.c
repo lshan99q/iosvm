@@ -177,7 +177,56 @@ main(int argc, char **argv)
 			at++;
 		}
 		header[at] = '\0';
-		if (header[0] != 'S' ||
+		if (header[0] == 'M') {
+			/* "M <width> <height> <magic>" -- the layer is wherever the guest put it. The guest
+			 * writes the magic word in front of the layer; the display reads the frame that this
+			 * writes immediately after it. No physical address is needed on either side. */
+			unsigned long long magic = 0;
+			int w = 0, h = 0;
+			unsigned char pattern[8];
+			unsigned char *found = NULL;
+			double began = now_ms(), took;
+
+			if (sscanf(header, "M %d %d %llu", &w, &h, &magic) != 3) {
+				fprintf(stderr, "gpu_host_ram: bad find request '%s'\n", header);
+				close(client);
+				continue;
+			}
+			for (int i = 0; i < 8; i++) {
+				pattern[i] = (unsigned char)(magic >> (8 * i));
+			}
+			/* the layer is fresh in cache when the guest has just written it, so a plain scan
+			 * is enough; it is done only when the magic is not where it was last time */
+			found = memmem(ram, (size_t)info.st_size, pattern, sizeof(pattern));
+			took = now_ms() - began;
+			if (found == NULL) {
+				char reply[64];
+				int length = snprintf(reply, sizeof(reply), "M missing\n");
+				send(client, reply, (size_t)length, 0);
+				close(client);
+				continue;
+			}
+			{
+				size_t layer_at2 = (size_t)(found - ram) + 8;
+				size_t frame_at2 = layer_at2 + (size_t)w * h * 4;
+				char reply[96];
+				int length;
+
+				if (frame_at2 + (size_t)w * h * 4 > (size_t)info.st_size) {
+					length = snprintf(reply, sizeof(reply), "M noroom\n");
+					send(client, reply, (size_t)length, 0);
+					close(client);
+					continue;
+				}
+				/* reuse the same drawing code as the offset form */
+				sscanf(header, "M %d %d", &width, &height);
+				layer_at = layer_at2;
+				frame_at = frame_at2;
+				length = snprintf(reply, sizeof(reply), "M found %zu %zu in %.0f ms\n",
+				    layer_at2, frame_at2, took);
+				send(client, reply, (size_t)length, 0);
+			}
+		} else if (header[0] != 'S' ||
 		    sscanf(header, "S %d %d %llu %llu", &width, &height, &layer_at, &frame_at) != 4) {
 			fprintf(stderr, "gpu_host_ram: bad request '%s'\n", header);
 			close(client);
