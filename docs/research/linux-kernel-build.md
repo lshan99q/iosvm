@@ -1882,3 +1882,37 @@ Two consequences. The ramfb surface does follow the guest framebuffer, so the "d
 showing an older push" explanation for "the screen does not appear on every boot" is **not** this;
 whatever that turns out to be, it is elsewhere. And the IOSurface stride (4608) and the panel's
 (4500) are about the guest's compositing, not about QEMU's display surface.
+
+## Addendum 40: the 07:00 screendump's diagonal is one byte a row, measured
+
+The 07:00 picture (`/tmp/guest-0700.ppm`, 1125 x 2436, 11668 colours) looked sheared, with a
+torn block at the top left. That is the reader, not the guest. The numbers:
+
+| what | value |
+|---|---|
+| guest panel (`MiniIOMobileFramebuffer`) | 1125 x 2436, **4500 bytes a row** |
+| ramfb config (the loader's `etc/ramfb`) | address `0x33b9eb000`, stride 4500 |
+| QEMU PPM pixel area | 8,223,936 bytes = 2436 x **3376** |
+| packed RGB a row would be | 1125 x 3 = **3375** |
+
+The PPM is one byte wider than the pixels on every row. Reading it as packed RGB starts each row one
+byte early; 2436 rows later the picture has slid by 2436 bytes, which is the diagonal and the torn
+block at the top left. Qt/ImageMagick/PIL all read P6 as packed.
+
+With the stride QEMU actually wrote, the screendump is the guest's framebuffer exactly. The machine
+was stopped for the two reads, so the frame could not change between them:
+
+```
+differing pixels: 0 of 2,740,500
+ppm RGB md5:      dbf17f6711d31cac5799dd8b85715e7f
+guest RGB md5:    dbf17f6711d31cac5799dd8b85715e7f
+```
+
+`docs/demo/guest-0700-screendump.png` and `docs/demo/guest-0700-framebuffer.png` are the two, and
+their PNG md5 is the same (`1d0a492d1a23b1cd6933f3c0d1ec3771`). The guest was resumed (`cont`) after
+the comparison; it is not restarted.
+
+The guest's real pitch is 4500 (the panel's, and the loader's ramfb stride); the CoreAnimation
+IOSurface is 4608, but that is the layer's memory, not what ramfb scans. `tools/screendump.sh` and
+`tools/glwire/panel_probe.py` already drop the PPM padding; `tools/qemu/screendump.sh` and
+`webvnc.py` already did. The raw PPM still needs a stride-aware reader.
