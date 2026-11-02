@@ -2083,9 +2083,10 @@ SpringBoard was spawned at 08:02:11 and backboardd's window server came up; the 
 Apple logo / spinner. At 08:09 (ten minutes in) the machine was stopped for three seconds and
 continued, which produced frames 4-9; at 08:10 it was still the spinner, not the home screen.
 
-No Ticket spinlock appeared in those ten minutes. That is evidence for the pset0 theory (`cpus=2`
-removes the CPU 3 owner contention), not yet proof: the window under test was 13-17 minutes on four
-cores, and this run never reached the load that produced it. The remaining blocker on two cores is
+At 08:14 (thirteen minutes after boot, frames 72-76) it was still the same spinner and there was
+still no Ticket spinlock. That is evidence for the pset0 theory (`cpus=2` removes the CPU 3 owner
+contention), not proof: the window under test was 13-17 minutes on four cores, and this run never
+reached the load that produced it. The remaining blocker on two cores is
 the `lsd` CPU-monitor loop (`process lsd denied attempt to escape CPU monitor`) plus the slow
 softpipe renderer; the 2-vCPU guest does not get SpringBoard's first home frame out.
 
