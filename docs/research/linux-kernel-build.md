@@ -2022,3 +2022,20 @@ One line for the second: **the high-priority thread-call ticket lock is stuck wi
 ticket never advanced, so the 60-second timeout is a lost unlock, not a held lock.** Both locks are
 ticket locks whose wait/unlock path uses `wfe`/`sev` and atomics; under TCG that is the common
 factor to test next, before blaming either subsystem.
+
+### Why owner=0: the unlock is two stores, and the panic is the window
+
+`lck_ticket_unlock()` in `osfmk/kern/lock_ticket.c` is:
+
+```c
+os_atomic_store(&tlock->lck_ticket_owner, 0, relaxed);   /* line 959 */
+hw_lck_ticket_unlock_internal(&tlock->tu);               /* line 960 */
+```
+
+The owner field is cleared **before** `cticket` is advanced. The 07:08 panic reads the lock between
+those two stores: `owner = 0`, `cticket = 0x40`, `nticket = 0x41`, waiter wants 0x40. That is not a
+lost unlock in the ticket algorithm; it is the two-instruction unlock window. It becomes permanent
+only because the vCPU that was executing line 959 never runs line 960 — the same class of "CPU 3 does
+not come back" the stackshot complains about. So the one-line answer for this panic is: **the holder
+was interrupted between clearing the owner and advancing the ticket; the 60 s timeout is the
+incomplete unlock, not a lock held by a live thread.**
