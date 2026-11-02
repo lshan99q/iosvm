@@ -92,6 +92,32 @@ W1/W2/W3 的代码全部落地、每一条都有开关可以单独关掉（下�
 5. **`GLWIRE_DUMP` 原来只在有面板时才存图**，W2 之后就没有面板了，所以改了：
    现在没有面板也存 `-picture-` 那一份。
 
+### 0.7 第四轮：记录器与 flush 拆开了，还是崩（2026-11-02 15:32）
+
+**做法**：新开关 `/redwood/etc/glwire_noflush`（`GLWIRE_NOFLUSH=1` 构建，或 boot-arg
+`glwire_noflush=1`）。装记录器、62 个槽位照旧替换、每条调用照旧记录；`eagl_remote_flush()`
+一进来就 `wire_reset()` 然后 `return 0`，`eagl_remote_surface()` 也直接返回 0 ——
+没有 socket、没有 556 vtop、没有 IOSurfaceLock、没有画面回拷。镜像
+`/tmp/root-noflush-local.apfs`（`glremote_on` + `glwire_local`：客户机仍然本地绘制，
+只留下「记录器」这一个变量）；内核 `hakios-kernel` 15:23（带 `ustrace` 过滤器）。
+
+**实测**（750×1624，`fbscale=2 metal=1`，`QEMU_SMP=4`，
+`CMDLINE="cpus=4 fb_beat=0 fbscale=2 metal=1"`，`/tmp/iosvm-1500.log`）：
+
+- 15:26:20 起机；日志 **297 次** `hakios-remote: flush -> 0`，没有 host_glwire、没有连接；
+- 15:32:40 `(user/501/com.apple.backboardd [14]) exited due to SIGSEGV`（起机后 **6 分 20 秒**），
+  15:32:41 以 pid 77 重启，之后 `frames in` 14 fps；
+- 截图 8,061 B（纯黑，符合预期：没有画面回填）。
+
+**结论**：**崩不在 flush，也不在画面回填**。一帧都没发、一次 vtop 都没做，backboardd 照样在
+同一时间尺度上 SIGSEGV；变量就是「62 个槽位被替换 + 每次调用都记录」这件事本身。
+下一个二分对象是槽位/recorder，而不是网络或 IOSurface。
+
+**坑（新）**：`IOSVM_USE_LLD=1` 会让内核走 `ld64.lld`，而它不实现
+`-image_base` / `-segaddr`（只 warning），链出来的 `__TEXT` 在 0，loader 直接
+`unexpected kernel layout`。用 cctools 的 `aarch64-apple-darwin11-ld`（`IOSVM_USE_LLD=0`），
+并且删掉 `BUILD/obj/.../mach.development.bcm2837{,.unstripped}` 强制重链。
+
 ---
 
 ## 一、目标与验收

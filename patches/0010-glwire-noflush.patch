@@ -1,0 +1,21 @@
+# build.sh: GLWIRE_NOFLUSH=1, the image that installs the recorders and never sends a frame.
+#
+# Why: with the recorders installed and eagl_remote_flush() returning 0 (no socket, no vtop, no
+# picture copy), backboardd still exits with SIGSEGV 6m20s after boot. That isolates "the 62 slots
+# are replaced / every call is recorded" from "the frame goes on the wire"; see
+# docs/gpu-acceleration-plan.md section 0.7.
+#
+# Apply from the root of the working tree:
+#   patch -p1 < patches/0010-glwire-noflush.patch
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -399,6 +399,11 @@
+ 	rm -f root/etc/glwire_local
+ 	[ -n "$GLWIRE_LOCAL" ] && : > root/etc/glwire_local
++	# GLWIRE_NOFLUSH=1: install the recorders, record every call, and never send a frame
++	# (eagl_remote_flush() returns 0). Isolates "the 62 slots are replaced" from "the frame is sent".
++	rm -f root/etc/glwire_noflush
++	[ -n "$GLWIRE_NOFLUSH" ] && : > root/etc/glwire_noflush
+ 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
+ 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
+ 	# lines about its own business in the first minutes and pushes everything else out of the

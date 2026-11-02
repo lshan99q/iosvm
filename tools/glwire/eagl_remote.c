@@ -71,6 +71,12 @@ static size_t remote_picture_bytes;
  * /redwood/etc/glwire_local exists or a glwire_local=1 boot-arg says so, which is the A/B for it. */
 int remote_only;
 
+/* The A/B between "the 62 slots are replaced" and "the frame goes on the wire": with
+ * /redwood/etc/glwire_noflush or boot-arg glwire_noflush=1 the recorders are installed and every
+ * call still records, but eagl_remote_flush() drops the frame and returns 0 at once -- no socket,
+ * no address translation, no picture copy. If backboardd still dies, the slots are the problem. */
+static int remote_no_flush;
+
 #ifndef SYS_hakios_vtop
 #define SYS_hakios_vtop 556
 #endif
@@ -215,8 +221,11 @@ eagl_remote_begin(void)
 		wire_vtop_hook = remote_vtop;
 	}
 	remote_only = wire_vtop_hook != NULL && !remote_wants_local();
-	remote_say("hakios-remote: the frame is %s\n",
-	    remote_only ? "drawn by the host alone" : "drawn here as well (glwire_local)");
+	remote_no_flush = remote_boot_arg("glwire_noflush=1") != NULL ||
+	    access("/redwood/etc/glwire_noflush", F_OK) == 0;
+	remote_say("hakios-remote: the frame is %s%s\n",
+	    remote_only ? "drawn by the host alone" : "drawn here as well (glwire_local)",
+	    remote_no_flush ? "; the recorders are installed but no frame is sent (glwire_noflush)" : "");
 	wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 }
 
@@ -285,8 +294,8 @@ eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes
 
 	remote_surface_segments_count = 0;
 	remote_surface_row = 0;
-	if (!remote_enabled || wire_vtop_hook == NULL || base == NULL || width <= 0 || height <= 0 ||
-	    row_bytes < width * 4) {
+	if (remote_no_flush || !remote_enabled || wire_vtop_hook == NULL || base == NULL ||
+	    width <= 0 || height <= 0 || row_bytes < width * 4) {
 		return 0;
 	}
 	bytes = (size_t)row_bytes * (size_t)height;
@@ -314,6 +323,15 @@ eagl_remote_flush(int width, int height)
 	double started;
 	int at = 0;
 
+	if (remote_no_flush) {
+		/*
+		 * The recorders stay installed and every call is still recorded (that is the variable
+		 * under test); the frame simply never leaves the machine. Drop the records so the arena
+		 * cannot fill, and answer exactly as a frame that was sent and not drawn would.
+		 */
+		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
+		return 0;
+	}
 	if (!remote_enabled || w.at == 0) {
 		return 0;
 	}
