@@ -221,3 +221,40 @@ Every piece of that is already proven except one:
 
 So the remaining work is one small interface: user virtual address -> physical offset. With it the
 ten megabytes stop travelling and the frame rate follows the 6-14 ms the host already measures.
+
+## The interface exists now, and the ten megabytes are gone (2026-11-02)
+
+`hakios_vtop` (syscall 556, `patches/0009-hakios-vtop-syscall.patch`) answers a user virtual range
+with the physical segments behind it, one page at a time through `pmap_find_phys()`, coalesced, and
+`EFAULT` unless the whole range is resident. `vtop_test` proves it from user space and
+`vtop_verify.py` proves it from this side: it reads the RAM file at the addresses the guest printed
+and compares md5 with the pattern the guest wrote -- `PASS`, same hash on both sides.
+
+On the wire a texture pointer is now a tag and, when it can be followed, a segment list
+(`wire_image` / `wire_take_image`); the picture comes back the other way, as a segment list in the
+request line, and the host writes it straight into the guest's buffer (`R 0` in the reply). The old
+inline path is still there behind `/redwood/etc/glwire_inline`, and a kernel without 556 selects it
+by itself.
+
+```
+frame 2, 750x1624, 13651 records B, 4872000 picture B, 0.05 ms, interval 2.17 s (0.46 fps),
+         2 image refs (9873920 B), panel de84f190b9e8f739 picture de84f190b9e8f739 MATCH in-place
+```
+
+Ten megabytes of records became thirteen kilobytes, the picture stopped travelling, and the guest's
+own view of the frame says the handover costs **99 us** (`hakios-gl: frame 2: ... 99 handing on`).
+
+**So the pipe is not the problem any more, and the frame rate still is.** The recorder calls the
+local entry before it records (`local_entry[]` in `remote.inc`), so CoreAnimation's calls are still
+executed by Mesa softpipe inside the guest; the frame's own breakdown puts 1.69 s of 1.85 s there,
+108 ms in `surface_to_texture`, 58 ms copying the picture out, 99 us on the wire. Next step, in
+order: do not execute the heavy calls locally when the host is drawing (a flag per call in
+`spec.def`), then stop the local composition, then let the host write the picture into the display's
+IOSurface directly.
+
+**And one thing does not work yet:** every boot with the by-reference path so far has stopped after
+its first two frames, panel on the Apple logo, `lsd` complaining about the CPU monitor -- the same
+shape as the stall `docs/state-of-the-port.md` already records for some boots, but four times in a
+row. The wire numbers above come from those two frames (they are exact); a steady-state frame rate
+has not been measured. Isolating that is the first thing the next session should do:
+`docs/gpu-acceleration-handoff.md`, section 7.8.
