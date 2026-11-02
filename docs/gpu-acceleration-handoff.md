@@ -238,6 +238,10 @@ host_glwire: frame 2, 1125x2436, 25827 records B, 10962000 picture B, 0.06 ms, i
 
 ## 六、下一步（按顺序，含预期收益）
 
+> 这一节是概要；**详细的工程方案在 `/home/lshan/dsh.MD/IOSVM-GPU加速后续优化.md`**
+> （仓库副本 `iosvm/docs/gpu-acceleration-plan.md`）：每一步的改动文件、伪代码、验证方法、
+> 风险与回退，以及 W0 卡死隔离的具体实验和开关。
+
 ### 步骤 1：记录器不再执行「重」的本地调用（**最值钱的一步**）
 
 现在 `remote.inc` 每个中转函数都是：
