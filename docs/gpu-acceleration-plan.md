@@ -7,6 +7,93 @@
 
 ---
 
+## 零、执行记录（2026-11-02 第三轮，本轮实测）
+
+### 0.1 一句话
+
+W1/W2/W3 的代码全部落地、每一条都有开关可以单独关掉（下面 0.4）；但 **「按引用这条路活不下来」没有解决**，
+而且这一轮把它定位得更准了：卡死与 vtop、原地写、mlock **都无关** ——
+
+> 同一个镜像，去掉 `GLREMOTE=1`（完全不装记录器、不 flush），**桌面正常出来**，驱动自报 7–9 fps，
+> 670 s 内 0 次崩溃；把记录器装回去（按值或按引用，有/无原地写，有/无 mlock），**全部停在
+> 「Apple logo → 转圈」**，`backboardd` 反复 `exited due to SIGSEGV`（pid 16/80/99/105…），
+> 有时内核直接死在 `Ticket spinlock[...] timeout` 上。
+
+所以 W0 的靶子是「记录器装上了 + 每帧 flush」这条共同路径，不是这一轮新加的任何一半。
+
+### 0.2 阶段状态
+
+| 阶段 | 状态 | 依据 |
+|---|---|---|
+| W0 卡死隔离 | ❌ 未达标（界面没出来），✅ 定位完成 | 五种配置的对照，见 0.3；`GLWIRE_INLINE` / `GLWIRE_NO_INPLACE` / `glwire_mlock=0` 都试过，都照样崩 |
+| W1 记录器不本地执行 | ✅ 代码完成（36/62 条 `!local`） | `spec.def` + `gen.py` + `eagl_remote.c:remote_only`；第一次实测踩到 `-attachImage:` 回归（`images=0`，宿主一帧都收不到），修法：`glBindTexture` 必须本地执行，已在 spec.def 里写明白 |
+| W2 客户机不本地合成 | ✅ 代码完成 | `frame_end()` 里 `composition_off`：不 `target_to_surface`、不 `show_texture`、不上传 `0xFFFF0001` 面板 |
+| W3 直写显示用 IOSurface | ✅ 代码完成，⚠️ 端到端未验证 | 请求行第 6 字段带行跨度，宿主按行写、客户机不再 memcpy；实测 `flush -> 2 (rows into the surface)` 生效，但那一机画面本身是黑的（W2 的后果），所以「行写对不对」还没有一张正确的图来验收 |
+
+> §4.2 那个决定性实验的答案：**DIFF**。不做面板上传之后，宿主只重放 CA 的绘制流，
+> 屏幕是纯黑（截图 8,061 B）。所以 W1 与 W2 目前**不能同时开**：W1 让客户机不再画、
+> W2 让宿主没有面板可抄，两边都不出图。
+
+### 0.3 实测数字（750×1624，`fbscale=2 metal=1`，QEMU/TCG + Tesla V100）
+
+| 配置 | 一帧记录 | 宿主 | 客户机 | 结果 |
+|---|---|---|---|---|
+| 无远程渲染（`GL=1` 不带 `GLREMOTE`） | — | — | 驱动 7–9 fps | ✅ 桌面出来，0 崩溃，截图 447,226 B |
+| 按引用 + 原地写 | 8,373 B，1 个 image ref（4,988,928 B） | 0.04 ms/帧 | 单帧 77,159 µs，其中画面拷进 surface 48,681 µs | 137 帧全 `MATCH in-place`，帧间隔 0.08–0.12 s（8.7–12.6 fps，驱动自报 11 fps），**但 6 分钟后 backboardd 开始 SIGSEGV，界面不出** |
+| 按引用 + 不原地写（`GLWIRE_NO_INPLACE=1`） | 8,373 B | 0.04 ms/帧 | 单帧 2.78 s（其中 530 ms 收 4.87 MB 画面） | 1.65 fps，1 次 SIGSEGV，界面不出 |
+| 按值（`GLWIRE_INLINE=1`） | 4,992,421 B | 0.04 ms/帧 | 单帧 1.35 s | 0.74 fps，2 次 SIGSEGV，界面不出 |
+| 按引用、不启动宿主 | — | — | 单帧 3.27–3.65 s | 照样卡住，并死在 `Ticket spinlock` panic 上 |
+| W1+W2+W3（`remote_only`） | 2,424–3,444 B | 19–30 fps | 不画、不合成、不拷贝 | `flush -> 2 (rows into the surface)`，**屏幕黑**，之后又崩溃 |
+
+对照上一轮（本文件 §1.3）：一帧 1,852,902 µs → 现在 77,159 µs（24 倍），
+「其余 1.69 s」消失了，「画面拷回 IOSurface」58 ms + 「IOSurface 回填」108 ms 也一并消失
+（回填变 0，拷贝那 48.7 ms 正好是 W3 要去掉的部分）。**注意**：这 77 ms 是转圈动画那一帧
+（44 条调用、0 次纹理回填），不是主界面滚动。
+
+### 0.4 这一轮新增的开关（都在，出问题不用重编）
+
+| 开关 | 位置 | 作用 |
+|---|---|---|
+| `GLWIRE_INLINE=1`（构建） | `userland/build.sh` | 放进 `/redwood/etc/glwire_inline`：按值（旧线格式） |
+| `GLWIRE_LOCAL=1`（构建） | `userland/build.sh` | 放进 `/redwood/etc/glwire_local`：客户机照旧本地绘制（W1 关） |
+| `glwire_local=0/1`（启动参数） | `eagl_remote.c` | 同上的运行时版本，A/B 不用换镜像 |
+| `glwire_mlock=0`（启动参数） | `eagl_remote.c` | 不给画面缓冲 mlock |
+| `glwire_nopicture=1`（启动参数） | `eagl.c` | 宿主照画，但画面不写回（隔离「画面回填」这一半） |
+| `GLWIRE_NO_INPLACE=1` / `--no-panel`（宿主） | `host_glwire.c` | 不往客户机内存里写 / 不画面板、只重放记录 |
+| `--save DIR`、`GLWIRE_DUMP=前缀`（宿主） | `host_glwire.c` | 每帧/首帧画面存盘（现在没有面板也会存） |
+
+### 0.5 下一步（按这个顺序）
+
+1. **把 backboardd 的 SIGSEGV 抓到具体地址。** 这一轮试过 `systrace=1`（会连系统调用一起打印，
+   太吵、把机器拖慢），`qemu/touch.py stacks`（**会把本端口带进 debugger，然后 panic**，见 0.6）。
+   更靠谱的下一步：给镜像加一个 `EXTRA=` 的小程序，在 backboardd 重启后把
+   `/private/var/mobile/Library/Logs/CrashReporter/*.ips` 打到串口；或者让 `user_exception_trace`
+   只对 `backboardd` 打印（它已经有 `usertrap:` 的格式，缺的是一只过滤器）。
+2. **把「记录器」与「flush」分开。** 现在两者一起开，一起崩。第一步只装记录器、`eagl_remote_flush()`
+   直接 `return 0`（一帧都不发），看是否还崩：不崩 → 崩在 flush/画面回填那一侧；还崩 → 崩在
+   62 个槽位被替换这件事本身（那就是槽位偏移或某个签名的问题，用二分法缩小到具体调用）。
+3. **W2 的前提要重新确认。** 现在宿主只会画面板，`--no-panel` 黑屏。要么补宿主的 CA 重放
+   （shader/状态/纹理上传顺序，这是 §7.2 说的那件事），要么承认「客户机合成 + 面板上传」暂时留着，
+   只做 W3 省那 48.7 ms。
+
+### 0.6 坑（本轮新增，别重走）
+
+1. **`qemu/touch.py stacks NAME` 会让本端口 panic。** 它走 debugger 入口，而这个 QEMU 配置下
+   `Attempting to forcibly halt cpu N … halt not supported for this configuration`，随后
+   `Debugger synchronization timed out` → `Ticket spinlock timeout` → panic。要栈就用启动参数
+   `ustacks=NAME ustacks_at=…`，它在定时器里采样，不打扰其他 CPU（本轮用过 120 次，正常）。
+2. **主机忙的时候启动会更容易「卡死」。** 本轮两次 panic 都发生在我在同一台机器上并行编译
+   userland / 跑第二台 QEMU 的时候；`cpus=4` 的 TCG 里一个 vCPU 被调度走几秒，就会触发
+   ticket spinlock 超时。要量数字就只跑一台机器、别同时编译。
+3. **`glBindTexture` 一旦不本地执行，`-attachImage:` 就拿到 `texture 0`**（eagl.c 靠自己的
+   binder 记 `bound[]`），于是 `images=0`、宿主一帧都收不到。spec.def 里已经不标它。
+4. **`systrace=1` 不只是异常跟踪**，它把 syscall 也全打出来（`systrace: lsd[32] fcntl(...)`），
+   日志几 MB、机器明显变慢。只在抓崩溃时短开。
+5. **`GLWIRE_DUMP` 原来只在有面板时才存图**，W2 之后就没有面板了，所以改了：
+   现在没有面板也存 `-picture-` 那一份。
+
+---
+
 ## 一、目标与验收
 
 ### 1.1 目标
@@ -55,9 +142,23 @@
 | 把画面缓冲钉住（排除「页被搬移后被写错地方」） | `userland/src/eagl_remote.c` 的 `mlock()` | `picture buffer 4872000 B + 8, mlock 0 (wired)`，**照样只画两帧** |
 | 走旧的内联线（排除「按引用」本身） | `GLWIRE_INLINE=1 ./build.sh root.apfs` | `records 9,959,387 B, 0 image refs`，**同样只画两帧** |
 
-所以这是本端口既有的卡死（`docs/state-of-the-port.md` 记的约 40% 概率），今天命中率偏高，而当时
-宿主机有 5 GB 已换出、还跑着一台 24 GB 的 Windows 虚拟机。**先怀疑宿主内存压力**：客户机的换页走
-`qemu/ram.img`，宿主一慢，客户机的定时器错乱，launchd 的 CPU 监视器就报 lsd。
+**但这两条还不够**：12:50 之后的第五个对照把结论改了 —— 同一个镜像，**去掉 `GLREMOTE=1`
+（完全不装记录器、不 flush、没有 `glwire_inline`/`glwire_local` 这些文件）**，那台机器
+**正常启动到桌面**：驱动自报 7–9 fps，670 s 内 900+ 帧，0 次 `SIGSEGV`、0 次 panic，
+截图 447,226 B（有小组件、Dock、图标）。所以「两帧之后卡死」**不是本端口既有的概率问题**，
+而是「记录器装上了 + 每帧 flush」这条路径带来的：
+
+| 对照 | 记录器 | flush | 结果 |
+|---|---|---|---|
+| 无远程渲染 | 不装 | 不调 | ✅ 桌面，0 崩溃 |
+| 按引用 + 原地写 | 装 | 调 | ❌ 6 分钟后 backboardd 开始 `exited due to SIGSEGV`，界面不出 |
+| 按引用 + 不原地写 | 装 | 调 | ❌ 同样，1 次 SIGSEGV |
+| 按值（内联） | 装 | 调 | ❌ 同样，2 次 SIGSEGV，0.74 fps |
+| 按引用 + `glwire_mlock=0` | 装 | 调 | ❌ 同样 |
+| 按引用 + 不启动宿主 | 装 | 调（连接失败） | ❌ 同样，并死在 `Ticket spinlock` panic |
+
+「宿主内存压力」这一条仍然成立为**放大因素**（两次 panic 都发生在我并行编译的时候，见 0.6-2），
+但它不是根因：安静环境下纯本地渲染跑 670 s 一点事没有。
 
 ### 2.2 每次测量前要做的事
 
@@ -65,10 +166,14 @@
 2. 用 `qemu/wait-for-ui.sh` 启动，让它自己重试（它检测「两分钟没写日志」与「没有帧」两类卡死）
 3. 出了两帧就停的启动**直接重开**，别把卡死前两帧的数字当稳态
 
-### 2.3 还没做的（根治方向，不阻塞优化）
+### 2.3 下一步（根治方向）
 
-卡住时抓客户机进程栈（`docs/research/linux-kernel-build.md` 的 stackshot 附录、`qemu/symstack.py`），
-看 SpringBoard 死在 CA 的渲染线程、显示驱动的 swap，还是别的等待上。
+不是「抓一次栈」，而是两步二分，见 §0.5：
+
+1. 把「记录器安装」与「每帧 flush」分开（只装记录器、`eagl_remote_flush()` 直接 return 0）。
+2. 抓到 backboardd 崩在哪：`usertrap:` 的打印已经有了，缺的只是「只对 backboardd 输出」的过滤器，
+   或者一个 `EXTRA=` 的小程序把 `CrashReporter/*.ips` 打到串口。
+   **不要用 `qemu/touch.py stacks`**：它走 debugger 入口，本 QEMU 配置不支持 halt → panic（§0.6-1）。
 
 ---
 
@@ -82,6 +187,12 @@
 > 所以「跳过本地执行」如果单独做，本地那张 IOSurface 就没人画 → 上传给宿主的是空白/花屏。
 > **W1 必须排在 §4.2 的实验（宿主能不能从 CA 的录制流自己出图）之后**：那个实验给了 MATCH，
 > W1 才有意义；给不了，就先只做「跳过 `surface_to_texture` 的本地回填」这一小块。
+>
+> **§4.2 的实验已经做了（第三轮，W2 + `--no-panel`）：答案是 DIFF。** 客户机不上传面板之后，
+> 宿主只重放 CA 的绘制流，屏幕是纯黑（截图 8,061 B）；同一次启动宿主一侧 19–30 fps、
+> 记录 2.4–3.4 KB、`flush -> 2 (rows into the surface)` —— 管道很健康，是**内容**画不出来。
+> 所以 W1+W2 现在不能一起开；W1 的代码保留并有开关（`GLWIRE_LOCAL=1` / `glwire_local=0`），
+> 等宿主能自己出图再打开。
 
 ### 3.1 动机
 
