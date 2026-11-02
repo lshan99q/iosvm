@@ -2039,3 +2039,39 @@ only because the vCPU that was executing line 959 never runs line 960 — the sa
 not come back" the stackshot complains about. So the one-line answer for this panic is: **the holder
 was interrupted between clearing the owner and advancing the ticket; the 60 s timeout is the
 incomplete unlock, not a lock held by a live thread.**
+
+## Addendum 43: the llvmpipe fault is not the texture/FBO sequence alone
+
+The host crash after a large upload was in libgallium, and the last dispatched call was opcode 6
+(`glClearColor`). The calls just before it were `glBindAttribLocation`, `glBindFramebuffer`,
+`glFramebufferTexture2D`, `glBindFramebuffer`, `glGetError`, `glDisable`. The obvious minimal case is:
+a renderbuffer FBO, a 1125 x 2436 texture upload, attach it to a second FBO, bind 0, clear. That
+does **not** crash llvmpipe 25.2.8:
+
+```
+$ ./llvmpipe_repro
+renderer llvmpipe (LLVM 20.1.2, 256 bits)
+1. client framebuffer (renderbuffer)
+   status 0x8cd5
+2. big texture upload
+   texture 1, error 0
+3. guest framebuffer, texture attached
+   status 0x8cd5
+4. clear
+   survived, error 0
+5. second frame: redefine the attached texture
+   redefine done, error 0
+   survived frame 2, error 0
+```
+
+`tools/glwire/llvmpipe_repro.c` is the negative test. The crash therefore needs more of
+CoreAnimation's state than the texture and the FBO: the recorded frame is 22-34 MB and includes the
+programs, shaders, attribute data and several FBO switches. The host no longer replays that stream
+after an upload: opcode 201 records are processed first with no framebuffer bound, and a panel-sized
+upload is drawn as the composed surface. That removes the fault from the live path (the cpus=2 boot
+reaches frame 2 and saves the picture without a crash), but the exact libgallium bug is still not
+minimized. The next useful artifact is the frame's record file plus `dispatch.inc` replayed outside
+the panel path; that is not saved yet.
+
+One-line status: the texture+FBO sequence is ruled out as the sole cause; the host workaround is the
+fix on our side, and the remaining llvmpipe fault needs the full CA record stream to reproduce.
