@@ -2117,3 +2117,32 @@ Caveat: this surface is the **original guest's last Settings frame** (the CPU-re
 at 07:08), replayed through the live opcode-201 transport. It is not a frame captured from a live
 CoreAnimation GL boot; that boot is still stuck at the spinner (Addendum 44). The transport and the
 draw are proven; the live CA Settings frame is not.
+
+## Addendum 46: the spinner is dead, not slow; 35-minute cpus=2 measurement
+
+The cpus=2 run was left alone for thirty-five minutes (boot 09:01:10; log ended at guest time
+1744 s, ~29 minutes, with `== END OF LOG ==`; the loader's return timer was 1800 s). It never left
+the black screen with the spinner. `docs/demo/cpus2-spinner-35min.png` is frame 351 of the host's
+stream at that end. So the thirteen-minute spinner is **not slow progress**; it is a stuck boot.
+
+What did happen is a continuous frame stream. Over the run:
+
+| what | measured |
+|---|---|
+| guest frames (`hakios-gl: frame`) | 463 |
+| guest frame time | mean 3.51 s, median 2.69 s, min 2.56 s, max 8.43 s |
+| guest equivalent rate | **0.285 fps** mean (median 0.372 fps) |
+| host frames (opcode-201 panel path) | 355 |
+| host frame interval | mean 4.10 s, median 2.71 s, min 2.49 s, max 39.56 s |
+| host equivalent rate | **0.244 fps** mean |
+| host work per frame (upload + draw + readback) | mean 0.025 ms, median 0.02 ms, max 0.18 ms |
+| Ticket spinlock | **0** in the whole run |
+
+The host is not the bottleneck: 0.025 ms of GL work per 4.1 s frame. The 2.7-4.3 s is the guest's
+`softpipe` copy-out (`1 picture copied out` / `4.3 s copying out` in the guest's `hakios-gl: frame`
+line) on two TCG vCPUs. The opcode-201 panel stream is continuous and pixel-exact when it is the
+same client; the frames here are the spinner, not Settings. The sliding-Settings acceptance still
+needs a boot whose SpringBoard reaches the home screen, which cpus=2 does not.
+
+The 0.24-0.28 fps is the honest equivalent rate of this path on two cores with softpipe; a real GPU
+or four cores would change the guest side, not the 0.025 ms host side.
