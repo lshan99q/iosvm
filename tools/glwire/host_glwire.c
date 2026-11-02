@@ -54,6 +54,37 @@ now_seconds(void)
 	return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+static uint64_t
+fnv_update(uint64_t hash, const unsigned char *bytes, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		hash ^= bytes[i];
+		hash *= 0x100000001b3ULL;
+	}
+	return hash;
+}
+
+/* The panel upload is RGBA (names.h swizzled it); the read-back picture is BGRA. Hash the same
+ * logical (R, G, B, A) order so a match means the two pictures are identical. */
+static uint64_t
+hash_panel(const unsigned char *pixels, size_t count)
+{
+	return fnv_update(0xcbf29ce484222325ULL, pixels, count * 4);
+}
+
+static uint64_t
+hash_picture(const unsigned char *pixels, size_t count)
+{
+	uint64_t hash = 0xcbf29ce484222325ULL;
+
+	for (size_t i = 0; i < count; i++) {
+		unsigned char rgba[4] = { pixels[i * 4 + 2], pixels[i * 4 + 1], pixels[i * 4], pixels[i * 4 + 3] };
+
+		hash = fnv_update(hash, rgba, 4);
+	}
+	return hash;
+}
+
 static int
 send_all(int fd, const void *data, size_t bytes)
 {
@@ -285,7 +316,7 @@ serve_frame(struct client *client)
 	}
 	glFinish();
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
-	if (save_dir != NULL) {
+	if (save_dir != NULL && ((frames_replayed + 1) % 10 == 1 || (frames_replayed + 1) % 100 == 0)) {
 		char path[512];
 		FILE *file;
 
@@ -313,8 +344,30 @@ serve_frame(struct client *client)
 			return -1;
 		}
 	}
-	printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms\n",
-	    frames_replayed, width, height, records_bytes, frame_bytes, took);
+	{
+		static double last_frame;
+		double now = now_seconds();
+		double interval = last_frame > 0 ? now - last_frame : 0;
+
+		last_frame = now;
+		if (client->names.panel != NULL && client->names.panel_width == width &&
+		    client->names.panel_height == height) {
+			uint64_t panel_hash = hash_panel(client->names.panel, (size_t)width * height);
+			uint64_t picture_hash = hash_picture(picture, (size_t)width * height);
+
+			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
+			    "interval %.2f s (%.2f fps), panel %016llx picture %016llx %s\n",
+			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
+			    interval > 0 ? 1.0 / interval : 0.0,
+			    (unsigned long long)panel_hash, (unsigned long long)picture_hash,
+			    panel_hash == picture_hash ? "MATCH" : "DIFF");
+		} else {
+			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
+			    "interval %.2f s (%.2f fps)\n",
+			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
+			    interval > 0 ? 1.0 / interval : 0.0);
+		}
+	}
 	fflush(stdout);
 	free(records);
 	free(picture);
