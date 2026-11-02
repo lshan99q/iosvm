@@ -77,6 +77,12 @@ int remote_only;
  * no address translation, no picture copy. If backboardd still dies, the slots are the problem. */
 static int remote_no_flush;
 
+/* Bisection: boot-arg glwire_slots=MASK keeps only the recorders whose spec index has its bit set.
+ * The others get their original local entry back, so the guest still draws; with half the slots off,
+ * a crash that disappears names the half the culprit is in. All bits set when the argument is
+ * absent, which is every ordinary boot. */
+static unsigned long long remote_slot_mask = ~0ULL;
+
 #ifndef SYS_hakios_vtop
 #define SYS_hakios_vtop 556
 #endif
@@ -223,9 +229,17 @@ eagl_remote_begin(void)
 	remote_only = wire_vtop_hook != NULL && !remote_wants_local();
 	remote_no_flush = remote_boot_arg("glwire_noflush=1") != NULL ||
 	    access("/redwood/etc/glwire_noflush", F_OK) == 0;
-	remote_say("hakios-remote: the frame is %s%s\n",
+	{
+		const char *slots = remote_boot_arg("glwire_slots=");
+
+		if (slots != NULL) {
+			remote_slot_mask = strtoull(slots + strlen("glwire_slots="), NULL, 0);
+		}
+	}
+	remote_say("hakios-remote: the frame is %s%s; recorder mask 0x%llx\n",
 	    remote_only ? "drawn by the host alone" : "drawn here as well (glwire_local)",
-	    remote_no_flush ? "; the recorders are installed but no frame is sent (glwire_noflush)" : "");
+	    remote_no_flush ? "; the recorders are installed but no frame is sent (glwire_noflush)" : "",
+	    remote_slot_mask);
 	wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 }
 
@@ -605,4 +619,14 @@ eagl_remote_install(void **table)
 		return;
 	}
 	eagl_fill_table_remote(table);
+	/*
+	 * glwire_slots=MASK: put back the slots the mask leaves out, so the guest draws through its
+	 * own entry as if that recorder had never been installed. The recorded calls keep their
+	 * local_entry, which is harmless -- nothing calls a trampoline that is not in the table.
+	 */
+	for (unsigned i = 0; i < sizeof(remote_slot_offset) / sizeof(remote_slot_offset[0]); i++) {
+		if ((remote_slot_mask & (1ULL << i)) == 0) {
+			table[remote_slot_offset[i]] = local_entry[i];
+		}
+	}
 }

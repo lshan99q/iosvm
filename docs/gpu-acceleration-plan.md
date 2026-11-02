@@ -118,6 +118,66 @@ W1/W2/W3 的代码全部落地、每一条都有开关可以单独关掉（下�
 `unexpected kernel layout`。用 cctools 的 `aarch64-apple-darwin11-ld`（`IOSVM_USE_LLD=0`），
 并且删掉 `BUILD/obj/.../mach.development.bcm2837{,.unstripped}` 强制重链。
 
+### 0.8 第四轮：ustrace 抓到调用点，NULL 像素（2026-11-02 15:44）
+
+**内核过滤器**：`osfmk/arm64/user_exception_trace.c` 新增两个独立启动参数 ——
+`ustrace=1` 只开异常跟踪（不碰 `systrace` 的 syscall 打印），`ustrace_name=NAME` 只打印该进程。
+命令是 `ustrace=1 ustrace_name=backboardd`，其余配置与 §0.7 完全相同（noflush、本地绘制）。
+**没有用 `qemu/touch.py stacks`。**
+
+15:44:16 抓到（`/tmp/iosvm-1501.log`，shared cache slide `0x49b34000`）：
+
+```
+usertrap: backboardd[14] exception 1 code 0x1 0x0:
+  pc 0x21a76fdf4 lr 0x10285dc04 sp 0x16ffaf960, shared cache slide 0x49b34000
+  called from 0x10285f928
+  called from 0x1d1f321b0 ... (共享缓存里的 CA 帧)
+hakios: signal 11 at 0x0, pc 0x1d0c3bdf4, lr 0xb8d29c04,
+  called from 0xb8d2b928 0x1883fe1b0 0x188333e00 ...
+```
+
+把 slide 减掉后的链条：
+
+| 地址 | 模块 | 含义 |
+|---|---|---|
+| `pc 0x1d0c3bdf4` | `libsystem_platform.dylib`（基址 `0x1d0c3b000`，+`0xdf4`） | `memcpy` 循环里的 `ldnp x12,x13,[x1]`，`exception 1 code 0x1` = 读地址 0 |
+| `lr 0xb8d29c04` | `libhakios.gl.dylib`（基址 `0xb8ccc000`，+`0x5dc04`） | `_wire_image` 里 `bl _memcpy`（`0x5dc00`）的下一条 |
+| `0xb8d2b928` | 同上，+`0x5f928` | `_gw_glTexImage2D` 里 `bl _wire_image`（`0x5f924`）的下一条 |
+
+崩溃前最后一条客户机日志正是：
+
+```
+hakios-gl: a new kind of texture: empty, internal format 0x1908, format 0x1908,
+           type 0x1401, 750 x 1624
+```
+
+**根因**：`glTexImage2D(..., pixels = NULL)` 是合法的「只分配存储」；但 `wire.h:wire_image()`
+用 `width * height * 4` 算出非零 `count`，只在 vtop 分支检查了 `pixels != NULL`，落到
+inline 分支后照样 `wire_put(w, pixels, count)` → `memcpy(dst, NULL, 4.87 MB)`。
+不是槽位偏移、不是签名，也不是 flush；是一条 recorder 自己把 NULL 当数据。
+
+**修法**：`wire_image()` 与 `wire_bytes()` 的 size 都改成
+`count > 0 && bytes != NULL` 才算数；NULL 就记 0 字节。宿主收到 0 字节，照 GL 语义分配空纹理。
+
+**二分**：`ustrace` 已经把 PC/栈/调用点指到 `gw_glTexImage2D`，比半槽二分更直接，所以没有
+再花两轮启动去二分。`glwire_slots=MASK` 开关已经落地（`gen.py` 生成
+`remote_slot_offset[]`，`eagl_remote_install()` 把 mask 外的槽位还原为 `local_entry`），
+`glTexImage2D` 是 spec 索引 22，下一轮若要半槽复现可以直接用
+`glwire_slots=0x3fffffff80000000`（只留 31–61，不含 22）。
+
+### 0.9 第四轮：修完之后的 noflush 对照（2026-11-02 16:16）
+
+同一套 noflush + 本地绘制 + `ustrace=backboardd`，镜像 `/tmp/root-fixed-local.apfs`
+（`wire.h` 已修），boot-arg 加 `glwire_noflush=1`，`/tmp/iosvm-1502.log`：
+
+- 16:01:07 起机，跑满 15 分钟到 16:16:03；
+- **0 次 `SIGSEGV`，0 条 `usertrap: backboardd`**；
+- `flush -> 0` **4,583 次**；
+- 空纹理 `750 x 1624` 照常出现（日志有那一行），不再崩；
+- `frames in` 6–8 fps，驱动侧 22 ms/帧。
+
+对照 §0.7（同配置未修）：6 分 20 秒时 `backboardd [14]` SIGSEGV。修的是同一行，结论成立。
+
 ---
 
 ## 一、目标与验收

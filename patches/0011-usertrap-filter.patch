@@ -1,0 +1,45 @@
+--- a/osfmk/arm64/user_exception_trace.c
++++ b/osfmk/arm64/user_exception_trace.c
+@@ -27,6 +27,14 @@
+ void user_exception_trace(exception_type_t exception, mach_exception_data_t code, mach_msg_type_number_t count, thread_t thread);
+ 
+ static TUNABLE(uint32_t, user_exception_trace_enabled, "systrace", 0);
++/*
++ * A quieter way to ask for the same lines: boot-arg ustrace=1 turns on the exception trace alone
++ * (systrace=1 also turns on the syscall trace, which is thousands of lines a second), and
++ * ustrace_name=NAME keeps it to one process -- ustrace=1 ustrace_name=backboardd is the pair that
++ * shows where the window server died without drowning the console.
++ */
++static TUNABLE(uint32_t, user_exception_trace_only, "ustrace", 0);
++static TUNABLE_STR(user_exception_trace_name, 32, "ustrace_name", "");
+ 
+ static bool
+ plausible_user_address(uint64_t address)
+@@ -45,7 +53,7 @@
+ 	task_t task;
+ 	struct proc *proc;
+ 
+-	if (!user_exception_trace_enabled || thread != current_thread()) {
++	if ((!user_exception_trace_enabled && !user_exception_trace_only) || thread != current_thread()) {
+ 		return;
+ 	}
+ 	if (exception != EXC_BAD_ACCESS && exception != EXC_BAD_INSTRUCTION && exception != EXC_ARITHMETIC &&
+@@ -57,12 +65,17 @@
+ 	if (task == kernel_task || state == NULL || !is_saved_state64(state)) {
+ 		return;
+ 	}
++	proc = get_bsdtask_info(task);
++	if (user_exception_trace_name[0] != 0 &&
++	    (proc == NULL || strncmp(proc_name_address(proc), user_exception_trace_name,
++	    sizeof(user_exception_trace_name) - 1) != 0)) {
++		return;
++	}
+ 	region = vm_shared_region_get(task);
+ 	if (region != NULL) {
+ 		slide = region->sr_slide;
+ 		vm_shared_region_deallocate(region);
+ 	}
+-	proc = get_bsdtask_info(task);
+ 
+ 	printf("usertrap: %s[%d] exception %d code 0x%llx 0x%llx: pc 0x%llx lr 0x%llx sp 0x%llx, shared cache slide 0x%x\n",
+ 	    proc ? proc_name_address(proc) : "?", proc ? proc_pid(proc) : -1, exception,

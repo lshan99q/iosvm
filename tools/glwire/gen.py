@@ -320,12 +320,20 @@ def emit_table(calls, slots_path):
         lines.append("static %s remote_%s(void *context%s);" %
                      (call.ret_ctype(), call.name,
                       "" if not call.params else ", " + call.cparams()))
-    lines += ["", "static void *local_entry[%d];" % len(calls), "",
-              "static void", "eagl_fill_table_remote(void **table)", "{"]
+    lines += ["", "static void *local_entry[%d];" % len(calls),
+              "/* The table index of every recorded call, in spec order: eagl_remote.c uses it to put",
+              " * a slot back for the bisection switch glwire_slots=MASK. */",
+              "static const unsigned short remote_slot_offset[] = {"]
     missing = []
     for index, call in enumerate(calls):
         if call.name not in offsets:
             missing.append(call.name)
+            continue
+        lines.append("\t%#x,     /* %d %s */" % (offsets[call.name] // 8, index, call.name))
+    lines += ["};", "",
+              "static void", "eagl_fill_table_remote(void **table)", "{"]
+    for index, call in enumerate(calls):
+        if call.name not in offsets:
             continue
         lines.append("\tlocal_entry[%d] = table[%#x / 8];" % (index, offsets[call.name]))
         lines.append("\ttable[%#x / 8] = (void *)remote_%s;" % (offsets[call.name], call.name))

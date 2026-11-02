@@ -74,7 +74,12 @@ static inline void wire_u64(wire_buffer *w, uint64_t v) { wire_put(w, &v, 8); }
 static inline void
 wire_bytes(wire_buffer *w, const void *bytes, GLsizei count)
 {
-	uint32_t size = count > 0 ? (uint32_t)count : 0;
+	/*
+	 * A NULL pointer with a count is not a zero-length argument: GL uses it to allocate storage
+	 * without data (glCompressedTexImage2D), and the caller of a copy is allowed to name it.
+	 * The count goes with the pointer, so record no bytes at all.
+	 */
+	uint32_t size = (count > 0 && bytes != NULL) ? (uint32_t)count : 0;
 
 	wire_u32(w, size);
 	if (size != 0) {
@@ -112,10 +117,16 @@ static unsigned long wire_image_inline_count;
 static inline void
 wire_image(wire_buffer *w, const void *pixels, GLsizei count)
 {
-	uint32_t size = count > 0 ? (uint32_t)count : 0;
+	/*
+	 * glTexImage2D(..., pixels = NULL) allocates an empty texture: the dimensions still give a
+	 * nonzero count, but there is nothing to read. Recording that count and then copying from
+	 * NULL is what killed backboardd in the fourth round; the guard has to be on the count, not
+	 * only on the reference path.
+	 */
+	uint32_t size = (count > 0 && pixels != NULL) ? (uint32_t)count : 0;
 	uint32_t n = 0;
 
-	if (size != 0 && pixels != NULL && wire_vtop_hook != NULL) {
+	if (size != 0 && wire_vtop_hook != NULL) {
 		int got = wire_vtop_hook(pixels, size, wire_image_segments,
 		    sizeof(wire_image_segments) / sizeof(wire_image_segments[0]));
 		uint64_t covered = 0;

@@ -59,6 +59,67 @@ static void remote_glDeleteSync(void *context, void * a0);
 static GLenum remote_glClientWaitSync(void *context, void * a0, GLuint a1, GLuint a2);
 
 static void *local_entry[57];
+/* The table index of every recorded call, in spec order: eagl_remote.c uses it to put
+ * a slot back for the bisection switch glwire_slots=MASK. */
+static const unsigned short remote_slot_offset[] = {
+	0x2,     /* 0 glAlphaFunc */
+	0x6,     /* 1 glBindTexture */
+	0x8,     /* 2 glBlendFunc */
+	0x151,     /* 3 glBlendFuncSeparate */
+	0x153,     /* 4 glBlendEquation */
+	0xb,     /* 5 glClear */
+	0xd,     /* 6 glClearColor */
+	0x10,     /* 7 glClearStencil */
+	0x39,     /* 8 glCopyTexSubImage2D */
+	0x3c,     /* 9 glDeleteTextures */
+	0x40,     /* 10 glDisable */
+	0x42,     /* 11 glDrawArrays */
+	0x44,     /* 12 glDrawElements */
+	0x49,     /* 13 glEnable */
+	0x5a,     /* 14 glFinish */
+	0x5b,     /* 15 glFlush */
+	0x63,     /* 16 glGenTextures */
+	0x67,     /* 17 glGetError */
+	0x69,     /* 18 glGetIntegerv */
+	0x76,     /* 19 glGetString */
+	0xc4,     /* 20 glPixelStorei */
+	0xfc,     /* 21 glScissor */
+	0x12e,     /* 22 glTexImage2D */
+	0x12f,     /* 23 glTexParameterf */
+	0x131,     /* 24 glTexParameteri */
+	0x134,     /* 25 glTexSubImage2D */
+	0x150,     /* 26 glViewport */
+	0x157,     /* 27 glActiveTexture */
+	0x17d,     /* 28 glCompressedTexImage2D */
+	0x200,     /* 29 glVertexAttribPointer */
+	0x201,     /* 30 glEnableVertexAttribArray */
+	0x202,     /* 31 glDisableVertexAttribArray */
+	0x250,     /* 32 glDeleteProgram */
+	0x253,     /* 33 glCreateShader */
+	0x254,     /* 34 glShaderSource */
+	0x255,     /* 35 glCompileShader */
+	0x256,     /* 36 glCreateProgram */
+	0x257,     /* 37 glAttachShader */
+	0x258,     /* 38 glLinkProgram */
+	0x259,     /* 39 glUseProgram */
+	0x25b,     /* 40 glUniform1f */
+	0x25e,     /* 41 glUniform4f */
+	0x25f,     /* 42 glUniform1i */
+	0x265,     /* 43 glUniform3fv */
+	0x266,     /* 44 glUniform4fv */
+	0x26c,     /* 45 glUniformMatrix3fv */
+	0x26d,     /* 46 glUniformMatrix4fv */
+	0x272,     /* 47 glGetUniformLocation */
+	0x277,     /* 48 glBindAttribLocation */
+	0x2a1,     /* 49 glBindFramebuffer */
+	0x2a2,     /* 50 glDeleteFramebuffers */
+	0x2a3,     /* 51 glGenFramebuffers */
+	0x2a6,     /* 52 glFramebufferTexture2D */
+	0x2aa,     /* 53 glGenerateMipmap */
+	0x30c,     /* 54 glFenceSync */
+	0x30e,     /* 55 glDeleteSync */
+	0x30f,     /* 56 glClientWaitSync */
+};
 
 static void
 eagl_fill_table_remote(void **table)
