@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -44,6 +45,13 @@ static long remote_total_us;
  * the physical addresses below. 512 segments covers a 4.8 MB picture even at one per page. */
 static wire_segment remote_frame_segments[2048];
 static int remote_frame_segments_count;
+
+/* The calls spec.def marks `!local` are the ones the host draws the frame with: a texture upload or
+ * a draw in Mesa's software rasteriser is the whole cost of a frame, and the host already has those
+ * pixels by reference. Non-zero = do not run them here as well (the generated trampolines ask this).
+ * Off when the inline wire is in use -- nothing would draw the frame then -- and off when
+ * /redwood/etc/glwire_local exists or a glwire_local=1 boot-arg says so, which is the A/B for it. */
+int remote_only;
 
 #ifndef SYS_hakios_vtop
 #define SYS_hakios_vtop 556
@@ -123,6 +131,34 @@ remote_now_ms(void)
 	return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
+/* The kernel's boot-args, for a switch that a run without a new image can still set. */
+static const char *
+remote_boot_arg(const char *wanted)
+{
+	static char arguments[512];
+	size_t size = sizeof(arguments) - 1;
+
+	arguments[0] = 0;
+	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0) {
+		return NULL;
+	}
+	return strstr(arguments, wanted);
+}
+
+/* Whether the boot keeps the local drawing: a file (so the A/B needs no rebuild) and, for a run that
+ * cannot be given a new image, the same thing as a boot-arg. */
+static int
+remote_wants_local(void)
+{
+	if (remote_boot_arg("glwire_local=1") != NULL) {
+		return 1;
+	}
+	if (remote_boot_arg("glwire_local=0") != NULL) {
+		return 0;
+	}
+	return access("/redwood/etc/glwire_local", F_OK) == 0;
+}
+
 /* The picture the host draws lands directly after the frame's magic word, in guest memory the host
  * has mapped as the RAM file. The guest only has to read it. */
 /* Where the host is, and whether to use it at all: the file exists only when the boot was set up
@@ -160,6 +196,9 @@ eagl_remote_begin(void)
 	if (access("/redwood/etc/glwire_inline", F_OK) != 0 && remote_vtop_available()) {
 		wire_vtop_hook = remote_vtop;
 	}
+	remote_only = wire_vtop_hook != NULL && !remote_wants_local();
+	remote_say("hakios-remote: the frame is %s\n",
+	    remote_only ? "drawn by the host alone" : "drawn here as well (glwire_local)");
 	wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 }
 
@@ -184,7 +223,7 @@ eagl_remote_resize(size_t bytes)
 	 * mlock is allowed up to the process's own limit, so the answer is logged rather than
 	 * assumed -- an unwired buffer still works, it is just the risk this is here to remove.
 	 */
-	{
+	if (remote_boot_arg("glwire_mlock=0") == NULL) {
 		int locked = mlock(remote_frame, bytes + 8);
 
 		remote_say("hakios-remote: picture buffer %zu B + 8, mlock %d%s\n", bytes, locked,
@@ -196,6 +235,14 @@ int
 eagl_remote_is_on(void)
 {
 	return remote_enabled;
+}
+
+/* For eagl.c: with this on, composing the frame here (the IOSurface refills, the panel upload)
+ * copies pixels that were never drawn here, so it is not done. */
+int
+eagl_remote_no_local(void)
+{
+	return remote_only;
 }
 
 size_t

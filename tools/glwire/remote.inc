@@ -1,7 +1,7 @@
 static void
 remote_glAlphaFunc(void *context, GLenum a0, GLfloat a1)
 {
-	if (local_entry[0] != NULL) {
+	if (!remote_only && local_entry[0] != NULL) {
 		((void (*)(void *, GLenum, GLfloat))local_entry[0])(context, a0, a1);
 	}
 	gw_glAlphaFunc(a0, a1);
@@ -10,7 +10,7 @@ remote_glAlphaFunc(void *context, GLenum a0, GLfloat a1)
 static void
 remote_glBindTexture(void *context, GLenum a0, GLuint a1)
 {
-	if (local_entry[1] != NULL) {
+	if (!remote_only && local_entry[1] != NULL) {
 		((void (*)(void *, GLenum, GLuint))local_entry[1])(context, a0, a1);
 	}
 	gw_glBindTexture(a0, a1);
@@ -19,7 +19,7 @@ remote_glBindTexture(void *context, GLenum a0, GLuint a1)
 static void
 remote_glBlendFunc(void *context, GLenum a0, GLenum a1)
 {
-	if (local_entry[2] != NULL) {
+	if (!remote_only && local_entry[2] != NULL) {
 		((void (*)(void *, GLenum, GLenum))local_entry[2])(context, a0, a1);
 	}
 	gw_glBlendFunc(a0, a1);
@@ -28,7 +28,7 @@ remote_glBlendFunc(void *context, GLenum a0, GLenum a1)
 static void
 remote_glBlendFuncSeparate(void *context, GLenum a0, GLenum a1, GLenum a2, GLenum a3)
 {
-	if (local_entry[3] != NULL) {
+	if (!remote_only && local_entry[3] != NULL) {
 		((void (*)(void *, GLenum, GLenum, GLenum, GLenum))local_entry[3])(context, a0, a1, a2, a3);
 	}
 	gw_glBlendFuncSeparate(a0, a1, a2, a3);
@@ -37,7 +37,7 @@ remote_glBlendFuncSeparate(void *context, GLenum a0, GLenum a1, GLenum a2, GLenu
 static void
 remote_glBlendEquation(void *context, GLenum a0)
 {
-	if (local_entry[4] != NULL) {
+	if (!remote_only && local_entry[4] != NULL) {
 		((void (*)(void *, GLenum))local_entry[4])(context, a0);
 	}
 	gw_glBlendEquation(a0);
@@ -46,7 +46,7 @@ remote_glBlendEquation(void *context, GLenum a0)
 static void
 remote_glClear(void *context, GLuint a0)
 {
-	if (local_entry[5] != NULL) {
+	if (!remote_only && local_entry[5] != NULL) {
 		((void (*)(void *, GLuint))local_entry[5])(context, a0);
 	}
 	gw_glClear(a0);
@@ -55,7 +55,7 @@ remote_glClear(void *context, GLuint a0)
 static void
 remote_glClearColor(void *context, GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a3)
 {
-	if (local_entry[6] != NULL) {
+	if (!remote_only && local_entry[6] != NULL) {
 		((void (*)(void *, GLfloat, GLfloat, GLfloat, GLfloat))local_entry[6])(context, a0, a1, a2, a3);
 	}
 	gw_glClearColor(a0, a1, a2, a3);
@@ -64,7 +64,7 @@ remote_glClearColor(void *context, GLfloat a0, GLfloat a1, GLfloat a2, GLfloat a
 static void
 remote_glClearStencil(void *context, GLint a0)
 {
-	if (local_entry[7] != NULL) {
+	if (!remote_only && local_entry[7] != NULL) {
 		((void (*)(void *, GLint))local_entry[7])(context, a0);
 	}
 	gw_glClearStencil(a0);
@@ -73,7 +73,7 @@ remote_glClearStencil(void *context, GLint a0)
 static void
 remote_glCopyTexSubImage2D(void *context, GLenum a0, GLint a1, GLint a2, GLint a3, GLint a4, GLint a5, GLsizei a6, GLsizei a7)
 {
-	if (local_entry[8] != NULL) {
+	if (!remote_only && local_entry[8] != NULL) {
 		((void (*)(void *, GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei))local_entry[8])(context, a0, a1, a2, a3, a4, a5, a6, a7);
 	}
 	gw_glCopyTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7);
@@ -91,7 +91,7 @@ remote_glDeleteTextures(void *context, GLsizei a0, const GLuint * a1)
 static void
 remote_glDisable(void *context, GLenum a0)
 {
-	if (local_entry[10] != NULL) {
+	if (!remote_only && local_entry[10] != NULL) {
 		((void (*)(void *, GLenum))local_entry[10])(context, a0);
 	}
 	gw_glDisable(a0);
@@ -100,7 +100,7 @@ remote_glDisable(void *context, GLenum a0)
 static void
 remote_glDrawArrays(void *context, GLenum a0, GLint a1, GLsizei a2)
 {
-	if (local_entry[11] != NULL) {
+	if (!remote_only && local_entry[11] != NULL) {
 		((void (*)(void *, GLenum, GLint, GLsizei))local_entry[11])(context, a0, a1, a2);
 	}
 	remote_emit_vertex_data(a1, a2, NULL, 0);
@@ -110,7 +110,7 @@ remote_glDrawArrays(void *context, GLenum a0, GLint a1, GLsizei a2)
 static void
 remote_glDrawElements(void *context, GLenum a0, GLsizei a1, GLenum a2, const void * a3)
 {
-	if (local_entry[12] != NULL) {
+	if (!remote_only && local_entry[12] != NULL) {
 		((void (*)(void *, GLenum, GLsizei, GLenum, const void *))local_entry[12])(context, a0, a1, a2, a3);
 	}
 	remote_emit_vertex_data(0, a1, a3, a2);
@@ -120,7 +120,7 @@ remote_glDrawElements(void *context, GLenum a0, GLsizei a1, GLenum a2, const voi
 static void
 remote_glEnable(void *context, GLenum a0)
 {
-	if (local_entry[13] != NULL) {
+	if (!remote_only && local_entry[13] != NULL) {
 		((void (*)(void *, GLenum))local_entry[13])(context, a0);
 	}
 	gw_glEnable(a0);
@@ -187,7 +187,7 @@ remote_glGetString(void *context, GLenum a0)
 static void
 remote_glPixelStorei(void *context, GLenum a0, GLint a1)
 {
-	if (local_entry[20] != NULL) {
+	if (!remote_only && local_entry[20] != NULL) {
 		((void (*)(void *, GLenum, GLint))local_entry[20])(context, a0, a1);
 	}
 	remote_note_pixel_store(a0, a1);
@@ -197,7 +197,7 @@ remote_glPixelStorei(void *context, GLenum a0, GLint a1)
 static void
 remote_glScissor(void *context, GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 {
-	if (local_entry[21] != NULL) {
+	if (!remote_only && local_entry[21] != NULL) {
 		((void (*)(void *, GLint, GLint, GLsizei, GLsizei))local_entry[21])(context, a0, a1, a2, a3);
 	}
 	gw_glScissor(a0, a1, a2, a3);
@@ -206,7 +206,7 @@ remote_glScissor(void *context, GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 static void
 remote_glTexImage2D(void *context, GLenum a0, GLint a1, GLint a2, GLsizei a3, GLsizei a4, GLint a5, GLenum a6, GLenum a7, const void * a8)
 {
-	if (local_entry[22] != NULL) {
+	if (!remote_only && local_entry[22] != NULL) {
 		((void (*)(void *, GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))local_entry[22])(context, a0, a1, a2, a3, a4, a5, a6, a7, a8);
 	}
 	gw_glTexImage2D(a0, a1, a2, a3, a4, a5, a6, a7, a8);
@@ -215,7 +215,7 @@ remote_glTexImage2D(void *context, GLenum a0, GLint a1, GLint a2, GLsizei a3, GL
 static void
 remote_glTexParameterf(void *context, GLenum a0, GLenum a1, GLfloat a2)
 {
-	if (local_entry[23] != NULL) {
+	if (!remote_only && local_entry[23] != NULL) {
 		((void (*)(void *, GLenum, GLenum, GLfloat))local_entry[23])(context, a0, a1, a2);
 	}
 	gw_glTexParameterf(a0, a1, a2);
@@ -224,7 +224,7 @@ remote_glTexParameterf(void *context, GLenum a0, GLenum a1, GLfloat a2)
 static void
 remote_glTexParameteri(void *context, GLenum a0, GLenum a1, GLint a2)
 {
-	if (local_entry[24] != NULL) {
+	if (!remote_only && local_entry[24] != NULL) {
 		((void (*)(void *, GLenum, GLenum, GLint))local_entry[24])(context, a0, a1, a2);
 	}
 	gw_glTexParameteri(a0, a1, a2);
@@ -233,7 +233,7 @@ remote_glTexParameteri(void *context, GLenum a0, GLenum a1, GLint a2)
 static void
 remote_glTexSubImage2D(void *context, GLenum a0, GLint a1, GLint a2, GLint a3, GLsizei a4, GLsizei a5, GLenum a6, GLenum a7, const void * a8)
 {
-	if (local_entry[25] != NULL) {
+	if (!remote_only && local_entry[25] != NULL) {
 		((void (*)(void *, GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *))local_entry[25])(context, a0, a1, a2, a3, a4, a5, a6, a7, a8);
 	}
 	gw_glTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7, a8);
@@ -242,7 +242,7 @@ remote_glTexSubImage2D(void *context, GLenum a0, GLint a1, GLint a2, GLint a3, G
 static void
 remote_glViewport(void *context, GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 {
-	if (local_entry[26] != NULL) {
+	if (!remote_only && local_entry[26] != NULL) {
 		((void (*)(void *, GLint, GLint, GLsizei, GLsizei))local_entry[26])(context, a0, a1, a2, a3);
 	}
 	gw_glViewport(a0, a1, a2, a3);
@@ -251,7 +251,7 @@ remote_glViewport(void *context, GLint a0, GLint a1, GLsizei a2, GLsizei a3)
 static void
 remote_glActiveTexture(void *context, GLenum a0)
 {
-	if (local_entry[27] != NULL) {
+	if (!remote_only && local_entry[27] != NULL) {
 		((void (*)(void *, GLenum))local_entry[27])(context, a0);
 	}
 	gw_glActiveTexture(a0);
@@ -260,7 +260,7 @@ remote_glActiveTexture(void *context, GLenum a0)
 static void
 remote_glCompressedTexImage2D(void *context, GLenum a0, GLint a1, GLenum a2, GLsizei a3, GLsizei a4, GLint a5, GLsizei a6, const void * a7)
 {
-	if (local_entry[28] != NULL) {
+	if (!remote_only && local_entry[28] != NULL) {
 		((void (*)(void *, GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *))local_entry[28])(context, a0, a1, a2, a3, a4, a5, a6, a7);
 	}
 	gw_glCompressedTexImage2D(a0, a1, a2, a3, a4, a5, a6, a7);
@@ -269,7 +269,7 @@ remote_glCompressedTexImage2D(void *context, GLenum a0, GLint a1, GLenum a2, GLs
 static void
 remote_glVertexAttribPointer(void *context, GLuint a0, GLint a1, GLenum a2, GLboolean a3, GLsizei a4, const void * a5)
 {
-	if (local_entry[29] != NULL) {
+	if (!remote_only && local_entry[29] != NULL) {
 		((void (*)(void *, GLuint, GLint, GLenum, GLboolean, GLsizei, const void *))local_entry[29])(context, a0, a1, a2, a3, a4, a5);
 	}
 	remote_note_vertex_pointer(a0, a1, a2, a3, a4, a5);
@@ -279,7 +279,7 @@ remote_glVertexAttribPointer(void *context, GLuint a0, GLint a1, GLenum a2, GLbo
 static void
 remote_glEnableVertexAttribArray(void *context, GLuint a0)
 {
-	if (local_entry[30] != NULL) {
+	if (!remote_only && local_entry[30] != NULL) {
 		((void (*)(void *, GLuint))local_entry[30])(context, a0);
 	}
 	remote_note_attrib_enabled(a0, 1);
@@ -289,7 +289,7 @@ remote_glEnableVertexAttribArray(void *context, GLuint a0)
 static void
 remote_glDisableVertexAttribArray(void *context, GLuint a0)
 {
-	if (local_entry[31] != NULL) {
+	if (!remote_only && local_entry[31] != NULL) {
 		((void (*)(void *, GLuint))local_entry[31])(context, a0);
 	}
 	remote_note_attrib_enabled(a0, 0);
@@ -366,7 +366,7 @@ remote_glLinkProgram(void *context, GLuint a0)
 static void
 remote_glUseProgram(void *context, GLuint a0)
 {
-	if (local_entry[39] != NULL) {
+	if (!remote_only && local_entry[39] != NULL) {
 		((void (*)(void *, GLuint))local_entry[39])(context, a0);
 	}
 	gw_glUseProgram(a0);
@@ -375,7 +375,7 @@ remote_glUseProgram(void *context, GLuint a0)
 static void
 remote_glUniform1f(void *context, GLint a0, GLfloat a1)
 {
-	if (local_entry[40] != NULL) {
+	if (!remote_only && local_entry[40] != NULL) {
 		((void (*)(void *, GLint, GLfloat))local_entry[40])(context, a0, a1);
 	}
 	gw_glUniform1f(a0, a1);
@@ -384,7 +384,7 @@ remote_glUniform1f(void *context, GLint a0, GLfloat a1)
 static void
 remote_glUniform4f(void *context, GLint a0, GLfloat a1, GLfloat a2, GLfloat a3, GLfloat a4)
 {
-	if (local_entry[41] != NULL) {
+	if (!remote_only && local_entry[41] != NULL) {
 		((void (*)(void *, GLint, GLfloat, GLfloat, GLfloat, GLfloat))local_entry[41])(context, a0, a1, a2, a3, a4);
 	}
 	gw_glUniform4f(a0, a1, a2, a3, a4);
@@ -393,7 +393,7 @@ remote_glUniform4f(void *context, GLint a0, GLfloat a1, GLfloat a2, GLfloat a3, 
 static void
 remote_glUniform1i(void *context, GLint a0, GLint a1)
 {
-	if (local_entry[42] != NULL) {
+	if (!remote_only && local_entry[42] != NULL) {
 		((void (*)(void *, GLint, GLint))local_entry[42])(context, a0, a1);
 	}
 	gw_glUniform1i(a0, a1);
@@ -402,7 +402,7 @@ remote_glUniform1i(void *context, GLint a0, GLint a1)
 static void
 remote_glUniform3fv(void *context, GLint a0, GLsizei a1, const GLfloat * a2)
 {
-	if (local_entry[43] != NULL) {
+	if (!remote_only && local_entry[43] != NULL) {
 		((void (*)(void *, GLint, GLsizei, const GLfloat *))local_entry[43])(context, a0, a1, a2);
 	}
 	gw_glUniform3fv(a0, a1, a2);
@@ -411,7 +411,7 @@ remote_glUniform3fv(void *context, GLint a0, GLsizei a1, const GLfloat * a2)
 static void
 remote_glUniform4fv(void *context, GLint a0, GLsizei a1, const GLfloat * a2)
 {
-	if (local_entry[44] != NULL) {
+	if (!remote_only && local_entry[44] != NULL) {
 		((void (*)(void *, GLint, GLsizei, const GLfloat *))local_entry[44])(context, a0, a1, a2);
 	}
 	gw_glUniform4fv(a0, a1, a2);
@@ -420,7 +420,7 @@ remote_glUniform4fv(void *context, GLint a0, GLsizei a1, const GLfloat * a2)
 static void
 remote_glUniformMatrix3fv(void *context, GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3)
 {
-	if (local_entry[45] != NULL) {
+	if (!remote_only && local_entry[45] != NULL) {
 		((void (*)(void *, GLint, GLsizei, GLboolean, const GLfloat *))local_entry[45])(context, a0, a1, a2, a3);
 	}
 	gw_glUniformMatrix3fv(a0, a1, a2, a3);
@@ -429,7 +429,7 @@ remote_glUniformMatrix3fv(void *context, GLint a0, GLsizei a1, GLboolean a2, con
 static void
 remote_glUniformMatrix4fv(void *context, GLint a0, GLsizei a1, GLboolean a2, const GLfloat * a3)
 {
-	if (local_entry[46] != NULL) {
+	if (!remote_only && local_entry[46] != NULL) {
 		((void (*)(void *, GLint, GLsizei, GLboolean, const GLfloat *))local_entry[46])(context, a0, a1, a2, a3);
 	}
 	gw_glUniformMatrix4fv(a0, a1, a2, a3);
@@ -458,7 +458,7 @@ remote_glBindAttribLocation(void *context, GLuint a0, GLuint a1, const GLchar * 
 static void
 remote_glBindFramebuffer(void *context, GLenum a0, GLuint a1)
 {
-	if (local_entry[49] != NULL) {
+	if (!remote_only && local_entry[49] != NULL) {
 		((void (*)(void *, GLenum, GLuint))local_entry[49])(context, a0, a1);
 	}
 	gw_glBindFramebuffer(a0, a1);
@@ -485,7 +485,7 @@ remote_glGenFramebuffers(void *context, GLsizei a0, const GLuint * a1)
 static void
 remote_glFramebufferTexture2D(void *context, GLenum a0, GLenum a1, GLenum a2, GLuint a3, GLint a4)
 {
-	if (local_entry[52] != NULL) {
+	if (!remote_only && local_entry[52] != NULL) {
 		((void (*)(void *, GLenum, GLenum, GLenum, GLuint, GLint))local_entry[52])(context, a0, a1, a2, a3, a4);
 	}
 	gw_glFramebufferTexture2D(a0, a1, a2, a3, a4);
@@ -494,7 +494,7 @@ remote_glFramebufferTexture2D(void *context, GLenum a0, GLenum a1, GLenum a2, GL
 static void
 remote_glGenerateMipmap(void *context, GLenum a0)
 {
-	if (local_entry[53] != NULL) {
+	if (!remote_only && local_entry[53] != NULL) {
 		((void (*)(void *, GLenum))local_entry[53])(context, a0);
 	}
 	gw_glGenerateMipmap(a0);

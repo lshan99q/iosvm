@@ -76,6 +76,10 @@ class Call:
         self.name = name
         self.args = args
         self.returns = returns
+        # !local: the host draws the frame with this call, so it is not run here as well (see
+        # emit_slots). Only a call that answers nothing can be marked -- the answer travels in the
+        # record, and there would be none to send.
+        self.no_local = False
         # C parameter layout: token index -> first of its C parameters
         self.first = []
         self.params = []
@@ -125,12 +129,16 @@ def parse(path):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        match = re.match(r"(\w+)\(([^)]*)\)(\s*->\s*(\w+))?", line)
+        match = re.match(r"(\w+)\(([^)]*)\)(\s*->\s*(\w+))?(\s*!\s*(\w+))?", line)
         if not match:
             raise SystemExit("bad spec line: %s" % line)
-        name, args, _, returns = match.groups()
+        name, args, _, returns, _, flag = match.groups()
         tokens = [t.strip() for t in args.split(",") if t.strip()]
-        calls.append(Call(name, tokens, returns))
+        call = Call(name, tokens, returns)
+        call.no_local = flag == "local"
+        if call.no_local and call.returns is not None:
+            raise SystemExit("%s: !local and it answers a value, which only the local call can" % name)
+        calls.append(call)
     return calls
 
 
@@ -260,9 +268,12 @@ def emit_slots(calls):
     entry(table[0], arguments...), so each one takes the context first and then exactly the GL
     signature -- no invented size parameter.
 
-    Every call is recorded for the host *and* still run here, through the entry the table held
-    before it was overridden (local_entry[]). That keeps eagl.c's own wrappers and bookkeeping in
-    the local path, which is what -attachImage: needs.
+    Every call is recorded for the host. A call marked `!local` in spec.def is *not* run here as
+    well when the host draws the frame (remote_only): it is a texture upload or a draw, which is
+    the whole cost of a frame in Mesa's software rasteriser, and the host has the same pixels by
+    reference. The rest still run, through the entry the table held before it was overridden
+    (local_entry[]), because their answers are the guest's own: an object name is not a value a
+    recorder can make up, and -attachImage: needs eagl.c's wrappers in the path.
     """
     out = []
     for index, call in enumerate(calls):
@@ -271,14 +282,16 @@ def emit_slots(calls):
         args = ", ".join(name for _, name in call.params)
         local_type = "void *" if not call.params else "void *, " + call.ctypes()
         local_args = "context" if not call.params else "context, " + args
+        # (remote_only is eagl_remote.c's; 0 whenever the inline wire is in use, so nothing changes)
+        guard = "!remote_only && " if call.no_local else ""
         if ret == "void":
-            body.append("\tif (local_entry[%d] != NULL) {" % index)
+            body.append("\tif (%slocal_entry[%d] != NULL) {" % (guard, index))
             body.append("\t\t((void (*)(%s))local_entry[%d])(%s);" %
                         (local_type, index, local_args))
             body.append("\t}")
         else:
             body.append("\t%s result = (%s)0;" % (ret, ret))
-            body.append("\tif (local_entry[%d] != NULL) {" % index)
+            body.append("\tif (%slocal_entry[%d] != NULL) {" % (guard, index))
             body.append("\t\tresult = ((%s (*)(%s))local_entry[%d])(%s);" %
                         (ret, local_type, index, local_args))
             body.append("\t}")

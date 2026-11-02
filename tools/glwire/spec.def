@@ -4,7 +4,7 @@
 # renderer drives, 62 of them. Everything else in the table is for other callers and does not need
 # to cross the boundary for the interface to draw.
 #
-# Format: name(argtype, argtype, ...) [-> returntype]
+# Format: name(argtype, argtype, ...) [-> returntype] [!local]
 #
 # The argument list is the *real GL signature*: a trampoline that overrides an EAGL table slot is
 # called with exactly these arguments, so it must not invent a size parameter (an earlier version
@@ -36,39 +36,60 @@
 #   answered them, and the host uses them to learn the guest's object names.
 #   q is appended as 8 bytes (glFenceSync's guest GLsync).
 #   P is a C pointer the host answers for itself (glGetString); nothing is appended.
+#
+# !local: the host draws the frame with this call, so it is not run on the guest as well (gen.py
+# wraps the local call in `if (!remote_only)`, eagl_remote.c decides). Which calls can be marked:
+#
+#   - everything that executes pixels here -- a texture upload, a sub-upload, a compressed upload,
+#     a copy out of the framebuffer, a mipmap build, a draw, a clear. Mesa's software rasteriser
+#     under TCG spends the whole frame on these, and the host has the same pixels by reference.
+#   - every piece of GL state only that drawing reads (blend, scissor, viewport, enable/disable,
+#     the uniform vectors, the vertex arrays, the bound texture, the framebuffer binding).
+#   - glBindTexture: not for the cost of the call, but because eagl.c's wrapper of it refills the
+#     texture from its IOSurface (surface_to_texture, 108 ms a frame on a 750x1624 panel).
+#
+# What stays local is what answers something the record cannot carry:
+#
+#   - the names glGenTextures, glGenFramebuffers, glCreateShader, glCreateProgram, glFenceSync and
+#     glGetUniformLocation return, which the host maps to its own objects (names.h).
+#   - the state and strings glGetIntegerv, glGetString and glGetError answer to CoreAnimation.
+#   - glFlush and glFinish, which are where eagl.c decides a frame has ended (frame_end()).
+#   - the deletes, which have to happen in the guest's own bookkeeping too.
+#   - glCompileShader, glLinkProgram, glAttachShader, glBindAttribLocation and glShaderSource:
+#     kept for now, they run once and their diagnostics are useful (the host reports a failure).
 
-glAlphaFunc(E, F)
-glBindTexture(E, U)
-glBlendFunc(E, E)
-glBlendFuncSeparate(E, E, E, E)
-glBlendEquation(E)
-glClear(U)
-glClearColor(F, F, F, F)
-glClearStencil(I)
-glCopyTexSubImage2D(E, I, I, I, I, I, S, S)
+glAlphaFunc(E, F) !local
+glBindTexture(E, U) !local
+glBlendFunc(E, E) !local
+glBlendFuncSeparate(E, E, E, E) !local
+glBlendEquation(E) !local
+glClear(U) !local
+glClearColor(F, F, F, F) !local
+glClearStencil(I) !local
+glCopyTexSubImage2D(E, I, I, I, I, I, S, S) !local
 glDeleteTextures(S, t)
-glDisable(E)
-glDrawArrays(E, I, S)
-glDrawElements(E, S, E, d)
-glEnable(E)
+glDisable(E) !local
+glDrawArrays(E, I, S) !local
+glDrawElements(E, S, E, d) !local
+glEnable(E) !local
 glFinish()
 glFlush()
 glGenTextures(S, t)
 glGetError() -> E
 glGetIntegerv(E, g)
 glGetString(E) -> P
-glPixelStorei(E, I)
-glScissor(I, I, S, S)
-glTexImage2D(E, I, I, S, S, I, E, E, x)
-glTexParameterf(E, E, F)
-glTexParameteri(E, E, I)
-glTexSubImage2D(E, I, I, I, S, S, E, E, y)
-glViewport(I, I, S, S)
-glActiveTexture(E)
-glCompressedTexImage2D(E, I, E, S, S, I, S, z)
-glVertexAttribPointer(U, I, E, B, S, v)
-glEnableVertexAttribArray(U)
-glDisableVertexAttribArray(U)
+glPixelStorei(E, I) !local
+glScissor(I, I, S, S) !local
+glTexImage2D(E, I, I, S, S, I, E, E, x) !local
+glTexParameterf(E, E, F) !local
+glTexParameteri(E, E, I) !local
+glTexSubImage2D(E, I, I, I, S, S, E, E, y) !local
+glViewport(I, I, S, S) !local
+glActiveTexture(E) !local
+glCompressedTexImage2D(E, I, E, S, S, I, S, z) !local
+glVertexAttribPointer(U, I, E, B, S, v) !local
+glEnableVertexAttribArray(U) !local
+glDisableVertexAttribArray(U) !local
 glDeleteProgram(U)
 glCreateShader(E) -> U
 glShaderSource(U, S, V)
@@ -76,21 +97,21 @@ glCompileShader(U)
 glCreateProgram() -> U
 glAttachShader(U, U)
 glLinkProgram(U)
-glUseProgram(U)
-glUniform1f(I, F)
-glUniform4f(I, F, F, F, F)
-glUniform1i(I, I)
-glUniform3fv(I, S, 3)
-glUniform4fv(I, S, 4)
-glUniformMatrix3fv(I, S, B, m)
-glUniformMatrix4fv(I, S, B, M)
+glUseProgram(U) !local
+glUniform1f(I, F) !local
+glUniform4f(I, F, F, F, F) !local
+glUniform1i(I, I) !local
+glUniform3fv(I, S, 3) !local
+glUniform4fv(I, S, 4) !local
+glUniformMatrix3fv(I, S, B, m) !local
+glUniformMatrix4fv(I, S, B, M) !local
 glGetUniformLocation(U, s) -> I
 glBindAttribLocation(U, U, s)
-glBindFramebuffer(E, U)
+glBindFramebuffer(E, U) !local
 glDeleteFramebuffers(S, r)
 glGenFramebuffers(S, r)
-glFramebufferTexture2D(E, E, E, U, I)
-glGenerateMipmap(E)
+glFramebufferTexture2D(E, E, E, U, I) !local
+glGenerateMipmap(E) !local
 glFenceSync(E, U) -> q
 glDeleteSync(q)
 glClientWaitSync(q, U, U) -> E
