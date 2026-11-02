@@ -332,23 +332,36 @@ raw FAT 镜像（`qemu/esp.img`），启动时 `QEMU_ESP_IMAGE=$PWD/qemu/esp.img
 - **启动 6–9 分钟，约 40% 概率卡在 lsd 上**（`lsd denied attempt to escape CPU monitor` 刷屏、
   面板空白）；`qemu/wait-for-ui.sh` 会自动重试，卡住就重起。
 
-### 7.8 卡死：本轮 4 次按引用的启动都停在前两帧（**接手第一件事**）
+### 7.8 卡死：前两帧之后不再出帧（**已查清一半：与本轮改动无关**）
 
-现象：客户机起来后画两帧（`hakios-gl: frame 1/2: …` 都正常，`flush -> 1`、宿主 `MATCH in-place`），
-之后不再出帧，屏幕停在 Apple 开机 logo，串口被 `process lsd[32] denied attempt to escape CPU monitor`
-刷屏（与上一轮记录的 lsd 卡死同形）。四次启动（11:50、11:53、12:04、12:07）都是这个结局；
-上一轮**按值**的启动在 11:16 跑过 1124 帧。
+现象：客户机起来后画两帧（`hakios-gl: frame 1/2:` 正常，`flush -> 1`、宿主 `MATCH in-place`），
+之后不再出帧，屏幕停在 Apple 开机 logo，串口被
+`process lsd[32] denied attempt to escape CPU monitor` 刷屏。12:33 与 12:38 两次都复现。
 
-还没做的隔离（按成本从低到高）：
-1. 拿同一份镜像把 `/redwood/etc/glwire_inline` 放进 `root/etc/` 重开——如果内联跑得动，问题在
-   按引用/原地写这条新路；如果照样卡，问题在本轮无关的卡死概率（40%×4 ≈ 2.6%，偏巧）。
-2. 宿主**不给** ram.img（`./host_glwire 9110`）——客户机仍按引用发记录，但宿主跟不了，画面走旧路；
-   用来区分「原地写」与「按引用读」哪一半导致卡死。
-3. 卡住时抓 `qemu/ram.img` 里的进程栈（`docs/research/linux-kernel-build.md` 附录里有 stackshot
-   的做法），看是死在 556 里还是死在显示驱动的 swap 上。
+**已经排除的（实测，别再重做）：**
 
-**为什么值得先查**：所有「按引用」的数字都只来自卡死前的两帧，管道结论（13 KB、0 回传、99 µs）
-不受影响，但「界面可用」还没被证明过一次。
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| 画面缓冲区被压缩/搬移，宿主写进旧页 | `eagl_remote.c` 里 `mlock()` 把画面缓冲钉住 | `picture buffer 4872000 B + 8, mlock 0 (wired)`，**照样卡** |
+| 按引用这条新路本身 | `build.sh` 加 `GLWIRE_INLINE=1` 重建镜像（客户机走旧的内联线） | 内联对照同样**只画两帧就停**（`records 9,959,387 B, 0 image refs`） |
+| 死在某次 vtop 调用里 | 卡住后串口不再有 SpringBoard 的输出（无悬空的 `end of frame`） | SpringBoard 不是卡在 flush/recv，是停在整个绘图循环上 |
+
+**结论**：这是本端口既有的卡死（`docs/state-of-the-port.md` 记的「约 40% 的启动会卡」，症状是
+lsd 刷屏、面板空白、约两分钟处停），不是按引用引入的。今天命中率异常高（7 次连续），而彼时宿主机
+有 5 GB 已换出、还跑着一台 24 GB 的 Windows 虚拟机——**先怀疑宿主内存压力**：客户机的换页走的是
+`qemu/ram.img`，宿主一慢，客户机的定时器就跟着错乱，launchd 的 CPU 监视器就报 lsd。
+
+**测量前的建议**：
+
+1. 跑帧率测量前先腾出宿主内存（停掉别的虚拟机/大进程），`free -g` 里 `available` 要远大于 12 GB；
+2. 用 `qemu/wait-for-ui.sh` 启动并让它重试（它会检测「两分钟没写日志」和「没有帧」两类卡死）；
+3. 连续两帧之后停住就重开，不要拿卡死前两帧的数字当稳态（本文所有按引用数字都属于这一类，
+   只有「管道字节数」是精确的）。
+
+**还没做的**（如果想根治）：卡住时抓客户机进程栈（`docs/research/linux-kernel-build.md` 的
+stackshot 附录、`qemu/symstack.py`），看 SpringBoard 是死在 CA 的渲染线程里还是别处。
+
+---
 
 ---
 
