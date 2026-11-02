@@ -460,7 +460,7 @@ make_display(void)
 int
 main(int argc, char **argv)
 {
-	int port = 9110;
+	int port = argc > 2 ? atoi(argv[2]) : 9110;
 
 	if (argc > 1 && strcmp(argv[1], "--save") == 0 && argc > 2) {
 		save_dir = argv[2];

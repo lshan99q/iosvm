@@ -161,3 +161,35 @@ padded stride) for a build that wants standard PPMs; the readers here handle QEM
 4. **GLSL ES to desktop GLSL.** The host is a desktop GL 4.5 compatibility context. `names.h` strips
    `#version 100`, `precision` lines and `lowp`/`mediump`/`highp`; shaders that rely on
    `EXT_shader_framebuffer_fetch` still need a plan.
+
+## It works end to end, and the pipe is now the problem
+
+With the recorders installed the interface really does go through the host:
+
+```
+guest:  hakios-remote: end of frame, on=1 images=1 first=750x1624
+guest:  hakios-remote: flush -> 1
+host:   host_glwire: frame 2, 750x1624, 9959384 records B, 4872000 picture B, 0.03 ms, interval 4.47 s
+```
+
+Ten megabytes of records a frame, and a replay that costs the host 0.03 ms to *dispatch*. The cost
+is not drawing and not the GPU: it is carrying the records. Two texture uploads of 4.8 MB each are
+being inlined into the stream every frame, because CoreAnimation refills its layer textures.
+
+That is exactly the problem `tools/host-glquad` already solved for a single layer: do not send the
+pixels, let the host read them where they lie. The host has `qemu/ram.img` mapped (QEMU must run with
+`QEMU_RAM_SHARE=on`, which is now the default), so a texture upload only needs to name the memory and
+the geometry, not carry it.
+
+Two ways to get there, in order of cost:
+
+1. **Deduplicate first** (cheap, no address translation): hash the pixels in the recorder and skip
+   the record when a texture's contents are unchanged since the last upload. If CoreAnimation refills
+   with identical content -- which the two same-size uploads a frame suggest -- the stream collapses
+   to almost nothing and the frame rate follows the 6-14 ms the host already measures.
+2. **Pass by reference** (the real fix): teach the recorder to hand over the guest address of the
+   upload and let the host translate it into its own mapping of the RAM file. That needs the guest
+   to know the physical offset of a user buffer, which this port does not currently expose.
+
+So the honest position: the path is proven end to end and the host is fast; what remains is the wire
+carrying ten megabytes a frame, and the fix is a known one rather than an open question.
