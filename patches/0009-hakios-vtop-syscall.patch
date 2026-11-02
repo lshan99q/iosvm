@@ -1,0 +1,195 @@
+# kern.hakios.vtop -- the kernel half of passing a texture by reference (syscall 556).
+#
+# Why: tools/glwire carries CoreAnimation's GL calls to the host's GPU, but a texture upload sent
+# its pixels with them (10 MB a frame). The host has QEMU's RAM file mapped, so it can read the
+# pixels where they lie -- if the guest can name the physical memory. This adds that one read-only
+# query: a user virtual range and the physical segments behind it, one page at a time through
+# pmap_find_phys(), coalesced. A range that is not fully resident is EFAULT, never a partial answer.
+#
+# Files: drivers/core/hakios.vtop.c and .h (the driver), drivers/core/conf (build it in),
+#        bsd/sys/hakios.vtop.h (the wire shape and the segment limit), bsd/kern/syscalls.master
+#        (entry 556).
+#
+# Apply from the root of the working tree (the one holding drivers/ and xnu-src/):
+#   patch -p1 < patches/0009-hakios-vtop-syscall.patch
+# The user-space half is userland/src/vtop_test.c (the proof) and tools/glwire/{wire.h,eagl_remote.c}
+# (the caller), and tools/glwire/vtop_verify.py checks the answer against the RAM file.
+---
+--- a/drivers/core/conf
++++ b/drivers/core/conf
+@@ -10,6 +10,9 @@
+ 	help    kern.hakios.drivers, the list of the drivers built in
+ 
+ standard bsd/dev/hakios.stubs.c
++standard bsd/dev/hakios.vtop.c
++	help    kern.hakios.vtop and syscall 556: a user address -> the physical memory behind it, for the
++	help    drawing pipe (tools/glwire) to pass a texture by reference instead of by value
+ 	help    what the rest of the kernel calls in a driver that is left out: nothing, and "not there"
+ 
+ standard iokit/Kernel/hakios.stubs.cpp iokitcpp
+--- /dev/null
++++ b/drivers/core/hakios.vtop.h
+@@ -0,0 +1,20 @@
++/*
++ * The shape of a user virtual address -> physical address answer (hakios_vtop, syscall 556).
++ *
++ * A segment is one physically contiguous run. A buffer that crosses pages is answered with as
++ * many segments as its physical pages need; a run that happens to be contiguous is one segment.
++ * Every byte in [uva, uva + len) is covered exactly once, in order.
++ */
++#ifndef _SYS_HAKIOS_VTOP_H_
++#define _SYS_HAKIOS_VTOP_H_
++
++#include <stdint.h>
++
++#define HAKIOS_VTOP_MAX_SEGMENTS 2048
++
++struct hakios_vtop_segment {
++	uint64_t pa;    /* physical address of the first byte */
++	uint64_t len;   /* bytes in this run */
++};
++
++#endif /* _SYS_HAKIOS_VTOP_H_ */
+--- /dev/null
++++ b/drivers/core/hakios.vtop.c
+@@ -0,0 +1,110 @@
++/*
++ * kern.hakios.vtop: a user virtual address, as the current process's pmap has it, and the physical
++ * memory behind it.
++ *
++ * Why it exists: the drawing pipe (tools/glwire) can hand a texture upload to the host by
++ * reference instead of copying its pixels onto the wire, but only if the guest can name the
++ * physical memory the pixels already lie in. The host has QEMU's RAM file mapped, so a physical
++ * address is all it needs to read the same bytes.
++ *
++ * The query is read-only and answers only about the calling process's own map. It walks the
++ * process's page table through pmap_find_phys(), one page at a time, and coalesces physically
++ * contiguous pages into segments. A buffer that is not fully resident (or not mapped) is an
++ * error, not a partial answer: the caller must be able to trust that the segments cover every
++ * byte it asked about.
++ *
++ * Syscall 556, "hakios_vtop" (bsd/kern/syscalls.master). The numbers are the interface; the
++ * guest's test and eagl_remote.c use the same ones.
++ */
++#include <kern/kalloc.h>
++#include <kern/task.h>
++#include <kern/thread.h>
++#include <sys/errno.h>
++#include <sys/hakios.vtop.h>
++#include <sys/param.h>
++#include <sys/proc_internal.h>
++#include <sys/sysproto.h>
++#include <sys/systm.h>
++#include <vm/pmap.h>
++#include <vm/vm_map.h>
++
++/* Not in the BSD-side headers; the same declaration bsd/kern/uipc_mbuf.c makes. */
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++
++/* The limit is HAKIOS_VTOP_MAX_SEGMENTS in bsd/sys/hakios.vtop.h: one segment a page, for the
++ * largest upload the drawing pipe allows (24 MiB): 1536 at 16 KiB, with room for 4 KiB pages. */
++int
++hakios_vtop(struct proc *p, struct hakios_vtop_args *uap, int *retval)
++{
++	struct hakios_vtop_segment *segments;
++	pmap_t pmap;
++	uint64_t at, end, previous_pa = 0, previous_len = 0;
++	uint32_t count = 0;
++	int error = 0;
++
++	(void)p;
++
++	if (uap->len == 0 || uap->len > (uint64_t)0xffffffffULL) {
++		return EINVAL;
++	}
++	if (uap->uva + uap->len < uap->uva) {
++		return EINVAL;
++	}
++	if (uap->max_segments == 0 || uap->segments == 0 || uap->count == 0) {
++		return EINVAL;
++	}
++	if (uap->max_segments > HAKIOS_VTOP_MAX_SEGMENTS) {
++		return EINVAL;
++	}
++	pmap = get_task_pmap(current_task());
++	if (pmap == PMAP_NULL) {
++		return EINVAL;
++	}
++	segments = kalloc_data((vm_size_t)(uap->max_segments * sizeof(*segments)), Z_WAITOK);
++	if (segments == NULL) {
++		return ENOMEM;
++	}
++	at = uap->uva;
++	end = uap->uva + uap->len;
++	/*
++	 * No vm_map lock: it is this thread's own map and the caller keeps the memory alive. The
++	 * pmap walk takes the pmap lock itself, so a page cannot be reused under the translation.
++	 */
++	while (at < end) {
++		ppnum_t page = pmap_find_phys(pmap, (addr64_t)at);
++		uint64_t pa, chunk;
++
++		if (page == 0) {
++			/* Not resident (or not mapped at all): a reference to it would be a lie. */
++			error = EFAULT;
++			break;
++		}
++		pa = ((uint64_t)page << PAGE_SHIFT) | (at & PAGE_MASK);
++		chunk = MIN(end - at, (uint64_t)PAGE_SIZE - (at & PAGE_MASK));
++		if (count > 0 && previous_pa + previous_len == pa) {
++			previous_len += chunk;
++			segments[count - 1].pa = previous_pa;
++			segments[count - 1].len = previous_len;
++		} else {
++			if (count == uap->max_segments) {
++				error = ENOMEM;
++				break;
++			}
++			segments[count].pa = pa;
++			segments[count].len = chunk;
++			previous_pa = pa;
++			previous_len = chunk;
++			count++;
++		}
++		at += chunk;
++	}
++	if (error == 0) {
++		if (copyout(segments, uap->segments,
++		    (size_t)count * sizeof(*segments)) != 0 ||
++		    copyout(&count, uap->count, sizeof(count)) != 0) {
++			error = EFAULT;
++		}
++	}
++	kfree_data(segments, (vm_size_t)(uap->max_segments * sizeof(*segments)));
++	return error;
++}
+--- a/xnu-src/xnu-8796.121.2/bsd/kern/syscalls.master
++++ b/xnu-src/xnu-8796.121.2/bsd/kern/syscalls.master
+@@ -869,3 +869,4 @@
+ 553 AUE_MKFIFOAT	ALL	{ int mkfifoat(int fd, user_addr_t path, int mode); }
+ 554 AUE_MKNODAT	ALL	{ int mknodat(int fd, user_addr_t path, int mode, int dev); }
+ 555 AUE_NULL	ALL { int ungraftdmg(const char *mountdir, uint64_t flags); }
++556 AUE_NULL	ALL { int hakios_vtop(user_addr_t uva, user_size_t len, user_addr_t segments, uint32_t max_segments, user_addr_t count) NO_SYSCALL_STUB; }
+--- /dev/null
++++ b/xnu-src/xnu-8796.121.2/bsd/sys/hakios.vtop.h
+@@ -0,0 +1,20 @@
++/*
++ * The shape of a user virtual address -> physical address answer (hakios_vtop, syscall 556).
++ *
++ * A segment is one physically contiguous run. A buffer that crosses pages is answered with as
++ * many segments as its physical pages need; a run that happens to be contiguous is one segment.
++ * Every byte in [uva, uva + len) is covered exactly once, in order.
++ */
++#ifndef _SYS_HAKIOS_VTOP_H_
++#define _SYS_HAKIOS_VTOP_H_
++
++#include <stdint.h>
++
++#define HAKIOS_VTOP_MAX_SEGMENTS 2048
++
++struct hakios_vtop_segment {
++	uint64_t pa;    /* physical address of the first byte */
++	uint64_t len;   /* bytes in this run */
++};
++
++#endif /* _SYS_HAKIOS_VTOP_H_ */

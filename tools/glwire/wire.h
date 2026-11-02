@@ -37,6 +37,13 @@ typedef struct {
 	size_t record;   /* where the current record's header starts */
 } wire_buffer;
 
+/* One physically contiguous run of a texture the host will read out of the guest's RAM. */
+typedef struct {
+	uint64_t pa;
+	uint32_t len;
+	uint32_t reserved;      /* keeps the wire layout the same on both sides */
+} wire_segment;
+
 #ifdef GLWIRE_GUEST
 
 /* ---- recording ---- */
@@ -84,6 +91,59 @@ wire_string(wire_buffer *w, const char *string)
 	wire_u32(w, size);
 	if (size != 0) {
 		wire_put(w, string, size);
+	}
+}
+
+/*
+ * A texture upload can name the memory instead of carrying it. eagl_remote.c sets this while the
+ * kernel's hakios_vtop (syscall 556) is available; a test build leaves it NULL and every image
+ * travels inline, exactly as before.
+ *
+ * The answer has to cover every byte: a partial translation would let the host draw a texture with
+ * a hole in it, so anything short of the whole buffer falls back to inline bytes.
+ */
+typedef int (*wire_vtop_fn)(const void *pixels, size_t bytes, wire_segment *segments, unsigned max);
+static wire_vtop_fn wire_vtop_hook;
+static wire_segment wire_image_segments[2048];
+/* Guest-side counters: how many image arguments went by reference and how many inline. */
+static unsigned long wire_image_ref_count;
+static unsigned long wire_image_inline_count;
+
+static inline void
+wire_image(wire_buffer *w, const void *pixels, GLsizei count)
+{
+	uint32_t size = count > 0 ? (uint32_t)count : 0;
+	uint32_t n = 0;
+
+	if (size != 0 && pixels != NULL && wire_vtop_hook != NULL) {
+		int got = wire_vtop_hook(pixels, size, wire_image_segments,
+		    sizeof(wire_image_segments) / sizeof(wire_image_segments[0]));
+		uint64_t covered = 0;
+
+		if (got > 0) {
+			for (int i = 0; i < got; i++) {
+				covered += wire_image_segments[i].len;
+			}
+			n = covered == size ? (uint32_t)got : 0;
+		}
+	}
+	wire_u8(w, n != 0 ? 1 : 0);
+	if (n != 0) {
+		wire_image_ref_count++;
+		wire_u32(w, n);
+		for (uint32_t i = 0; i < n; i++) {
+			wire_u64(w, wire_image_segments[i].pa);
+			wire_u32(w, wire_image_segments[i].len);
+			wire_u32(w, 0);
+		}
+	} else {
+		if (size != 0) {
+			wire_image_inline_count++;
+		}
+		wire_u32(w, size);
+		if (size != 0) {
+			wire_put(w, pixels, size);
+		}
 	}
 }
 
@@ -235,6 +295,26 @@ wire_get_u8(wire_buffer *r)
 	return v;
 }
 
+/*
+ * The guest's physical memory, as this host has it mapped: QEMU's ram.img with
+ * -object memory-backend-file,share=on. A texture record may then name a physical address instead
+ * of carrying pixels; wire_take_image copies the bytes out of this mapping.
+ */
+static unsigned char *wire_ram;
+static uint64_t wire_ram_pa_base;
+static size_t wire_ram_bytes;
+/* How many image arguments this frame named by physical address, and how many bytes that saved. */
+static unsigned long wire_image_refs;
+static unsigned long wire_image_ref_bytes;
+
+static inline void
+wire_set_ram(void *memory, size_t bytes, uint64_t pa_base)
+{
+	wire_ram = memory;
+	wire_ram_bytes = bytes;
+	wire_ram_pa_base = pa_base;
+}
+
 /* The host owns the copy: the call may keep the pointer after it returns (glTexImage2D copies, but
  * glVertexAttribPointer does not, so it must stay alive until the frame is submitted). */
 static inline void *
@@ -257,6 +337,75 @@ wire_take(wire_buffer *r, GLsizei *count)
 	}
 	r->at += size;
 	return copy;
+}
+
+/*
+ * A texture pointer: either inline bytes (kind 0, the old wire shape) or physical segments
+ * (kind 1). The segments are copied into one contiguous buffer, which is what the GL call wants;
+ * the caller frees it as it always did. Returns NULL and consumes the record if a segment falls
+ * outside the mapped RAM -- a reference that cannot be followed must not be drawn.
+ */
+static inline void *
+wire_take_image(wire_buffer *r, GLsizei *count)
+{
+	uint8_t kind = wire_get_u8(r);
+
+	*count = 0;
+	if (kind == 0) {
+		return wire_take(r, count);
+	}
+	if (kind != 1) {
+		r->at = r->capacity;
+		return NULL;
+	}
+	{
+		uint32_t n = wire_get_u32(r);
+		wire_segment *segments;
+		unsigned char *pixels;
+		size_t total = 0, at = 0;
+
+		if (n == 0 || n > 8192) {
+			r->at = r->capacity;
+			return NULL;
+		}
+		segments = calloc(n, sizeof(*segments));
+		if (segments == NULL) {
+			r->at = r->capacity;
+			return NULL;
+		}
+		for (uint32_t i = 0; i < n; i++) {
+			segments[i].pa = wire_get_u64(r);
+			segments[i].len = wire_get_u32(r);
+			segments[i].reserved = wire_get_u32(r);
+			total += segments[i].len;
+		}
+		pixels = total != 0 ? malloc(total) : NULL;
+		if (pixels == NULL) {
+			free(segments);
+			r->at = r->capacity;
+			return NULL;
+		}
+		for (uint32_t i = 0; i < n; i++) {
+			uint64_t pa = segments[i].pa;
+			uint32_t len = segments[i].len;
+
+			if (wire_ram == NULL || pa < wire_ram_pa_base ||
+			    pa - wire_ram_pa_base > wire_ram_bytes ||
+			    len > wire_ram_bytes - (size_t)(pa - wire_ram_pa_base)) {
+				free(pixels);
+				free(segments);
+				r->at = r->capacity;
+				return NULL;
+			}
+			memcpy(pixels + at, wire_ram + (size_t)(pa - wire_ram_pa_base), len);
+			at += len;
+		}
+		free(segments);
+		wire_image_refs++;
+		wire_image_ref_bytes += total;
+		*count = (GLsizei)total;
+		return pixels;
+	}
 }
 
 /* The same, for a NUL-terminated string: a byte more than the wire carries, and a NUL in it. */

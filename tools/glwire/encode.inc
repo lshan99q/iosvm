@@ -213,7 +213,7 @@ void gw_glTexImage2D(GLenum a0, GLint a1, GLint a2, GLsizei a3, GLsizei a4, GLin
 	wire_i32(&w, a5);
 	wire_u32(&w, a6);
 	wire_u32(&w, a7);
-	wire_bytes(&w, a8, wire_image_bytes(a3, a4, a6, a7));
+	wire_image(&w, a8, wire_image_bytes(a3, a4, a6, a7));
 	wire_close(&w);
 }
 
@@ -249,7 +249,7 @@ void gw_glTexSubImage2D(GLenum a0, GLint a1, GLint a2, GLint a3, GLsizei a4, GLs
 	wire_i32(&w, a5);
 	wire_u32(&w, a6);
 	wire_u32(&w, a7);
-	wire_bytes(&w, a8, wire_image_bytes(a4, a5, a6, a7));
+	wire_image(&w, a8, wire_image_bytes(a4, a5, a6, a7));
 	wire_close(&w);
 }
 

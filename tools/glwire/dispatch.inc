@@ -189,7 +189,7 @@ switch (opcode) {
 		GLenum a6 = wire_get_u32(r);
 		GLenum a7 = wire_get_u32(r);
 		GLsizei n8 = 0;
-		void *p8 = wire_take(r, &n8);
+		void *p8 = wire_take_image(r, &n8);
 		glTexImage2D(a0, a1, a2, a3, a4, a5, a6, a7, p8);
 		free(p8);
 		break;
@@ -221,7 +221,7 @@ switch (opcode) {
 		GLenum a6 = wire_get_u32(r);
 		GLenum a7 = wire_get_u32(r);
 		GLsizei n8 = 0;
-		void *p8 = wire_take(r, &n8);
+		void *p8 = wire_take_image(r, &n8);
 		glTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7, p8);
 		free(p8);
 		break;
@@ -552,7 +552,7 @@ switch (opcode) {
 		GLsizei row_bytes = wire_get_i32(r);
 		GLsizei pixel_bytes = wire_get_i32(r);
 		GLsizei bytes = 0;
-		void *data = wire_take(r, &bytes);
+		void *data = wire_take_image(r, &bytes);
 		printf("glwire: upload texture %u target %#x internal %#x %dx%d format %#x type %#x row %d pixel %d bytes %d\n",
 		    texture, target, internal, width, height, format, type, row_bytes, pixel_bytes, bytes);
 		fflush(stdout);

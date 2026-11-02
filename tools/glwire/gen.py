@@ -152,10 +152,12 @@ def encode_pointer(call, index):
         return ["\twire_bytes(&w, %s, wire_index_bytes(%s, %s));" %
                 (call.a(index), call.a(1), call.a(2))]
     if token == "x":
-        return ["\twire_bytes(&w, %s, wire_image_bytes(%s, %s, %s, %s));" %
+        # A texture argument may travel by reference (wire_image looks the buffer up in the
+        # process's pmap); when that is not possible it writes the pixels exactly as wire_bytes did.
+        return ["\twire_image(&w, %s, wire_image_bytes(%s, %s, %s, %s));" %
                 (call.a(index), call.a(3), call.a(4), call.a(6), call.a(7))]
     if token == "y":
-        return ["\twire_bytes(&w, %s, wire_image_bytes(%s, %s, %s, %s));" %
+        return ["\twire_image(&w, %s, wire_image_bytes(%s, %s, %s, %s));" %
                 (call.a(index), call.a(4), call.a(5), call.a(6), call.a(7))]
     if token == "z":
         return ["\twire_bytes(&w, %s, %s > 0 ? %s : 0);" %
@@ -335,7 +337,10 @@ def read_arguments(call):
             out.append("\t\tchar *p%d = wire_take_string(r);" % index)
         elif token == "q":
             out.append("\t\tuint64_t v%d = wire_get_u64(r);" % index)
-        elif token in ("t", "r", "d", "x", "y", "z", "3", "4", "m", "M"):
+        elif token in ("x", "y"):
+            out.append("\t\tGLsizei n%d = 0;" % index)
+            out.append("\t\tvoid *p%d = wire_take_image(r, &n%d);" % (index, index))
+        elif token in ("t", "r", "d", "z", "3", "4", "m", "M"):
             out.append("\t\tGLsizei n%d = 0;" % index)
             out.append("\t\tvoid *p%d = wire_take(r, &n%d);" % (index, index))
         elif token == "g":
@@ -561,7 +566,7 @@ def emit_dispatch(calls):
         "\t\tGLsizei row_bytes = wire_get_i32(r);",
         "\t\tGLsizei pixel_bytes = wire_get_i32(r);",
         "\t\tGLsizei bytes = 0;",
-        "\t\tvoid *data = wire_take(r, &bytes);",
+        "\t\tvoid *data = wire_take_image(r, &bytes);",
         "\t\tprintf(\"glwire: upload texture %u target %#x internal %#x %dx%d format %#x type %#x row %d pixel %d bytes %d\\n\",",
         "\t\t    texture, target, internal, width, height, format, type, row_bytes, pixel_bytes, bytes);",
         "\t\tfflush(stdout);",

@@ -108,7 +108,7 @@ def main():
         print("vtop_verify: covered virtual range ends at 0x%x, expected 0x%x" % (at_va, va + length))
         return 1
     print("vtop_verify: %d segment(s), %d bytes, physical range 0x%x..0x%x"
-          % (len(segments), covered, segments[0][0], at_pa))
+          % (len(segments), covered, segments[0][0], segments[-1][0] + segments[-1][1]))
     print("vtop_verify: guest md5 %s" % guest.hexdigest())
     print("vtop_verify: host  md5 %s" % host.hexdigest())
     print("vtop_verify: PASS: the bytes at the physical addresses are the guest's buffer")

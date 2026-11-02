@@ -15,13 +15,16 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -44,6 +47,78 @@ static EGLConfig config;
 static struct client clients[MAX_CLIENTS];
 static unsigned long long frames_replayed;
 static const char *save_dir;
+/* The guest's physical memory: ram.img, mapped so a texture record can name its pixels instead of
+ * carrying them, and so the picture can be written back into the guest's own buffer. */
+static unsigned char *ram_memory;
+static size_t ram_bytes;
+static uint64_t ram_pa_base = 0x40000000;
+static int ram_writable;
+
+static int
+map_ram(const char *path)
+{
+	struct stat information;
+	int fd;
+
+	fd = open(path, O_RDWR);
+	ram_writable = fd >= 0;
+	if (fd < 0) {
+		fd = open(path, O_RDONLY);
+	}
+	if (fd < 0) {
+		fprintf(stderr, "host_glwire: cannot open %s: %m\n", path);
+		return 0;
+	}
+	if (fstat(fd, &information) != 0 || information.st_size <= 0) {
+		fprintf(stderr, "host_glwire: cannot size %s\n", path);
+		close(fd);
+		return 0;
+	}
+	ram_memory = mmap(NULL, (size_t)information.st_size,
+	    ram_writable ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (ram_memory == MAP_FAILED) {
+		ram_memory = NULL;
+		fprintf(stderr, "host_glwire: cannot map %s: %m\n", path);
+		return 0;
+	}
+	ram_bytes = (size_t)information.st_size;
+	wire_set_ram(ram_memory, ram_bytes, ram_pa_base);
+	printf("host_glwire: %s mapped, %zu bytes, physical base 0x%llx%s\n", path, ram_bytes,
+	    (unsigned long long)ram_pa_base, ram_writable ? "" : " (read-only)");
+	return 1;
+}
+
+/* A byte-for-byte copy of what the host drew, for the acceptance check against the guest's own
+ * pixels: the panel is RGBA, the picture BGRA. GLWIRE_DUMP=<prefix> writes them once. */
+static void
+dump_once(struct client *client, const unsigned char *picture, int width, int height)
+{
+	static int dumped;
+	const char *prefix = getenv("GLWIRE_DUMP");
+	char path[512];
+	FILE *file;
+
+	if (dumped || prefix == NULL || client->names.panel == NULL) {
+		return;
+	}
+	dumped = 1;
+	snprintf(path, sizeof(path), "%s-panel-%dx%d.rgba", prefix, width, height);
+	file = fopen(path, "wb");
+	if (file != NULL) {
+		fwrite(client->names.panel, 1, (size_t)width * height * 4, file);
+		fclose(file);
+		printf("host_glwire: wrote %s\n", path);
+	}
+	snprintf(path, sizeof(path), "%s-picture-%dx%d.bgra", prefix, width, height);
+	file = fopen(path, "wb");
+	if (file != NULL) {
+		fwrite(picture, 1, (size_t)width * height * 4, file);
+		fclose(file);
+		printf("host_glwire: wrote %s\n", path);
+	}
+	fflush(stdout);
+}
 
 static double
 now_seconds(void)
@@ -206,11 +281,17 @@ serve_frame(struct client *client)
 {
 	char line[192];
 	int at = 0;
-	int width = 0, height = 0;
+	int width = 0, height = 0, segment_count = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
 	double began, took;
 	unsigned char *records;
 	unsigned char *picture;
+	wire_segment *segments = NULL;
+	int in_place = 0;
+	/* Taken before the frame's release frees the panel the guest uploaded: the release runs
+	 * first, so the log line used to read the panel afterwards and find nothing. */
+	uint64_t panel_hash = 0, picture_hash = 0;
+	int panel_known = 0;
 
 	while (at < (int)sizeof(line) - 1) {
 		char c;
@@ -225,7 +306,8 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu", &width, &height, &records_bytes, &frame_bytes) != 4) {
+	if (sscanf(line, "R %d %d %zu %zu %d", &width, &height, &records_bytes, &frame_bytes,
+	    &segment_count) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
@@ -233,23 +315,38 @@ serve_frame(struct client *client)
 		reply(client, "R badsize\n");
 		return 0;
 	}
+	if (segment_count < 0 || segment_count > 2048) {
+		reply(client, "R badsize\n");
+		return 0;
+	}
+	segments = segment_count > 0 ? calloc((size_t)segment_count, sizeof(*segments)) : NULL;
+	if (segment_count > 0 && (segments == NULL ||
+	    !recv_all(client->fd, segments, (size_t)segment_count * sizeof(*segments)))) {
+		free(segments);
+		return -1;
+	}
 	records = malloc(records_bytes);
 	picture = malloc(frame_bytes);
 	if (records == NULL || picture == NULL) {
 		free(records);
 		free(picture);
+		free(segments);
 		reply(client, "R nomem\n");
 		return 0;
 	}
 	if (!recv_all(client->fd, records, records_bytes)) {
 		free(records);
 		free(picture);
+		free(segments);
 		return -1;
 	}
 	began = now_seconds();
+	wire_image_refs = 0;
+	wire_image_ref_bytes = 0;
 	if (!make_client_current(client)) {
 		free(records);
 		free(picture);
+		free(segments);
 		reply(client, "R nocontext\n");
 		return 0;
 	}
@@ -316,6 +413,40 @@ serve_frame(struct client *client)
 	}
 	glFinish();
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+	/*
+	 * When the guest named its picture buffer's physical memory, write the picture there: the
+	 * reply is then two bytes and the guest reads the picture where it already is. The same
+	 * validation as a texture reference: the segments must cover every byte and lie in the RAM
+	 * file. If anything is off, the old path sends the picture back instead.
+	 */
+	if (segments != NULL && ram_memory != NULL) {
+		size_t at = 0;
+
+		in_place = 1;
+		for (int i = 0; i < segment_count; i++) {
+			uint64_t pa = segments[i].pa;
+			uint32_t len = segments[i].len;
+
+			if (pa < ram_pa_base || pa - ram_pa_base > ram_bytes ||
+			    len > ram_bytes - (size_t)(pa - ram_pa_base)) {
+				in_place = 0;
+				break;
+			}
+			at += len;
+		}
+		if (at != frame_bytes) {
+			in_place = 0;
+		}
+		if (in_place) {
+			at = 0;
+			for (int i = 0; i < segment_count; i++) {
+				memcpy(ram_memory + (size_t)(segments[i].pa - ram_pa_base),
+				    picture + at, segments[i].len);
+				at += segments[i].len;
+			}
+		}
+	}
+	dump_once(client, picture, width, height);
 	if (save_dir != NULL && ((frames_replayed + 1) % 10 == 1 || (frames_replayed + 1) % 100 == 0)) {
 		char path[512];
 		FILE *file;
@@ -329,18 +460,29 @@ serve_frame(struct client *client)
 			printf("host_glwire: saved %s\n", path);
 		}
 	}
+	/* Before the release: the panel is the guest's own pixels of this frame, and the picture is
+	 * what the host drew. Equal hashes are the acceptance: the host added nothing and lost
+	 * nothing. */
+	if (client->names.panel != NULL && client->names.panel_width == width &&
+	    client->names.panel_height == height) {
+		panel_hash = hash_panel(client->names.panel, (size_t)width * height);
+		picture_hash = hash_picture(picture, (size_t)width * height);
+		panel_known = 1;
+	}
 	names_attribs_release(&client->names);
 	wire_release();
 	took = now_seconds() - began;
 	frames_replayed++;
 	{
 		char done[64];
-		int length = snprintf(done, sizeof(done), "R %zu\n", frame_bytes);
+		int length = in_place ? snprintf(done, sizeof(done), "R 0\n")
+		    : snprintf(done, sizeof(done), "R %zu\n", frame_bytes);
 
 		if (!send_all(client->fd, done, (size_t)length) ||
-		    !send_all(client->fd, picture, frame_bytes)) {
+		    (!in_place && !send_all(client->fd, picture, frame_bytes))) {
 			free(records);
 			free(picture);
+			free(segments);
 			return -1;
 		}
 	}
@@ -350,27 +492,28 @@ serve_frame(struct client *client)
 		double interval = last_frame > 0 ? now - last_frame : 0;
 
 		last_frame = now;
-		if (client->names.panel != NULL && client->names.panel_width == width &&
-		    client->names.panel_height == height) {
-			uint64_t panel_hash = hash_panel(client->names.panel, (size_t)width * height);
-			uint64_t picture_hash = hash_picture(picture, (size_t)width * height);
-
+		if (panel_known) {
 			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
-			    "interval %.2f s (%.2f fps), panel %016llx picture %016llx %s\n",
+			    "interval %.2f s (%.2f fps), %lu image refs (%lu B), panel %016llx "
+			    "picture %016llx %s%s\n",
 			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
-			    interval > 0 ? 1.0 / interval : 0.0,
-			    (unsigned long long)panel_hash, (unsigned long long)picture_hash,
-			    panel_hash == picture_hash ? "MATCH" : "DIFF");
+			    interval > 0 ? 1.0 / interval : 0.0, wire_image_refs,
+			    wire_image_ref_bytes, (unsigned long long)panel_hash,
+			    (unsigned long long)picture_hash,
+			    panel_hash == picture_hash ? "MATCH" : "DIFF",
+			    in_place ? " in-place" : "");
 		} else {
 			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
-			    "interval %.2f s (%.2f fps)\n",
+			    "interval %.2f s (%.2f fps), %lu image refs (%lu B)%s\n",
 			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
-			    interval > 0 ? 1.0 / interval : 0.0);
+			    interval > 0 ? 1.0 / interval : 0.0, wire_image_refs,
+			    wire_image_ref_bytes, in_place ? " in-place" : "");
 		}
 	}
 	fflush(stdout);
 	free(records);
 	free(picture);
+	free(segments);
 	return 0;
 }
 
@@ -460,15 +603,19 @@ make_display(void)
 int
 main(int argc, char **argv)
 {
-	int port = argc > 2 ? atoi(argv[2]) : 9110;
+	const char *ram_path = getenv("GLWIRE_RAM");
+	int port = 9110;
 
-	if (argc > 1 && strcmp(argv[1], "--save") == 0 && argc > 2) {
-		save_dir = argv[2];
-		if (argc > 3) {
-			port = atoi(argv[3]);
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--save") == 0 && i + 1 < argc) {
+			save_dir = argv[++i];
+		} else if (strcmp(argv[i], "--ram") == 0 && i + 1 < argc) {
+			ram_path = argv[++i];
+		} else if (argv[i][0] >= '0' && argv[i][0] <= '9') {
+			port = atoi(argv[i]);
+		} else {
+			ram_path = argv[i];
 		}
-	} else if (argc > 1) {
-		port = atoi(argv[1]);
 	}
 	int listener;
 	int count = 0;
@@ -477,6 +624,11 @@ main(int argc, char **argv)
 	    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE,
 	};
 
+	if (ram_path != NULL) {
+		map_ram(ram_path);
+	} else {
+		printf("host_glwire: no RAM file: texture references will fall back to inline bytes\n");
+	}
 	display = make_display();
 	eglBindAPI(EGL_OPENGL_API);
 	if (display == EGL_NO_DISPLAY ||

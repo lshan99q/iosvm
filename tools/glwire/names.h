@@ -308,7 +308,10 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 			for (GLsizei y = 0; y < height; y++) {
 				memcpy(packed + (size_t)y * row, (const unsigned char *)data + (size_t)y * row_bytes, row);
 			}
-			if (width == 1125 && height == 2436) {
+			/* eagl.c's composed panel is texture 0xFFFF0001; any full-panel upload is one too.
+			 * Keeping it at its real size is what lets the host draw the panel the guest made,
+			 * and what the acceptance check compares against. */
+			if (guest == 0xFFFF0001u || (width == 1125 && height == 2436)) {
 				free(g->panel);
 				g->panel = malloc((size_t)row * (size_t)height);
 				if (g->panel != NULL) {

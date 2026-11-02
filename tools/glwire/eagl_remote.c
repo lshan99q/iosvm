@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -37,6 +38,49 @@ static int remote_fd = -1;
 static int remote_enabled;
 static int remote_frames;
 static long remote_total_us;
+/* The picture the host draws: instead of sending it back, the host writes it into this buffer at
+ * the physical addresses below. 512 segments covers a 4.8 MB picture even at one per page. */
+static wire_segment remote_frame_segments[2048];
+static int remote_frame_segments_count;
+
+#ifndef SYS_hakios_vtop
+#define SYS_hakios_vtop 556
+#endif
+extern int syscall(int, ...);
+
+/* The kernel's user address -> physical address query. Returns the number of segments, or 0 when
+ * this kernel has no such call (the old, inline wire is then used). */
+static int
+remote_vtop(const void *pixels, size_t bytes, wire_segment *segments, unsigned max)
+{
+	uint32_t count = 0;
+
+	if (pixels == NULL || bytes == 0 || max == 0) {
+		return 0;
+	}
+	if (syscall(SYS_hakios_vtop, (uintptr_t)pixels, (uintptr_t)bytes,
+	    (uintptr_t)segments, (uintptr_t)max, (uintptr_t)&count) != 0) {
+		return 0;
+	}
+	return count <= max ? (int)count : 0;
+}
+
+/* A page of our own, so the probe does not depend on any other buffer being resident. */
+static int
+remote_vtop_available(void)
+{
+	static unsigned char probe[16384];
+	wire_segment segments[8];
+	int n, covered = 0;
+
+	probe[0] = 1;
+	probe[sizeof(probe) - 1] = 2;
+	n = remote_vtop(probe, sizeof(probe), segments, sizeof(segments) / sizeof(segments[0]));
+	for (int i = 0; i < n; i++) {
+		covered += (int)segments[i].len;
+	}
+	return n > 0 && covered == (int)sizeof(probe);
+}
 /* The vertex arrays of the attributes that are on, as the guest last gave them to glVertexAttribPointer. */
 static struct {
 	const void *pointer;
@@ -89,6 +133,14 @@ eagl_remote_begin(void)
 		remote_host_port = port;
 	}
 	remote_enabled = 1;
+	/*
+	 * The fallback switch: a file, so a boot that goes wrong can be brought back to the inline
+	 * wire without a rebuild. And a kernel that does not answer the query keeps the old path by
+	 * itself, which is what a boot of an older kernel does.
+	 */
+	if (access("/redwood/etc/glwire_inline", F_OK) != 0 && remote_vtop_available()) {
+		wire_vtop_hook = remote_vtop;
+	}
 	wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 }
 
@@ -105,6 +157,8 @@ eagl_remote_resize(size_t bytes)
 		return;
 	}
 	remote_frame_bytes = bytes;
+	/* The host will write the picture here; touch the pages once so the first query can find them. */
+	memset(remote_frame + 8, 0, bytes);
 }
 
 int
@@ -154,9 +208,19 @@ eagl_remote_flush(int width, int height)
 		setsockopt(remote_fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
 	}
 	started = remote_now_ms();
-	snprintf(request, sizeof(request), "R %d %d %zu %zu\n",
-	    width, height, w.at, (size_t)width * height * 4);
+	remote_frame_segments_count = 0;
+	if (wire_vtop_hook != NULL && remote_frame != NULL) {
+		remote_frame_segments_count = wire_vtop_hook(remote_frame + 8,
+		    (size_t)width * height * 4, remote_frame_segments,
+		    sizeof(remote_frame_segments) / sizeof(remote_frame_segments[0]));
+	}
+	snprintf(request, sizeof(request), "R %d %d %zu %zu %d\n",
+	    width, height, w.at, (size_t)width * height * 4, remote_frame_segments_count);
 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
+	    (remote_frame_segments_count > 0 &&
+	     send(remote_fd, remote_frame_segments,
+	     (size_t)remote_frame_segments_count * sizeof(wire_segment), 0) !=
+	     (ssize_t)((size_t)remote_frame_segments_count * sizeof(wire_segment))) ||
 	    send(remote_fd, w.base, w.at, 0) != (ssize_t)w.at) {
 		close(remote_fd);
 		remote_fd = -1;
@@ -169,8 +233,14 @@ eagl_remote_flush(int width, int height)
 	{
 		size_t picture_bytes = 0;
 		int received = 0;
+		int in_place = 0;
 
 		if (sscanf(reply, "R %zu", &picture_bytes) == 1 &&
+		    picture_bytes == 0 && remote_frame_segments_count > 0) {
+			/* The host already wrote the picture into this buffer's physical memory. */
+			received = (int)((size_t)width * height * 4);
+			in_place = 1;
+		} else if (sscanf(reply, "R %zu", &picture_bytes) == 1 &&
 		    picture_bytes == (size_t)width * height * 4) {
 			while (received < (int)picture_bytes) {
 				ssize_t got = recv(remote_fd, remote_frame + 8 + received,
@@ -184,8 +254,12 @@ eagl_remote_flush(int width, int height)
 		}
 		remote_total_us += (long)((remote_now_ms() - started) * 1000.0);
 		remote_frames++;
+		if ((remote_frames % 30) == 1) {
+			printf("glwire: %lu image uploads by reference, %lu inline\n",
+			    wire_image_ref_count, wire_image_inline_count);
+		}
 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
-		return received == (int)picture_bytes && picture_bytes != 0 ? 1 : 0;
+		return in_place || (received == (int)picture_bytes && picture_bytes != 0) ? 1 : 0;
 	}
 }
 
@@ -219,7 +293,7 @@ eagl_remote_upload(GLuint texture, GLenum target, GLint internal, GLsizei width,
 	wire_u32(&w, type);
 	wire_i32(&w, row_bytes);
 	wire_i32(&w, pixel_bytes);
-	wire_bytes(&w, pixels, (GLsizei)bytes);
+	wire_image(&w, pixels, (GLsizei)bytes);
 	wire_close(&w);
 }
 
