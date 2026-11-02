@@ -222,6 +222,37 @@ def hook_lines(call):
     return []
 
 
+DEDUPE = ("glTexImage2D", "glTexSubImage2D")
+
+def skip_if_identical(name, types):
+    """For the two calls that carry a whole layer every frame.
+
+    CoreAnimation refills its texture from an IOSurface whether or not the picture changed, and the
+    pixels travel inside the record -- 4.8 MB twice a frame, which cost 4.47 s a frame over the
+    socket. Comparing the bytes here and dropping the record when nothing changed collapses that
+    stream to the calls that actually move pixels. A cheap sampled hash: 1 in 64 bytes, which is
+    plenty for "is this the same picture", and it runs in this (already slow) process rather than on
+    the wire."""
+    last = max((i for i, kind in enumerate(types) if kind in ("P", "N")), default=-1)
+    if name not in DEDUPE or last < 0:
+        return None
+    return ("""	if (a%(i)d != NULL && n%(i)d > 0) {
+		static unsigned long long last_%(name)s;
+		const unsigned char *bytes = a%(i)d;
+		unsigned long long hash = 1469598103934665603ULL;
+
+		for (GLsizei at = 0; at < n%(i)d; at += 64) {
+			hash = (hash ^ bytes[at]) * 1099511628211ULL;
+		}
+		hash ^= (unsigned long long)n%(i)d;
+		if (hash == last_%(name)s) {
+			return;         /* the same picture as last frame: nothing to send */
+		}
+		last_%(name)s = hash;
+	}
+""" % {"i": last, "name": name})
+
+
 def emit_slots(calls):
     """Trampolines that fit the EAGL dispatch table: every entry is called as
     entry(table[0], arguments...), so each one takes the context first and then exactly the GL

@@ -193,3 +193,31 @@ Two ways to get there, in order of cost:
 
 So the honest position: the path is proven end to end and the host is fast; what remains is the wire
 carrying ten megabytes a frame, and the fix is a known one rather than an open question.
+
+## Deduplication was tried and does not work here
+
+Two texture uploads of 4.8 MB a frame suggested the layer content repeats; hashing the pixels and
+skipping unchanged uploads would then have collapsed the stream. It was implemented -- per texture
+name, since the upload calls use whatever is bound -- built and measured:
+
+```
+host_glwire: frame 2, 750x1624, 9959384 records B, 4872000 picture B, 0.03 ms, interval 4.49 s
+```
+
+Unchanged: 9.96 MB a frame, 4.49 s. CoreAnimation recomposites the whole panel every frame (a ticking
+clock is enough), so the bytes genuinely differ and no hash can spare them.
+
+**That leaves exactly one direction: pass the texture by reference.** The record carries where the
+pixels already are, and the host reads them out of the RAM file it has mapped.
+
+Every piece of that is already proven except one:
+
+| piece | state |
+|---|---|
+| host reads guest memory through `ram.img` | proven (`rammap` finds the guest kernel in it) |
+| host draws a panel-sized frame in place | measured, 6-14 ms, no bytes on the wire |
+| guest -> host records, host -> guest picture | proven end to end (`flush -> 1`, `frame 2 ... 0.03 ms`) |
+| guest can name the physical offset of a user buffer | **missing: this port does not expose it** |
+
+So the remaining work is one small interface: user virtual address -> physical offset. With it the
+ten megabytes stop travelling and the frame rate follows the 6-14 ms the host already measures.
