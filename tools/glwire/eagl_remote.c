@@ -46,6 +46,24 @@ static long remote_total_us;
 static wire_segment remote_frame_segments[2048];
 static int remote_frame_segments_count;
 
+/*
+ * W3: where the picture goes. The display reads an IOSurface, whose rows are usually wider than the
+ * picture (3072 bytes a row for a 3000-byte picture here), and this side copies the picture into it
+ * every frame -- 48 ms of a 77 ms frame. The surface's memory can be named the same way the packed
+ * buffer's is, so the host writes the rows where the display already looks and the copy goes away.
+ * The packed buffer stays as the fallback: a surface that is not fully resident (the compressor is
+ * allowed to move it) cannot be written through.
+ */
+static wire_segment remote_surface_segments[2048];
+static int remote_surface_segments_count;
+static GLsizei remote_surface_row;              /* the surface's bytes a row */
+
+/* Which of the two the frame's request names, and how many bytes it covers. */
+static wire_segment *remote_picture_segments;
+static int remote_picture_segments_count;
+static GLsizei remote_picture_row;
+static size_t remote_picture_bytes;
+
 /* The calls spec.def marks `!local` are the ones the host draws the frame with: a texture upload or
  * a draw in Mesa's software rasteriser is the whole cost of a frame, and the host already has those
  * pixels by reference. Non-zero = do not run them here as well (the generated trampolines ask this).
@@ -254,6 +272,40 @@ eagl_remote_pending(void)
 /* Hand the frame to the host and wait for the picture. The host replays the records on its own GL
  * context and sends the panel's pixels back; this side copies them into the display's surface. No
  * address travels, and the host needs no access to the guest's RAM. */
+/*
+ * Point the frame's picture at the display's surface. Returns 1 when the host can write it there
+ * (every byte translated, in order), 0 when the packed buffer has to carry it after all -- in which
+ * case this also clears a target a previous frame set.
+ */
+int
+eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes)
+{
+	size_t bytes, covered = 0;
+	int count;
+
+	remote_surface_segments_count = 0;
+	remote_surface_row = 0;
+	if (!remote_enabled || wire_vtop_hook == NULL || base == NULL || width <= 0 || height <= 0 ||
+	    row_bytes < width * 4) {
+		return 0;
+	}
+	bytes = (size_t)row_bytes * (size_t)height;
+	count = wire_vtop_hook(base, bytes, remote_surface_segments,
+	    sizeof(remote_surface_segments) / sizeof(remote_surface_segments[0]));
+	if (count <= 0) {
+		return 0;
+	}
+	for (int i = 0; i < count; i++) {
+		covered += remote_surface_segments[i].len;
+	}
+	if (covered != bytes) {
+		return 0;
+	}
+	remote_surface_segments_count = count;
+	remote_surface_row = row_bytes;
+	return 1;
+}
+
 int
 eagl_remote_flush(int width, int height)
 {
@@ -286,19 +338,34 @@ eagl_remote_flush(int width, int height)
 		setsockopt(remote_fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
 	}
 	started = remote_now_ms();
+	/*
+	 * The surface when it could be translated (W3: the host writes the rows itself), otherwise the
+	 * packed buffer. The request line says which by its row stride: 0 means the picture is packed.
+	 */
+	remote_picture_segments = remote_frame_segments;
+	remote_picture_segments_count = 0;
+	remote_picture_row = 0;
+	remote_picture_bytes = (size_t)width * height * 4;
 	remote_frame_segments_count = 0;
-	if (wire_vtop_hook != NULL && remote_frame != NULL) {
-		remote_frame_segments_count = wire_vtop_hook(remote_frame + 8,
+	if (remote_surface_segments_count > 0) {
+		remote_picture_segments = remote_surface_segments;
+		remote_picture_segments_count = remote_surface_segments_count;
+		remote_picture_row = remote_surface_row;
+		remote_picture_bytes = (size_t)remote_surface_row * (size_t)height;
+	} else if (wire_vtop_hook != NULL && remote_frame != NULL) {
+		remote_picture_segments_count = wire_vtop_hook(remote_frame + 8,
 		    (size_t)width * height * 4, remote_frame_segments,
 		    sizeof(remote_frame_segments) / sizeof(remote_frame_segments[0]));
 	}
-	snprintf(request, sizeof(request), "R %d %d %zu %zu %d\n",
-	    width, height, w.at, (size_t)width * height * 4, remote_frame_segments_count);
+	remote_frame_segments_count = remote_picture_segments_count;
+	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d\n",
+	    width, height, w.at, (size_t)width * height * 4, remote_picture_segments_count,
+	    remote_picture_row);
 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
-	    (remote_frame_segments_count > 0 &&
-	     send(remote_fd, remote_frame_segments,
-	     (size_t)remote_frame_segments_count * sizeof(wire_segment), 0) !=
-	     (ssize_t)((size_t)remote_frame_segments_count * sizeof(wire_segment))) ||
+	    (remote_picture_segments_count > 0 &&
+	     send(remote_fd, remote_picture_segments,
+	     (size_t)remote_picture_segments_count * sizeof(wire_segment), 0) !=
+	     (ssize_t)((size_t)remote_picture_segments_count * sizeof(wire_segment))) ||
 	    send(remote_fd, w.base, w.at, 0) != (ssize_t)w.at) {
 		close(remote_fd);
 		remote_fd = -1;
@@ -314,10 +381,13 @@ eagl_remote_flush(int width, int height)
 		int in_place = 0;
 
 		if (sscanf(reply, "R %zu", &picture_bytes) == 1 &&
-		    picture_bytes == 0 && remote_frame_segments_count > 0) {
-			/* The host already wrote the picture into this buffer's physical memory. */
+		    picture_bytes == 0 && remote_picture_segments_count > 0) {
+			/*
+			 * The host already wrote the picture into the memory this frame named: the packed
+			 * buffer (1: copy it out here), or the display's surface itself (2: nothing to copy).
+			 */
 			received = (int)((size_t)width * height * 4);
-			in_place = 1;
+			in_place = remote_picture_row > 0 ? 2 : 1;
 		} else if (sscanf(reply, "R %zu", &picture_bytes) == 1 &&
 		    picture_bytes == (size_t)width * height * 4) {
 			while (received < (int)picture_bytes) {
@@ -337,7 +407,10 @@ eagl_remote_flush(int width, int height)
 			    wire_image_ref_count, wire_image_inline_count);
 		}
 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
-		return in_place || (received == (int)picture_bytes && picture_bytes != 0) ? 1 : 0;
+		if (in_place != 0) {
+			return in_place;
+		}
+		return (received == (int)picture_bytes && picture_bytes != 0) ? 1 : 0;
 	}
 }
 

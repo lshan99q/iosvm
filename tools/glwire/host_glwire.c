@@ -106,16 +106,18 @@ dump_once(struct client *client, const unsigned char *picture, int width, int he
 	char path[512];
 	FILE *file;
 
-	if (dumped || prefix == NULL || client->names.panel == NULL) {
+	if (dumped || prefix == NULL) {
 		return;
 	}
 	dumped = 1;
-	snprintf(path, sizeof(path), "%s-panel-%dx%d.rgba", prefix, width, height);
-	file = fopen(path, "wb");
-	if (file != NULL) {
-		fwrite(client->names.panel, 1, (size_t)width * height * 4, file);
-		fclose(file);
-		printf("host_glwire: wrote %s\n", path);
+	if (client->names.panel != NULL) {
+		snprintf(path, sizeof(path), "%s-panel-%dx%d.rgba", prefix, width, height);
+		file = fopen(path, "wb");
+		if (file != NULL) {
+			fwrite(client->names.panel, 1, (size_t)width * height * 4, file);
+			fclose(file);
+			printf("host_glwire: wrote %s\n", path);
+		}
 	}
 	snprintf(path, sizeof(path), "%s-picture-%dx%d.bgra", prefix, width, height);
 	file = fopen(path, "wb");
@@ -281,6 +283,63 @@ reply(struct client *client, const char *line)
 	send_all(client->fd, line, strlen(line));
 }
 
+/*
+ * The picture's rows into a buffer that is wider than the picture: the display's own IOSurface has
+ * 3072 bytes to a row for a 3000-byte row of picture, and the guest would otherwise copy the whole
+ * picture into it after the frame (48 ms of a 77 ms frame). The segments cover the strided range,
+ * in order, so a cursor walks them as the rows go by.
+ */
+struct guest_cursor {
+	wire_segment *segments;
+	int count;
+	int index;
+	size_t at;              /* the guest offset segments[index] starts at */
+};
+
+static unsigned char *
+cursor_at(struct guest_cursor *cursor, size_t offset, size_t *available)
+{
+	while (cursor->index < cursor->count &&
+	    cursor->at + cursor->segments[cursor->index].len <= offset) {
+		cursor->at += cursor->segments[cursor->index].len;
+		cursor->index++;
+	}
+	if (cursor->index >= cursor->count || offset < cursor->at) {
+		return NULL;
+	}
+	*available = (size_t)cursor->segments[cursor->index].len - (offset - cursor->at);
+	return ram_memory + (size_t)(cursor->segments[cursor->index].pa - ram_pa_base) +
+	    (offset - cursor->at);
+}
+
+static int
+write_picture_rows(const unsigned char *picture, int width, int height, size_t row_bytes,
+    wire_segment *segments, int count)
+{
+	struct guest_cursor cursor = { segments, count, 0, 0 };
+	size_t used = (size_t)width * 4;
+
+	for (int y = 0; y < height; y++) {
+		size_t offset = (size_t)y * row_bytes;
+		size_t done = 0;
+
+		while (done < used) {
+			size_t available = 0;
+			unsigned char *destination = cursor_at(&cursor, offset + done, &available);
+
+			if (destination == NULL) {
+				return 0;
+			}
+			if (available > used - done) {
+				available = used - done;
+			}
+			memcpy(destination, picture + (size_t)y * used + done, available);
+			done += available;
+		}
+	}
+	return 1;
+}
+
 /* One frame: "R <w> <h> <records bytes> <picture bytes>\n", the records, then the picture:
  * "R <picture bytes>\n" and the BGRA pixels. */
 static int
@@ -288,7 +347,7 @@ serve_frame(struct client *client)
 {
 	char line[192];
 	int at = 0;
-	int width = 0, height = 0, segment_count = 0;
+	int width = 0, height = 0, segment_count = 0, row_bytes = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
 	double began, took;
 	unsigned char *records;
@@ -313,8 +372,8 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu %d", &width, &height, &records_bytes, &frame_bytes,
-	    &segment_count) < 4) {
+	if (sscanf(line, "R %d %d %zu %zu %d %d", &width, &height, &records_bytes, &frame_bytes,
+	    &segment_count, &row_bytes) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
@@ -323,6 +382,10 @@ serve_frame(struct client *client)
 		return 0;
 	}
 	if (segment_count < 0 || segment_count > 2048) {
+		reply(client, "R badsize\n");
+		return 0;
+	}
+	if (row_bytes != 0 && (row_bytes < width * 4 || row_bytes > (1 << 20))) {
 		reply(client, "R badsize\n");
 		return 0;
 	}
@@ -427,6 +490,9 @@ serve_frame(struct client *client)
 	 * file. If anything is off, the old path sends the picture back instead.
 	 */
 	if (!no_in_place && segments != NULL && ram_memory != NULL) {
+		/* The rows of the display's surface (row_bytes: the picture is written row by row and the
+		 * guest has nothing left to copy), or the packed picture buffer it asked for. */
+		size_t target_bytes = row_bytes > 0 ? (size_t)row_bytes * (size_t)height : frame_bytes;
 		size_t at = 0;
 
 		in_place = 1;
@@ -441,10 +507,13 @@ serve_frame(struct client *client)
 			}
 			at += len;
 		}
-		if (at != frame_bytes) {
+		if (at != target_bytes) {
 			in_place = 0;
 		}
-		if (in_place) {
+		if (in_place && row_bytes > 0) {
+			in_place = write_picture_rows(picture, width, height, (size_t)row_bytes,
+			    segments, segment_count);
+		} else if (in_place) {
 			at = 0;
 			for (int i = 0; i < segment_count; i++) {
 				memcpy(ram_memory + (size_t)(segments[i].pa - ram_pa_base),
@@ -508,13 +577,14 @@ serve_frame(struct client *client)
 			    wire_image_ref_bytes, (unsigned long long)panel_hash,
 			    (unsigned long long)picture_hash,
 			    panel_hash == picture_hash ? "MATCH" : "DIFF",
-			    in_place ? " in-place" : "");
+			    in_place ? (row_bytes > 0 ? " in-place rows" : " in-place") : "");
 		} else {
 			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
 			    "interval %.2f s (%.2f fps), %lu image refs (%lu B)%s\n",
 			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
 			    interval > 0 ? 1.0 / interval : 0.0, wire_image_refs,
-			    wire_image_ref_bytes, in_place ? " in-place" : "");
+			    wire_image_ref_bytes,
+			    in_place ? (row_bytes > 0 ? " in-place rows" : " in-place") : "");
 		}
 	}
 	fflush(stdout);

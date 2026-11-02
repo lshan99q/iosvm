@@ -45,8 +45,10 @@
 #     under TCG spends the whole frame on these, and the host has the same pixels by reference.
 #   - every piece of GL state only that drawing reads (blend, scissor, viewport, enable/disable,
 #     the uniform vectors, the vertex arrays, the bound texture, the framebuffer binding).
-#   - glBindTexture: not for the cost of the call, but because eagl.c's wrapper of it refills the
-#     texture from its IOSurface (surface_to_texture, 108 ms a frame on a 750x1624 panel).
+#   - glBindTexture is NOT marked: eagl.c's wrapper is what remembers which texture the current
+#     unit has bound, and -attachImage: reads that to know which texture the harness gave it. With
+#     the wrapper skipped the images never attach (frame_end() then has no image, images=0) and the
+#     host is never sent a frame at all -- learned the hard way.
 #
 # What stays local is what answers something the record cannot carry:
 #
@@ -59,7 +61,7 @@
 #     kept for now, they run once and their diagnostics are useful (the host reports a failure).
 
 glAlphaFunc(E, F) !local
-glBindTexture(E, U) !local
+glBindTexture(E, U)
 glBlendFunc(E, E) !local
 glBlendFuncSeparate(E, E, E, E) !local
 glBlendEquation(E) !local

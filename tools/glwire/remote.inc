@@ -10,7 +10,7 @@ remote_glAlphaFunc(void *context, GLenum a0, GLfloat a1)
 static void
 remote_glBindTexture(void *context, GLenum a0, GLuint a1)
 {
-	if (!remote_only && local_entry[1] != NULL) {
+	if (local_entry[1] != NULL) {
 		((void (*)(void *, GLenum, GLuint))local_entry[1])(context, a0, a1);
 	}
 	gw_glBindTexture(a0, a1);
