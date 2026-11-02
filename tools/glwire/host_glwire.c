@@ -46,6 +46,13 @@ static EGLDisplay display;
 static EGLConfig config;
 static struct client clients[MAX_CLIENTS];
 static unsigned long long frames_replayed;
+/* GLWIRE_NO_INPLACE: take the picture's segments but do not write through them (the reply then
+ * carries the picture, as it did before). One process's frames are one experiment. */
+static int no_in_place;
+/* GLWIRE_NO_PANEL (or --no-panel): do not draw the panel the guest uploaded -- replay the
+ * recorded calls instead. The question it answers is whether the host can produce the frame
+ * from CoreAnimation's own stream, which is what the guest would have to stop doing. */
+static int no_panel;
 static const char *save_dir;
 /* The guest's physical memory: ram.img, mapped so a texture record can name its pixels instead of
  * carrying them, and so the picture can be written back into the guest's own buffer. */
@@ -382,7 +389,7 @@ serve_frame(struct client *client)
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
 	glViewport(0, 0, width, height);
-	if (client->names.panel != NULL && client->names.panel_width == width &&
+	if (!no_panel && client->names.panel != NULL && client->names.panel_width == width &&
 	    client->names.panel_height == height) {
 		draw_panel(client, client->names.panel, width, height);
 	} else {
@@ -419,7 +426,7 @@ serve_frame(struct client *client)
 	 * validation as a texture reference: the segments must cover every byte and lie in the RAM
 	 * file. If anything is off, the old path sends the picture back instead.
 	 */
-	if (segments != NULL && ram_memory != NULL) {
+	if (!no_in_place && segments != NULL && ram_memory != NULL) {
 		size_t at = 0;
 
 		in_place = 1;
@@ -609,6 +616,8 @@ main(int argc, char **argv)
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--save") == 0 && i + 1 < argc) {
 			save_dir = argv[++i];
+		} else if (strcmp(argv[i], "--no-panel") == 0) {
+			no_panel = 1;
 		} else if (strcmp(argv[i], "--ram") == 0 && i + 1 < argc) {
 			ram_path = argv[++i];
 		} else if (argv[i][0] >= '0' && argv[i][0] <= '9') {
@@ -624,6 +633,8 @@ main(int argc, char **argv)
 	    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE,
 	};
 
+	no_in_place = getenv("GLWIRE_NO_INPLACE") != NULL;
+	no_panel = getenv("GLWIRE_NO_PANEL") != NULL;
 	if (ram_path != NULL) {
 		map_ram(ram_path);
 	} else {
@@ -675,7 +686,9 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
-	printf("host_glwire: listening on %d\n", port);
+	printf("host_glwire: listening on %d%s%s\n", port,
+	    no_in_place ? " (GLWIRE_NO_INPLACE: the picture travels back instead)" : "",
+	    no_panel ? " (no panel: the recorded calls are replayed instead)" : "");
 	fflush(stdout);
 
 	for (;;) {

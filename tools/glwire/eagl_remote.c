@@ -16,9 +16,11 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -95,6 +97,23 @@ static int remote_attrib_enabled[16];
 int remote_host_port = 9110;
 char remote_host_address[64] = "10.0.2.2";
 
+/* The console this port reads is the processes' standard error (eagl.c does the same). */
+static void
+remote_say(const char *format, ...)
+{
+	char line[256];
+	va_list ap;
+	int n;
+
+	va_start(ap, format);
+	n = vsnprintf(line, sizeof(line), format, ap);
+	va_end(ap);
+	if (n > (int)sizeof(line) - 1) {
+		n = (int)sizeof(line) - 1;
+	}
+	write(2, line, (size_t)n);
+}
+
 static double
 remote_now_ms(void)
 {
@@ -159,6 +178,18 @@ eagl_remote_resize(size_t bytes)
 	remote_frame_bytes = bytes;
 	/* The host will write the picture here; touch the pages once so the first query can find them. */
 	memset(remote_frame + 8, 0, bytes);
+	/*
+	 * And keep them where they are. The host writes at the physical addresses this side named;
+	 * if the compressor moves a page afterwards, that write lands in whatever took its place.
+	 * mlock is allowed up to the process's own limit, so the answer is logged rather than
+	 * assumed -- an unwired buffer still works, it is just the risk this is here to remove.
+	 */
+	{
+		int locked = mlock(remote_frame, bytes + 8);
+
+		remote_say("hakios-remote: picture buffer %zu B + 8, mlock %d%s\n", bytes, locked,
+		    locked == 0 ? " (wired)" : " (NOT wired: a page that moves afterwards can be written)");
+	}
 }
 
 int
