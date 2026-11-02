@@ -178,6 +178,26 @@ inline 分支后照样 `wire_put(w, pixels, count)` → `memcpy(dst, NULL, 4.87 
 
 对照 §0.7（同配置未修）：6 分 20 秒时 `backboardd [14]` SIGSEGV。修的是同一行，结论成立。
 
+### 0.10 第四轮：修完的 flush-on 实测，桌面出来了（2026-11-02 16:38）
+
+这次连宿主一起跑，验证完整的「记录器 → flush → 宿主重放 → 行写回 IOSurface」路径：
+
+- 镜像 `/tmp/root-fixed-net.apfs`：`GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1 RC=rc.vtop`，
+  即客户机仍本地绘制、记录器全开、`rc.vtop` 用 `netcfg` 把 en0 配成 10.0.2.15/10.0.2.2；
+- 启动：`QEMU_SMP=4`、`CMDLINE="cpus=4 fb_beat=0 fbscale=2 metal=1 ustrace=1 ustrace_name=backboardd"`，
+  日志 `/tmp/iosvm-1504.log`；宿主 `host_glwire 9110 qemu/ram.img`，日志 `/tmp/iosvm-1504-host.log`；
+- 16:28:53 起机，宿主 `ESTAB` 到 9110；
+- 前 3 帧慢（已知的启动停顿，第 3 帧间隔 271 s），之后恢复；
+- **16:37 截图 448,734 B，桌面出来了**：Dock、图标、搜索框、顶部 `rdar:45025538`；
+- 16:38 宿主 `frame 152, 750x1624, 7439 records B, 4872000 picture B, 0.03 ms,
+  1 image refs (4884992 B), panel … picture … MATCH in-place rows`，帧间隔 0.07 s（**13.83 fps**）；
+- 客户机 `frame 140`：66 GL calls / 9 draws，142,231 µs；
+- **0 次 `SIGSEGV`，0 条 `usertrap: backboardd`**；空纹理 `750 x 1624` 照常出现并被安全处理。
+
+对照 §0.7/0.8（同一路径未修）：6 分 20 秒 SIGSEGV、界面不出。修 `wire_image()` 的 NULL 之后，
+同一条路径连续 152 帧、宿主逐帧 `MATCH in-place rows`、桌面可用。**R1 的阻塞点已经拆掉**；
+剩下的是重复性验收（冷启动 5 次 ≥4 次）和速度，不再是「记录器装了就崩」。
+
 ---
 
 ## 一、目标与验收
