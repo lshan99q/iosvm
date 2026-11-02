@@ -2075,3 +2075,44 @@ the panel path; that is not saved yet.
 
 One-line status: the texture+FBO sequence is ruled out as the sole cause; the host workaround is the
 fix on our side, and the remaining llvmpipe fault needs the full CA record stream to reproduce.
+
+## Addendum 44: cpus=2 has not hit the lock, but has not reached home
+
+The cpus=2 run: QEMU `-smp 2`, kernel `cpus=2 fb_beat=0 gl=1`, no `glcopy`, boot at 08:01:10.
+SpringBoard was spawned at 08:02:11 and backboardd's window server came up; the panel stayed on the
+Apple logo / spinner. At 08:09 (ten minutes in) the machine was stopped for three seconds and
+continued, which produced frames 4-9; at 08:10 it was still the spinner, not the home screen.
+
+No Ticket spinlock appeared in those ten minutes. That is evidence for the pset0 theory (`cpus=2`
+removes the CPU 3 owner contention), not yet proof: the window under test was 13-17 minutes on four
+cores, and this run never reached the load that produced it. The remaining blocker on two cores is
+the `lsd` CPU-monitor loop (`process lsd denied attempt to escape CPU monitor`) plus the slow
+softpipe renderer; the 2-vCPU guest does not get SpringBoard's first home frame out.
+
+So: the lock cadence is the stop/cont every ten minutes the task asked for, but the home-screen goal
+is not met on cpus=2. The next attempt should be four cores with the same stop/cont cadence, or a
+kernel with `cpumon` entitlements relaxed, not another two-core boot.
+
+## Addendum 45: opcode 201, the real Settings surface, zero pixels and equal md5
+
+The cpus=2 guest did not reach Settings, but the original guest's last composited Settings frame was
+still in `qemu/ram.img` at `0x33b9eb000`. That exact 1125 x 2436 BGRA surface was sent to the host as
+an opcode-201 upload (texture `0xFFFF0001`, row 4500, 4 bytes a pixel); `host_glwire` created the
+texture, packed it, drew the panel quad and sent the BGRA picture back:
+
+```
+host nonzero 8,079,265   guest nonzero 8,079,265
+diff pixels 0 / 2,740,500
+raw md5 host 184dbe4d141e43ef02015d568dde9000
+raw md5 guest 184dbe4d141e43ef02015d568dde9000
+PNG md5 both b8e4684b07999797a94e57b02a7b568f
+```
+
+`docs/demo/host-opcode201-settings.png` and `guest-opcode201-settings.png` are the two pictures; the
+PNG md5 is the same. This is the pixel-exact acceptance for the upload/draw path: the host draws the
+real guest surface, not a black frame and not a re-encoded copy.
+
+Caveat: this surface is the **original guest's last Settings frame** (the CPU-rendered one that died
+at 07:08), replayed through the live opcode-201 transport. It is not a frame captured from a live
+CoreAnimation GL boot; that boot is still stuck at the spinner (Addendum 44). The transport and the
+draw are proven; the live CA Settings frame is not.
