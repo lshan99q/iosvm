@@ -96,8 +96,31 @@ $ grep -ac "hakios-gl: slot " /tmp/m8disc.log
 
 ## 五、工具与提交
 
-（待）
+| 文件 | 用途 |
+|---|---|
+| `xnu-src/.../osfmk/arm64/machine_routines.c` | `lpto_us=<µs>`：`lock_panic_timeout` 的 boot arg（不传 = 原样 0xf000000） |
+| `iosvm/patches/0015-kernel-lock-deadline-arguments.patch` | 上面这段的导出（从 `xnu/hakios.patch` 里摘的 `machine_routines.c` 段） |
+| `tools/glwire/harness/README.md` | 三族 deadline 的对照表与两条口径 |
+| `tools/make-kernel.sh` | locale 无关化（judge 之前只认英文 `Error`，中文「错误 2」会误判） |
+| `tools/glwire/harness/bootsum.py` | P0'' 的判据表与预算（rule-of-three） |
+| `tools/glwire/harness/diffdump.py` | 行序自动判定（第八阶段 P2' 的尺子修正） |
 
-## 六、下一步
+构建与验证命令（本阶段实际用的）：
+```
+LANG=C LC_ALL=C IOSVM_USE_LLD=0 tools/make-kernel.sh -j8     # → ./hakios-kernel
+# 150 秒短启动验证：有 ignition/launchd 行、没有 "kernel returned"
+```
 
-（待）
+提交：`iosvm` 仓库 `main`，本阶段推送了 `fbba8eb`（计划）、`cf09577` / `3bf05e0`（第八阶段结论与工具）、
+以及本文件与内核补丁那一次提交。端口仓库（`oosexgang/hakios-xnu-kernel`）用 token 无写权限，
+内核改动以 `patches/0015-…` 的形式随 `iosvm` 提交（与 `patches/0014-…` 同法）。
+
+## 六、下一步（第十阶段的候选，按代价排序）
+
+1. **停顿本身**：三族 deadline 抬到 60 s 只是「不被 6–14.7 s 的停摆放倒」，停顿还在（每次启动 24–44 次 >1 s 的
+   空洞，最长 14.68 s）。下一次要用 `ustacks`（`ustacks=<proc> ustacks_at=<秒>`）在停顿窗口抓栈，
+   把「客户机自己在干什么」钉死；宿主侧已经排除了。
+2. **B 路换靶子**：EGL 表已经否定（12 个入口 0 调用）。要查 CoreAnimation 的 Metal/CoreGraphics 路径，
+   或者接受「`remote_only` 只覆盖记录器能到的那一层」，把 W2 的判据改写成「记录器的覆盖范围」。
+3. **P3' 的四格**（本阶段末尾在跑）：四格都在 stage-9 配方下，跑完补表。
+4. **帧率**：median 20 ms 里仍有一半是宿主/qemu 的固定开销；在停顿修掉之前不谈「稳定 9 fps」。
