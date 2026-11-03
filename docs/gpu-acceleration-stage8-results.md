@@ -160,7 +160,12 @@ B 路不是「往 `spec.def` 加一行」能解决的——下一阶段要换靶
 第九阶段的内核（`lpto_us`）第一次交付时**入口即死**：`kernel returned: log at … 31 bytes`、消息缓冲 0 行、0 帧。
 两次 150 秒的短启动把范围夹死——**不带 `lpto_us` 正常启动（30 秒时 launchd 已在拉服务），带 `lpto_us` 立刻死**，
 所以不是镜像/loader/链接，是新加的那个分支。最可疑的是 `STARTUP(TIMEOUTS)` 阶段的 `kprintf`（控制台还没起来）。
-结论：**改内核的人必须自己跑一次短启动再交付**（150 秒就够：`hostframes ≥ 1` + 有 launchd 行）。
+结论：**改内核的人必须自己跑一次短启动再交付**（150 秒就够：有 ignition/launchd 行、没有 `kernel returned`）。
+
+修好之后（01:06 重编、01:08 起跑）的验收口径要跟着改：`lpto_us` 的收据行就是那行被删掉的 `kprintf`，
+所以「lpto 生效」只能从两处看——**代码**（`machine_routines.c` 里 lpto 分支只剩 `os_atomic_store`）+ **行为**
+（启动能过入口）；如果本轮再出现 `Spinlock` 族 panic，它的 `timeout:` 应该是 60 s 对应的 **3,750,000,000 ticks**
+而不是 251,658,240。
 
 ## 六、这一轮的工具与提交
 
