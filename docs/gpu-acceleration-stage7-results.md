@@ -48,7 +48,7 @@ is the retry protocol: `IMAGE=… WANT=8 TRIES=12 ./harness/boots.sh`.
 | deadline | boot arguments | result |
 |---|---|---|
 | 3.84 s | `tlto_us=3840000` | interface at 420 s, **panic** (`timeout after 240000030 ticks` — the argument works) |
-| 30 s | `tlto_us=30000000` | **2/2 PASS** — interface at 570 s and 510 s, 0 panics, and the stalls are still there: 37 and 41 frame gaps over 1 s, worst 16.96 s and 10.45 s |
+| 30 s | `tlto_us=30000000` | **2/2 PASS** — interface at 570 s and 510 s, 0 panics; the two P2/P1/P4 boots that followed (same argument) were 0 panic too, so **5 boots, 0 panics**.  The stalls are still there: 37 and 41 frame gaps over 1 s, worst 16.96 s and 10.45 s |
 
 The 1 s deadline is what turns a multi-second stall into a panic.  `tlto_us` is a **boot argument**
 (`PE_parse_boot_argn("tlto_us")` in `osfmk/arm64/machine_routines.c:ml_init_lock_timeout()`), so no
