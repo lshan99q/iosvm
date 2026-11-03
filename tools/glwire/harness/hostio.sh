@@ -11,7 +11,8 @@ SECS=${2:-1200}
 : > "$OUT"
 echo "# epoch io_some io_full disk_reads disk_writes free_mb" >> "$OUT"
 dev=$(ls /sys/block/nvme*/stat 2>/dev/null | head -1)
-prev_r=0 prev_w=0
+# the first sample must be a delta too: the counters are absolute since boot
+if [ -n "$dev" ] && [ -f "$dev" ]; then set -- $(cat "$dev"); prev_r=$1; prev_w=$5; else prev_r=0; prev_w=0; fi
 while [ "$SECS" -gt 0 ]; do
 	now=$(date +%s.%N)
 	read -r some full < <(awk '/^some/ {split($2,a,"="); s=a[2]} /^full/ {split($2,a,"="); f=a[2]} END {print s+0, f+0}' /proc/pressure/io)
