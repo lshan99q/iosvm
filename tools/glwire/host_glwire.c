@@ -116,18 +116,31 @@ map_ram(const char *path)
 	return 1;
 }
 
+static double now_seconds(void);
+
 /* A byte-for-byte copy of what the host drew, for the acceptance check against the guest's own
  * pixels: the panel is RGBA, the picture BGRA. GLWIRE_DUMP=<prefix> writes them once. */
 static void
 dump_once(struct client *client, const unsigned char *picture, int width, int height, int number)
 {
 	static int dumped;
+	static double first;
 	const char *prefix = getenv("GLWIRE_DUMP");
 	const char *from = getenv("GLWIRE_DUMP_FROM");
+	const char *at = getenv("GLWIRE_DUMP_AT");
 	char path[512];
 	FILE *file;
 
-	if (dumped || prefix == NULL || number < (from != NULL ? atoi(from) : 1)) {
+	if (first == 0) {
+		first = now_seconds();
+	}
+	/* GLWIRE_DUMP_AT=<seconds>: the first frame that arrives that long after the first one, which is
+	 * how a dump is aimed at a moment (the interface is up eleven minutes into a boot here) rather
+	 * than at a frame number that no two boots share. */
+	if (at != NULL && now_seconds() - first < atof(at)) {
+		return;
+	}
+	if (dumped || prefix == NULL || (at == NULL && number < (from != NULL ? atoi(from) : 1))) {
 		return;
 	}
 	dumped = 1;
@@ -845,19 +858,19 @@ serve_frame(struct client *client)
 
 		last_frame = now;
 		if (panel_known) {
-			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
+			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.1f ms, "
 			    "interval %.2f s (%.2f fps), %lu image refs (%lu B), panel %016llx "
 			    "picture %016llx %s%s\n",
-			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
+			    frames_replayed, width, height, records_bytes, frame_bytes, took * 1000.0, interval,
 			    interval > 0 ? 1.0 / interval : 0.0, wire_image_refs,
 			    wire_image_ref_bytes, (unsigned long long)panel_hash,
 			    (unsigned long long)picture_hash,
 			    panel_hash == picture_hash ? "MATCH" : "DIFF",
 			    in_place ? (row_bytes > 0 ? " in-place rows" : " in-place") : "");
 		} else {
-			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.2f ms, "
+			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.1f ms, "
 			    "interval %.2f s (%.2f fps), %lu image refs (%lu B)%s\n",
-			    frames_replayed, width, height, records_bytes, frame_bytes, took, interval,
+			    frames_replayed, width, height, records_bytes, frame_bytes, took * 1000.0, interval,
 			    interval > 0 ? 1.0 / interval : 0.0, wire_image_refs,
 			    wire_image_ref_bytes,
 			    in_place ? (row_bytes > 0 ? " in-place rows" : " in-place") : "");
