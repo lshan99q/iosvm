@@ -51,13 +51,13 @@
 
 ### T0 启动稳定性（先做，1–2 天）
 
-**现状证据**（第五阶段 §七，18 次冷启动）：
+**现状证据**（第五阶段 §七，22 次冷启动）：
 
 | 配置 | 冷启动 | 到界面 | panic |
 |---|---|---|---|
 | `rc.vtop`（不带触摸） | 11 | 2 | 9 |
-| `rc.touch1`（一个 rwtouch 进程，600 s） | 6 | 1 | 5 |
-| 纯本地（不装记录器） | 2 | 0 | 2 |
+| `rc.touch1`（一个 rwtouch 进程，600 s） | 8 | 1 | 7 |
+| `rc.touch1` 纯本地（不装记录器） | 3 | 0 | 3 |
 
 panic 的形状一致：
 
@@ -66,21 +66,58 @@ panic(cpu 1 caller 0xfffffff007aefad0): Ticket spinlock[0xfffffff007b68880] time
     cticket: 0x79, nticket: 0x7a, waiting for 0x76, current owner: 0 (on CPU -1), orig owner: 0, ... @lock_ticket.c:386
 ```
 
-`current owner` 是 0 或 CPU -1：**锁的持有者不在了**。发生在 lsd / configd / SpringBoard
-起来的 5–6 分钟，而不是触摸动作（第一次触摸在 600 s，大多数连它都没到）。
+**这把锁已经定位了**（2026-11-03 15:20，离线符号化 + 结构体布局）：
 
-**做法**（一次只摘一个变量，别猜）：
+- `llvm-nm -n hakios-kernel` 给出 `_pset0` 在 `0xfffffff007b68780`，panic 里的
+  `0xfffffff007b68880` 正好是 `_pset0 + 0x100`；
+- `pset0` 是结构体（不是一个指针）：`xnu-src/xnu-8796.121.2/osfmk/kern/processor.c:106`
+  `struct processor_set pset0;`；
+- `struct processor_set` 里 `__attribute__((aligned(128))) lck_ticket_t sched_lock` 前面的字段
+  （6 个 int + 负载平均数组 + 6 个 `cpumap_t`）合计 0xD0，**128 对齐后正好落在 +0x100**；
+- 所以 panic 等的是 **`pset0.sched_lock`，进程集 0 的全局调度票据锁**。
 
-1. **先量概率，不改任何东西**：同一个镜像（`rc.vtop`，`GLWIRE_LOCAL=1`）连跑 10 次，
-   每次记 `panic` 的锁地址、CPU、以及死前 30 行。`cold-boots.sh` 已经是这个形状，
-   但要把「失败也算一次」记下来（现在是跳过）。
-2. **`cpus=2` vs `cpus=4`**：TCG 下 4 个 vCPU 的票据锁超时和宿主调度有关（`timeout: 60000000`
-   ≈ 60 ms 量级的 tick）。第四阶段说 `cpus=2` 会卡在 spinner 上 35 分钟——先用 5 分钟的启动日志
-   判断它是不是同一个死法，再决定这条要不要走。
-3. **`ustrace=1` + 串口**：`touch.py stacks` 会让 CPU 停不下来（第四阶段踩过），
+不是驱动锁、不是 GL、不是触摸——是**调度器**。
+
+`current owner` 是 0 或 CPU -1 时看起来像「持有者不在了」，但同一把锁的另外几次是
+`current owner: 0xfffffff8efec64e8 (on CPU 3)`——持有者活着。两种都出现过，说明不是一种固定死法。
+
+**超时是 1 秒，不是 60 秒**：`timeout: 60000000` 是 `mach_absolute_time` 的 tick 数。
+用 panic 块自己的两个时标换算（`Boot: 0x6ae95bc8` / `Calendar: 0x6ae95d53` → 395 s，
+`mach_absolute_time: 0x5e3028e2a` → 25,266,103,338）得到约 **62.5 MHz**，
+`60e6` ticks ≈ **0.96 s**（QEMU 的 ARM 通用定时器默认就是这个频率）。
+
+一个持有调度锁的 vCPU 只要被宿主晚调度约一秒，客户机就 panic。这更像是 **TCG 的调度抖动**
+而不是死锁——也解释了为什么 22 次里 19 次都死在同一把锁、而且和不带触摸/纯本地无关。
+
+**做法**（一次只摘一个变量，别猜；前三条是按「1 秒超时」这个事实排的）：
+
+1. **宿主优先级**（最便宜、最可能）：同一个镜像、同一组参数，把 QEMU 放在
+   `nice -n -20`（或 `chrt` 的实时类）下跑 3 次。如果通过率从 14% 跳到一半以上，
+   结论就是「宿主没及时调度 vCPU」，修复点在启动脚本，不在内核。
+2. **`cpus=2` vs `cpus=4`**：vCPU 越少，锁的争用和 TCG 的线程切换越少。第四阶段说 `cpus=2`
+   会卡在 spinner 上 35 分钟——先看它在 5–15 分钟里是同一个死法还是另一个。
+3. **`-accel tcg,thread=single`**：4 个 vCPU 交给一个宿主线程轮转，锁的持有者不可能被并行
+   切走。如果它不 panic（只会慢），就把「并行 vCPU 的调度抖动」钉死。
+4. **只用来判定的实验**：把 `lock_ticket.c` 的 timeout 从 60e6 抬到 240e6（约 4 s），跑 3 次。
+   如果 panic 变成「慢但对」→ 是延迟；如果照旧死 → 才是真死锁。
+5. **`ustrace=1` + 串口**：`touch.py stacks` 会让 CPU 停不下来（第四阶段踩过），
    用内核自己打印的那条路（`ustacks`/`ustrace`，`qemu/symstack.py` 解）。
-4. **只用来判定的实验**：把 `lock_ticket.c` 的 timeout 从 60e6 抬到 240e6，跑 3 次。
-   如果 panic 变成「慢但对」→ 是宿主调度；如果照旧死→ 是真死锁。
+
+**第一轮实测（2026-11-03 15:20–16:00，`cpus=2`）**：
+
+| 启动 | 配置 | 结果 |
+|---|---|---|
+| t0a | `cpus=2`，第四阶段镜像，`--no-panel` | **acceptance**：235 帧、451,885 B、0 panic |
+| t0a2 | 同上（同样的参数再跑一次） | **panic**（4 帧，同一把锁 `pset0.sched_lock`，`current owner: 0xfffffff46ef49ee0 (on CPU 0)` 还活着） |
+| t0a3 | `cpus=2`，带触摸的镜像（`rc.touch1`） | **acceptance**：249 帧、451,601 B、0 panic |
+
+`cpus=2`：**2/3**；第四阶段的基线（`cpus=4`）：**3/22 = 14%**。Fisher 精确检验 p ≈ 0.06——
+**有希望，但还不能说解决**。而且 t0a2 的 panic 说明「vCPU 少就不会被延迟」不成立：
+持有者活着、就是迟迟不放手。
+
+副作用要记住：`cpus=2` 把客户机的核数减半，启动更慢（约 10–18 分钟）、帧率 5.5–9 fps
+（`cpus=4` 是 9.9–12 fps）。**所以它是稳定性实验的配置，不是 fps 对照的配置**——
+任何跨配置的帧率比较都必须同一 `cpus`。
 
 **判据**：10 次冷启动 ≥8 次到界面、0 panic；每次 panic 有归因（锁名或栈）。
 **涉及**：`osfmk/arm64/sleh.c`/`lock_ticket.c`（只读不改，除非第 4 条要临时改 timeout）、

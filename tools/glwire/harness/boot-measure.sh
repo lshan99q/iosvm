@@ -38,10 +38,10 @@ sleep 1
 : > "$LOG"; : > "$HLOG"
 cd "$IOSVM" || exit 1
 echo "===== $(date -Is) $LABEL root=$ROOT hostargs=[$HOSTARGS] minframes=$MINFRAMES minshot=$MINSHOT =====" >> "$LOG"
-QEMU_SMP=4 QEMU_TB_MB=1536 QEMU_RAM_GB=12 QEMU_NET=1 QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img \
+QEMU_SMP=${QEMU_SMP:-4} QEMU_TB_MB=${QEMU_TB_MB:-1536} QEMU_RAM_GB=12 QEMU_NET=1 QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img \
 	IMG=$IOSVM/userland/system.apfs ROOT=$ROOT \
-	CMDLINE="cpus=4 fb_beat=0 fbscale=2 metal=1 ${XCMD:-}" \
-	timeout 7500 bash qemu/run-darwin.sh "$MAXSECS" >> "$LOG" 2>&1 &
+	CMDLINE="cpus=${QEMU_SMP:-4} fb_beat=0 fbscale=2 metal=1 ${XCMD:-}" \
+	timeout 7500 bash qemu/run-darwin.sh "$MAXSECS" ${QEMU_EXTRA:-} >> "$LOG" 2>&1 &
 qpid=$!
 
 # the host maps the RAM file, so QEMU has to have opened it first

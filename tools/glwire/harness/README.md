@@ -6,7 +6,7 @@
 
 | 脚本 | 作用 |
 |---|---|
-| `boot-measure.sh LABEL ROOT.apfs MAX_SECONDS [HOST_ARGS]` | 一次冷启动 + 一个 `host_glwire` + 一对日志。**结束条件就是验收判据本身**：宿主 ≥200 帧且截图 > 300 KB；780 s 还没有 100 KB 的截图就判为没界面（卡在 `lsd` 的启动）直接收工。`HOST_ENV=…` 给宿主传环境（`GLWIRE_DUMP`、`GLWIRE_SAVE_RECORDS`、`GLWIRE_NO_INPLACE`），`XCMD=…` 追加内核启动参数（例 `glwire_nopicture=1`） |
+| `boot-measure.sh LABEL ROOT.apfs MAX_SECONDS [HOST_ARGS]` | 一次冷启动 + 一个 `host_glwire` + 一对日志。**结束条件就是验收判据本身**：宿主 ≥200 帧且截图 > 300 KB；780 s 还没有 100 KB 的截图就判为没界面（卡在 `lsd` 的启动）直接收工。`HOST_ENV=…` 给宿主传环境（`GLWIRE_DUMP`、`GLWIRE_SAVE_RECORDS`、`GLWIRE_NO_INPLACE`），`XCMD=…` 追加内核启动参数（例 `glwire_nopicture=1`），`QEMU_SMP=…`（默认 4，第六阶段 T0 用它量 `cpus=2`）与 `QEMU_EXTRA=…`（原样加到 QEMU 命令行，例 `-accel tcg,thread=single`） |
 | `cold-boots.sh` | 连跑冷启动直到 N 次通过 R1 的判据（`IMAGE=…` 指定镜像） |
 | `decrec.py FILE.records [-v]` | 把 `GLWIRE_SAVE_RECORDS` 存下来的记录流逐条解码（opcode 是 `spec.def` 的顺序） |
 | `bgra2png.py PREFIX` | 把 `GLWIRE_DUMP` 的 `-picture-WxH.bgra` / `-panel-WxH.rgba` 转成 PNG（按屏幕方向）并统计非黑像素与颜色数 |
