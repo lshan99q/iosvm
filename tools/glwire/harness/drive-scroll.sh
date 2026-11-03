@@ -79,7 +79,7 @@ n0, n1, g0, g1 = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.a
 t0, t1, ui = float(sys.argv[5]), float(sys.argv[6]), int(sys.argv[7])
 log = sys.argv[8]
 pattern = re.compile(r"(\d+) frames in (\d+) ms")
-rows = [line for line in open(log, errors="replace").splitlines()
+rows = [line for line in open(log, errors="replace").read().splitlines()
         if "MiniIOMobileFramebuffer:" in line and pattern.search(line)][g0:g1]
 frames = sum(int(pattern.search(line).group(1)) for line in rows)
 millis = sum(int(pattern.search(line).group(2)) for line in rows)
