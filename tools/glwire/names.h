@@ -39,7 +39,9 @@ struct attrib_state {
 	GLenum type;
 	GLsizei stride;
 	GLboolean normalized;
-	void *data;                     /* what the next draw reads; freed after it */
+	GLuint buffer;                  /* the vertex data, in a buffer object (llvmpipe faults on
+	                                 * half-float client arrays; the guest's bytes are copied here) */
+	void *data;                     /* the same bytes on the CPU, freed after the draw */
 };
 
 struct glstate {
@@ -49,6 +51,12 @@ struct glstate {
 	struct attrib_state attribs[16];
 	unsigned char *panel;           /* the last 1125x2436 BGRA upload, packed to 4500 */
 	int panel_width, panel_height;
+	/* The framebuffer the stream bound last, and the one it last drew into: the guest reads its
+	 * picture back from the texture that was drawn into, and after the stream has ended this side
+	 * has to bind that same framebuffer before it reads (CoreAnimation unbinds before the frame
+	 * ends, and the EGL surface here is a 16x16 pbuffer that holds nothing). */
+	GLuint bound_framebuffer;
+	GLuint drawn_framebuffer;
 };
 
 static uint64_t
@@ -221,6 +229,10 @@ names_free(struct glstate *g)
 	free(g->panel);
 	g->panel = NULL;
 	for (unsigned i = 0; i < 16; i++) {
+		if (g->attribs[i].buffer != 0) {
+			glDeleteBuffers(1, &g->attribs[i].buffer);
+			g->attribs[i].buffer = 0;
+		}
 		free(g->attribs[i].data);
 		g->attribs[i].data = NULL;
 	}
@@ -275,7 +287,7 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 {
 	uint64_t mapped = 0;
 	GLuint host;
-	GLint previous = 0;
+	GLint previous = 0, previous_alignment = 4, previous_row_length = 0;
 
 	if (data == NULL || width <= 0 || height <= 0) {
 		free(data);
@@ -285,6 +297,14 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 	if (internal == GL_BGRA) {
 		internal = GL_RGBA;
 	}
+	/*
+	 * Save the unit's binding *before* the creation branch binds the new texture: it used to be
+	 * read afterwards, so a texture this upload created stayed bound when the replay began and a
+	 * later draw with no glBindTexture sampled the wrong one.
+	 */
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+	glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_alignment);
+	glGetIntegerv(GL_UNPACK_ROW_LENGTH, &previous_row_length);
 	if (!name_map_get(&g->textures, guest, &mapped)) {
 		glGenTextures(1, &host);
 		names_texture_put(g, guest, host);
@@ -296,7 +316,6 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 	} else {
 		host = (GLuint)mapped;
 	}
-	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
 	{
 		/* The texture may be attached to the framebuffer that is bound; redefining it there
 		 * makes llvmpipe 25.2.8 fault. Detach the framebuffer for the upload and put it back. */
@@ -347,7 +366,8 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 		glTexImage2D(target, 0, internal, width, height, 0, format, type,
 		    packed != NULL ? packed : data);
-		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, (GLint)previous_alignment);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)previous_row_length);
 		glBindTexture(target, (GLuint)previous);
 		if (packed != NULL) {
 			free(data);
@@ -480,8 +500,10 @@ names_vertex_pointer(struct glstate *g, GLuint index, GLint size, GLenum type,
 
 static void
 names_attrib_data(struct glstate *g, GLuint index, GLint size, GLenum type, GLboolean normalized,
-    GLsizei stride, void *data)
+    GLsizei stride, GLsizei bytes, void *data)
 {
+	GLint previous = 0;
+
 	if (index >= 16) {
 		free(data);
 		return;
@@ -492,7 +514,20 @@ names_attrib_data(struct glstate *g, GLuint index, GLint size, GLenum type, GLbo
 	g->attribs[index].type = type;
 	g->attribs[index].stride = stride;
 	g->attribs[index].normalized = normalized;
-	glVertexAttribPointer(index, size, type, normalized, stride, data);
+	/*
+	 * llvmpipe 25.2.8 SIGSEGVs drawing a client-side GL_HALF_FLOAT array (CoreAnimation's colours
+	 * travel that way). The same bytes in a buffer object draw correctly, and a buffer is what the
+	 * driver is fastest at anyway. The binding is saved and put back: CoreAnimation's stream does
+	 * not name buffers, so this side must not disturb whatever state it expects.
+	 */
+	if (g->attribs[index].buffer == 0) {
+		glGenBuffers(1, &g->attribs[index].buffer);
+	}
+	glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previous);
+	glBindBuffer(GL_ARRAY_BUFFER, g->attribs[index].buffer);
+	glBufferData(GL_ARRAY_BUFFER, bytes, data, GL_STREAM_DRAW);
+	glVertexAttribPointer(index, size, type, normalized, stride, (const void *)0);
+	glBindBuffer(GL_ARRAY_BUFFER, (GLuint)previous);
 	glEnableVertexAttribArray(index);
 }
 
@@ -513,8 +548,12 @@ names_attrib_enabled(struct glstate *g, GLuint index, int enabled)
 static void
 names_attribs_release(struct glstate *g)
 {
-	free(g->panel);
-	g->panel = NULL;
+	/*
+	 * The panel is not an attribute: it used to be freed here as well, and every draw in the
+	 * replayed stream released it -- so in the --no-panel path the frame ended with no panel to
+	 * compare against and the acceptance check silently said nothing (measured: 146 of 147 frames
+	 * had no panel hash, the one that had it was a frame with no draws).
+	 */
 	for (unsigned i = 0; i < 16; i++) {
 		free(g->attribs[i].data);
 		g->attribs[i].data = NULL;

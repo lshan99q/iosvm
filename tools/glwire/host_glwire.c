@@ -31,6 +31,8 @@
 #include "wire.h"
 #include "names.h"
 
+#define GLWIRE_AFTER_DRAW(g) host_after_draw(g)
+
 #define MAX_CLIENTS 16
 
 struct client {
@@ -46,6 +48,11 @@ static EGLDisplay display;
 static EGLConfig config;
 static struct client clients[MAX_CLIENTS];
 static unsigned long long frames_replayed;
+/* The picture of the frame before: the guest's uploaded panel is the surface as of the previous
+ * present (measured: picture(N) == panel(N+1) for every animating frame of a --no-panel run), so
+ * the acceptance that "the host drew what the guest drew" is read against this one. */
+static uint64_t previous_picture_hash;
+static int have_previous_picture;
 /* GLWIRE_NO_INPLACE: take the picture's segments but do not write through them (the reply then
  * carries the picture, as it did before). One process's frames are one experiment. */
 static int no_in_place;
@@ -53,6 +60,19 @@ static int no_in_place;
  * recorded calls instead. The question it answers is whether the host can produce the frame
  * from CoreAnimation's own stream, which is what the guest would have to stop doing. */
 static int no_panel;
+/* A picture of the last frame's record stream: which opcodes it held, and how many (the
+ * GLWIRE_NO_PANEL path logs one line per frame so a displayed stream can be read). */
+static unsigned long long replay_ops[256];
+static int replay_used;
+/* GLWIRE_DUMP_DRAWS: after every draw of one chosen frame, save the framebuffer and print the
+ * state the draw saw. One frame of a home screen is nine draws; the pictures say which draw put a
+ * wrong pixel down, and the state says why. */
+static int dump_draws;
+static int draws_seen;
+static int dump_draws_runtime;
+static int dump_frame_runtime;
+static int trace_width, trace_height;
+static struct client *trace_client;
 static const char *save_dir;
 /* The guest's physical memory: ram.img, mapped so a texture record can name its pixels instead of
  * carrying them, and so the picture can be written back into the guest's own buffer. */
@@ -99,14 +119,15 @@ map_ram(const char *path)
 /* A byte-for-byte copy of what the host drew, for the acceptance check against the guest's own
  * pixels: the panel is RGBA, the picture BGRA. GLWIRE_DUMP=<prefix> writes them once. */
 static void
-dump_once(struct client *client, const unsigned char *picture, int width, int height)
+dump_once(struct client *client, const unsigned char *picture, int width, int height, int number)
 {
 	static int dumped;
 	const char *prefix = getenv("GLWIRE_DUMP");
+	const char *from = getenv("GLWIRE_DUMP_FROM");
 	char path[512];
 	FILE *file;
 
-	if (dumped || prefix == NULL) {
+	if (dumped || prefix == NULL || number < (from != NULL ? atoi(from) : 1)) {
 		return;
 	}
 	dumped = 1;
@@ -270,11 +291,85 @@ draw_panel(struct client *client, const unsigned char *panel, int width, int hei
 	glDeleteTextures(1, &texture);
 }
 
+static void host_after_draw(struct glstate *g);
+
 static int
 dispatch(struct glstate *g, wire_buffer *r, uint32_t opcode)
 {
 #include "dispatch.inc"
 	return 0;
+}
+
+
+/* The state a draw saw, and the framebuffer as it stood after it. GLWIRE_DUMP_DRAWS=<prefix>
+ * writes <prefix>-draw-N-fbo-F-program-P.bgra (bottom row first, as glReadPixels returns it). */
+static void
+host_after_draw(struct glstate *g)
+{
+	GLint bound = 0, view[4] = { 0, 0, 0, 0 }, scissor[4] = { 0, 0, 0, 0 };
+	GLint program = 0, active = 0, blend[2] = { 0, 0 }, equation = 0;
+	const char *prefix = getenv("GLWIRE_DUMP_DRAWS");
+	int number = draws_seen++;
+	unsigned char *pixels;
+
+	if (!dump_draws || prefix == NULL || trace_client == NULL || trace_width <= 0 || trace_height <= 0) {
+		return;
+	}
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &bound);
+	glGetIntegerv(GL_VIEWPORT, view);
+	glGetIntegerv(GL_SCISSOR_BOX, scissor);
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	glGetIntegerv(GL_BLEND_SRC_RGB, &blend[0]);
+	glGetIntegerv(GL_BLEND_DST_RGB, &blend[1]);
+	glGetIntegerv(GL_BLEND_EQUATION_RGB, &equation);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	printf("host_glwire: draw %d fbo %d program %d viewport %d,%d %dx%d scissor %d,%d %dx%d "
+	    "blend %s %d %d eq %#x", number, bound, program, view[0], view[1], view[2], view[3],
+	    scissor[0], scissor[1], scissor[2], scissor[3], glIsEnabled(GL_BLEND) ? "on" : "off",
+	    blend[0], blend[1], equation);
+	for (GLint unit = 0; unit < 8; unit++) {
+		GLint texture = 0, width = 0, height = 0, filter = 0, wrap = 0;
+
+		glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+		if (texture == 0) {
+			continue;
+		}
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &filter);
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &wrap);
+		printf(" | unit %d texture %d %dx%d min %#x wrap %#x", unit, texture, width, height,
+		    filter, wrap);
+	}
+	glActiveTexture((GLenum)active);
+	printf("\n");
+	fflush(stdout);
+	if (bound == 0) {
+		return;
+	}
+	pixels = malloc((size_t)trace_width * (size_t)trace_height * 4);
+	if (pixels == NULL) {
+		return;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)bound);
+	glReadPixels(0, 0, trace_width, trace_height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+	{
+		char path[512];
+		FILE *file;
+
+		snprintf(path, sizeof(path), "%s-draw-%02d-fbo-%d-program-%d.bgra", prefix, number, bound,
+		    program);
+		file = fopen(path, "wb");
+		if (file != NULL) {
+			fwrite(pixels, 1, (size_t)trace_width * (size_t)trace_height * 4, file);
+			fclose(file);
+			printf("host_glwire: wrote %s\n", path);
+			fflush(stdout);
+		}
+	}
+	free(pixels);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)bound);
 }
 
 static void
@@ -340,6 +435,72 @@ write_picture_rows(const unsigned char *picture, int width, int height, size_t r
 	return 1;
 }
 
+
+/* GLWIRE_DUMP_TEXTURES=<prefix>: every host texture after the frame's upload pass, with the
+ * parameters the replay will sample it with. The files are level 0 as RGBA; the small text line
+ * beside each says which guest name made it and how it is filtered and wrapped. */
+static void
+dump_textures(struct client *client, const char *prefix)
+{
+	GLint active = 0, previous = 0;
+
+	if (prefix == NULL) {
+		return;
+	}
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+	for (size_t i = 0; i < client->names.textures.capacity; i++) {
+		struct name_entry *entry = &client->names.textures.entries[i];
+		GLint width = 0, height = 0, internal = 0, min_filter = 0, mag_filter = 0;
+		GLint wrap_s = 0, wrap_t = 0;
+		unsigned char *pixels;
+		char path[512];
+		FILE *file, *meta;
+
+		if (entry->state != 1) {
+			continue;
+		}
+		glBindTexture(GL_TEXTURE_2D, (GLuint)entry->host);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &min_filter);
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &mag_filter);
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &wrap_s);
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, &wrap_t);
+		snprintf(path, sizeof(path), "%s-guest-%llu-host-%llu-%dx%d.rgba", prefix,
+		    (unsigned long long)entry->guest, (unsigned long long)entry->host, width, height);
+		meta = fopen(path, "ab");
+		if (meta != NULL) {
+			fprintf(meta, "guest %llu host %llu %dx%d internal %#x min %#x mag %#x wrap %#x %#x\n",
+			    (unsigned long long)entry->guest, (unsigned long long)entry->host, width, height,
+			    internal, min_filter, mag_filter, wrap_s, wrap_t);
+			fclose(meta);
+		}
+		if (width <= 0 || height <= 0 || (size_t)width * (size_t)height * 4 > (64u << 20)) {
+			continue;
+		}
+		pixels = malloc((size_t)width * (size_t)height * 4);
+		if (pixels == NULL) {
+			continue;
+		}
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+		snprintf(path, sizeof(path), "%s-guest-%llu-host-%llu-%dx%d.pixels", prefix,
+		    (unsigned long long)entry->guest, (unsigned long long)entry->host, width, height);
+		file = fopen(path, "wb");
+		if (file != NULL) {
+			fwrite(pixels, 1, (size_t)width * (size_t)height * 4, file);
+			fclose(file);
+		}
+		free(pixels);
+	}
+	glBindTexture(GL_TEXTURE_2D, (GLuint)previous);
+	glActiveTexture((GLenum)active);
+	printf("host_glwire: textures written with prefix %s\n", prefix);
+	fflush(stdout);
+}
+
 /* One frame: "R <w> <h> <records bytes> <picture bytes>\n", the records, then the picture:
  * "R <picture bytes>\n" and the BGRA pixels. */
 static int
@@ -352,11 +513,14 @@ serve_frame(struct client *client)
 	double began, took;
 	unsigned char *records;
 	unsigned char *picture;
+
 	wire_segment *segments = NULL;
 	int in_place = 0;
+	int replayed = 0;
 	/* Taken before the frame's release frees the panel the guest uploaded: the release runs
 	 * first, so the log line used to read the panel afterwards and find nothing. */
 	uint64_t panel_hash = 0, picture_hash = 0;
+	uint64_t last_picture_hash = have_previous_picture ? previous_picture_hash : 0;
 	int panel_known = 0;
 
 	while (at < (int)sizeof(line) - 1) {
@@ -411,6 +575,34 @@ serve_frame(struct client *client)
 		return -1;
 	}
 	began = now_seconds();
+	{
+		/*
+		 * GLWIRE_SAVE_RECORDS=<prefix>: the first frames' record streams as they came, so a
+		 * frame's calls can be read one by one on their own (opcode, length, payload). The
+		 * header is the request line's numbers, so a reader does not have to remember them.
+		 */
+		static int saved;
+		const char *prefix = getenv("GLWIRE_SAVE_RECORDS");
+		const char *at = getenv("GLWIRE_SAVE_AT");
+		int wanted = at != NULL ? atoi(at) : 0;
+		int keep = at != NULL ? ((int)(frames_replayed + 1) == wanted) : (saved < 3);
+
+		if (prefix != NULL && keep) {
+			char path[512];
+			FILE *file;
+
+			snprintf(path, sizeof(path), "%s-%d-%dx%d-%d.records", prefix,
+			    at != NULL ? wanted : saved + 1, width, height, (int)records_bytes);
+			file = fopen(path, "wb");
+			if (file != NULL) {
+				fwrite(records, 1, records_bytes, file);
+				fclose(file);
+				printf("host_glwire: saved %s\n", path);
+				fflush(stdout);
+			}
+			saved++;
+		}
+	}
 	wire_image_refs = 0;
 	wire_image_ref_bytes = 0;
 	if (!make_client_current(client)) {
@@ -450,6 +642,20 @@ serve_frame(struct client *client)
 			offset += 8 + length;
 		}
 	}
+	{
+		const char *from = getenv("GLWIRE_DUMP_FROM");
+
+		trace_width = width;
+		trace_height = height;
+		trace_client = client;
+		draws_seen = 0;
+		dump_frame_runtime = from != NULL ? atoi(from) : 1;
+		dump_draws_runtime = (int)(frames_replayed + 1) == dump_frame_runtime;
+		dump_draws = getenv("GLWIRE_DUMP_DRAWS") != NULL && dump_draws_runtime;
+	}
+	if (dump_draws_runtime && (int)(frames_replayed + 1) == dump_frame_runtime) {
+		dump_textures(client, getenv("GLWIRE_DUMP_TEXTURES"));
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
 	glViewport(0, 0, width, height);
 	if (!no_panel && client->names.panel != NULL && client->names.panel_width == width &&
@@ -459,6 +665,11 @@ serve_frame(struct client *client)
 		wire_buffer r;
 		size_t offset = 0;
 
+		memset(replay_ops, 0, sizeof(replay_ops));
+		client->names.bound_framebuffer = client->framebuffer;
+		client->names.drawn_framebuffer = 0;
+		replay_used = 1;
+		replayed = 1;
 		while (offset + 8 <= records_bytes) {
 			uint32_t opcode, length;
 
@@ -468,20 +679,83 @@ serve_frame(struct client *client)
 				fprintf(stderr, "host_glwire: a record runs past the frame\n");
 				break;
 			}
+			if (opcode >= 256) {
+				fprintf(stderr, "host_glwire: opcode %u out of range\n", opcode);
+				break;
+			}
 			if (opcode == 201) {
 				offset += 8 + length;
 				continue;       /* already uploaded before the framebuffer was bound */
 			}
+			replay_ops[opcode]++;
 			r.base = records + offset + 8;
 			r.capacity = length;
 			r.at = 0;
 			if (dispatch(&client->names, &r, opcode) != 0) {
+				fprintf(stderr, "host_glwire: dispatch stopped at opcode %u\n", opcode);
 				break;
 			}
 			offset += 8 + length;
 		}
 	}
 	glFinish();
+	if (replay_used) {
+		/*
+		 * What the replay was made of: the opcodes and how many of each. A frame that draws
+		 * nothing is then a stream with no draws in it, and a frame that draws wrong is a
+		 * stream with the wrong ones -- either way, this line says which.
+		 */
+		char histogram[512];
+		int at = 0;
+
+		histogram[0] = '\0';
+		for (unsigned i = 0; i < 256; i++) {
+			if (replay_ops[i] != 0 && at < (int)sizeof(histogram) - 16) {
+				at += snprintf(histogram + at, sizeof(histogram) - (size_t)at, " %u:%llu",
+				    i, replay_ops[i]);
+			}
+		}
+		printf("host_glwire: replay %zu records B, opcodes%s, glerror 0x%x\n",
+		    records_bytes, histogram, glGetError());
+		fflush(stdout);
+		replay_used = 0;
+	}
+	{
+		/*
+		 * Where the picture comes from: the replay leaves whatever framebuffer the stream bound
+		 * last, and glReadPixels reads that one -- not the one this renderer made. CoreAnimation
+		 * binds the framebuffer of the surface it is about to draw, so the line says whether the
+		 * read-back target is the guest's surface (a nonzero name this side mapped) or 0 (the
+		 * EGL surface, which is a 16x16 pbuffer here and holds nothing).
+		 */
+		GLint bound = -1, box[4] = { 0, 0, 0, 0 };
+		GLint kind = 0;
+
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+		glGetIntegerv(GL_VIEWPORT, box);
+		if (bound != 0) {
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+		}
+		printf("host_glwire: read-back framebuffer %d (attachment %s), viewport %d,%d %dx%d, "
+		    "last drawn into %u\n", bound, bound == 0 ? "none" : kind == GL_TEXTURE ? "texture" :
+		    kind == GL_RENDERBUFFER ? "renderbuffer" : "other", box[0], box[1], box[2], box[3],
+		    client->names.drawn_framebuffer);
+		/*
+		 * And read the picture out of the framebuffer the stream last drew into: the guest reads
+		 * its own picture back from the texture that was drawn into, not from "whatever was bound
+		 * when the frame ended" (CoreAnimation unbinds before the flush: measured framebuffer 0,
+		 * attachment none, viewport 0x0 -- the EGL surface is a 16x16 pbuffer and holds nothing).
+		 */
+		if (replayed && client->names.drawn_framebuffer != 0 &&
+		    client->names.drawn_framebuffer != (GLuint)bound) {
+			glBindFramebuffer(GL_FRAMEBUFFER, client->names.drawn_framebuffer);
+			glGetIntegerv(GL_VIEWPORT, box);
+			printf("host_glwire: reading from %u instead, viewport %d,%d %dx%d\n",
+			    client->names.drawn_framebuffer, box[0], box[1], box[2], box[3]);
+		}
+		fflush(stdout);
+	}
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 	/*
 	 * When the guest named its picture buffer's physical memory, write the picture there: the
@@ -522,7 +796,7 @@ serve_frame(struct client *client)
 			}
 		}
 	}
-	dump_once(client, picture, width, height);
+	dump_once(client, picture, width, height, (int)frames_replayed + 1);
 	if (save_dir != NULL && ((frames_replayed + 1) % 10 == 1 || (frames_replayed + 1) % 100 == 0)) {
 		char path[512];
 		FILE *file;
@@ -545,6 +819,8 @@ serve_frame(struct client *client)
 		picture_hash = hash_picture(picture, (size_t)width * height);
 		panel_known = 1;
 	}
+	previous_picture_hash = picture_hash;
+	have_previous_picture = 1;
 	names_attribs_release(&client->names);
 	wire_release();
 	took = now_seconds() - began;
@@ -704,7 +980,9 @@ main(int argc, char **argv)
 	};
 
 	no_in_place = getenv("GLWIRE_NO_INPLACE") != NULL;
-	no_panel = getenv("GLWIRE_NO_PANEL") != NULL;
+	/* (the flag the argument loop set stays set: this used to overwrite it, so "--no-panel" on the
+	 * command line silently did nothing and every acceptance run drew the guest's own panel) */
+	no_panel = no_panel || getenv("GLWIRE_NO_PANEL") != NULL;
 	if (ram_path != NULL) {
 		map_ram(ram_path);
 	} else {

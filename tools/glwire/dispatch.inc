@@ -1,3 +1,7 @@
+#ifndef GLWIRE_AFTER_DRAW
+#define GLWIRE_AFTER_DRAW(g) ((void)(g))
+#endif
+
 switch (opcode) {
 	case 0: {
 		/* glAlphaFunc */
@@ -39,6 +43,7 @@ switch (opcode) {
 		/* glClear */
 		GLuint a0 = wire_get_u32(r);
 		glClear(a0);
+		g->drawn_framebuffer = g->bound_framebuffer;
 		break;
 	}
 	case 6: {
@@ -94,8 +99,10 @@ switch (opcode) {
 		GLenum a0 = wire_get_u32(r);
 		GLint a1 = wire_get_i32(r);
 		GLsizei a2 = wire_get_i32(r);
+		g->drawn_framebuffer = g->bound_framebuffer;
 		glDrawArrays(a0, a1, a2);
 		names_attribs_release(g);
+		GLWIRE_AFTER_DRAW(g);
 		break;
 	}
 	case 12: {
@@ -105,8 +112,10 @@ switch (opcode) {
 		GLenum a2 = wire_get_u32(r);
 		GLsizei n3 = 0;
 		void *p3 = wire_take(r, &n3);
+		g->drawn_framebuffer = g->bound_framebuffer;
 		glDrawElements(a0, a1, a2, p3);
 		names_attribs_release(g);
+		GLWIRE_AFTER_DRAW(g);
 		free(p3);
 		break;
 	}
@@ -465,7 +474,12 @@ switch (opcode) {
 		/* glBindFramebuffer */
 		GLenum a0 = wire_get_u32(r);
 		GLuint a1 = wire_get_u32(r);
-		glBindFramebuffer(a0, names_framebuffer(g, a1));
+		GLuint host = names_framebuffer(g, a1);
+
+		glBindFramebuffer(a0, host);
+		if (a0 != GL_READ_FRAMEBUFFER) {
+			g->bound_framebuffer = host;
+		}
 		break;
 	}
 	case 50: {
@@ -570,7 +584,7 @@ switch (opcode) {
 		GLsizei stride = wire_get_i32(r);
 		GLsizei bytes = 0;
 		void *data = wire_take(r, &bytes);
-		names_attrib_data(g, index, size, type, normalized, stride, data);
+		names_attrib_data(g, index, size, type, normalized, stride, bytes, data);
 		break;
 	}
 	default:
