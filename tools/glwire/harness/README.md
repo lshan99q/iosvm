@@ -73,3 +73,28 @@ GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.touch1 ./build.sh root.apfs          # 一次触
 探针 C 用的是 kernel 的 boot-arg，不用重编：`tlto_us=3840000` 把 ticket lock 的 deadline
 从 60e6 ticks（约 0.96 s）抬到 3.84 s；`PE_parse_boot_argn("tlto_us")` 在
 `ml_init_lock_timeout()` 里生效（`osfmk/arm64/machine_routines.c`）。
+
+## 第九阶段：三族 deadline 一起抬（启动验收的口径）
+
+第八阶段的 P0' 是 6/8：两次 panic 分别死在 `Spinlock`（`lock_panic_timeout`，251,658,240 ticks ≈4.03 s）
+和 `waitq`（240,000,000 ticks ≈3.84 s），而 `tlto_us` 只抬了 ticket lock 那一族。三族各有各的开关，
+一起抬才有「0 panic」：
+
+| 族 | boot arg | 谁来写 | 60 s 配方 |
+|---|---|---|---|
+| ticket lock | `tlto_us`（µs） | 内核已有（`ml_init_lock_timeout()`） | `tlto_us=60000000` |
+| 通用锁（waitq = 2×LockTimeOut） | `slto_us`（µs） | 内核已有 | `slto_us=30000000`（→ waitq 60 s） |
+| `Spinlock[` / mutex 自旋 | `lpto_us`（µs） | **第八阶段新加**（`ml_init_lock_timeout()` 里写 `lock_panic_timeout`） | `lpto_us=60000000` |
+
+```sh
+cd /home/lshan/DSH-desktop/iosvm/tools/glwire
+IMAGE=/tmp/root-fixed-net.apfs WANT=8 TRIES=12 TAG=m9p0 UI_GRACE=300 MAXSECS=1200 \
+  XCMD="slto_us=30000000 tlto_us=60000000 lpto_us=60000000" ./harness/boots.sh
+```
+
+**口径两条**（第九阶段踩过）：
+- `lpto_us` **没有收据行**：早期 `kprintf` 会在这个端口的 `STARTUP(TIMEOUTS)` 阶段把内核打死
+  （症状：`jumping to …` → `kernel returned … 31 bytes`、消息缓冲空）。改内核之后**必须自己跑一次
+  150 秒短启动**（有 ignition/launchd 行、没有 `kernel returned`）再交付；
+- `lpto_us` 是否生效：看代码（只剩 `os_atomic_store`）+ 启动能过入口；若又出现 `Spinlock` panic，
+  它的 `timeout:` 会是 **3,750,000,000 ticks**（60 s @62.5 MHz）而不是 251,658,240。
