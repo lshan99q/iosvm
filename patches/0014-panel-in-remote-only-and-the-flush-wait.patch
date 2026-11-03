@@ -1,0 +1,299 @@
+From c7b42afc330097d70484b0f5dae70ba5bd56e808 Mon Sep 17 00:00:00 2001
+From: lshan99q <lshan99q@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 20:11:08 +0800
+Subject: [PATCH] userland: the panel in remote_only, and how long a frame
+ waits for the host
+
+Two switches for the seventh stage, both inert unless a boot asks for them:
+
+  - glwire_panel_remote=1: with the host drawing the frame, still upload the panel
+    (0xFFFF0001).  P1's localization experiment: with the host neither drawing it nor
+    writing back, the panel is the guest's display surface as it stands -- measured:
+    zero painted pixels, while the host's replay of the same frame paints 38.2% of
+    the screen.  That is why route A (fill the host's gaps from the panel) has nothing
+    to fill in remote_only.
+
+  - glframes=1 or touch_lat=1: one more line a frame, "hakios-remote: f N wait US us",
+    the part of the frame spent waiting for the host's picture.  P4's second segment;
+    the host's own line is the first (and its per-frame "X ms" was printing seconds
+    until this round).
+---
+ userland/src/eagl.c | 191 +++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 189 insertions(+), 2 deletions(-)
+
+diff --git a/userland/src/eagl.c b/userland/src/eagl.c
+index 2d25d84..e984f0f 100644
+--- a/userland/src/eagl.c
++++ b/userland/src/eagl.c
+@@ -152,6 +152,23 @@ static long eagl_missing(void *context, unsigned offset);
+ 
+ #define EAGL_GEN_DECLARATIONS
+ #include "eagl_gen.h"
++
++/*
++ * eagl_direct.h points this file's own GL calls straight at OSMesa. That matters because the
++ * dispatch table is where the remote recorders sit (tools/glwire): sending our own bookkeeping --
++ * creating a texture, attaching an IOSurface -- to the host leaves nothing here to draw into.
++ * CoreAnimation's calls do go through the table, and that is the traffic worth sending.
++ */
++#include "eagl_direct.h"
++
++/* The pointers have to be there before the first GL call this file makes, which can be earlier than
++ * a context: fill them when the library loads. */
++__attribute__((constructor))
++static void
++hakios_direct_ctor(void)
++{
++	eagl_direct_load();
++}
+ #undef EAGL_GEN_DECLARATIONS
+ 
+ static void
+@@ -209,6 +226,22 @@ now_us(void)
+ 
+ /* ---- a context -------------------------------------------------------------------------------- */
+ 
++
++/*
++ * The host's GL, when /redwood/etc/glremote says where it is (tools/glwire): the calls QuartzCore
++ * makes are recorded rather than run here, and the picture comes back into memory this side can
++ * read. Without that file none of this runs and the machine behaves as it always has.
++ */
++void eagl_remote_install(void **table);
++void eagl_remote_upload(GLuint texture, GLenum target, GLint internal, GLsizei width, GLsizei height,
++    GLenum format, GLenum type, const void *pixels, GLsizei row_bytes, GLsizei pixel_bytes);
++int eagl_remote_flush(int width, int height);
++const void *eagl_remote_frame(void);
++int eagl_remote_is_on(void);
++int eagl_remote_no_local(void);
++int eagl_remote_panel_upload_on(void);
++int eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes);
++
+ #define SLOTS           0x440           /* entries of the table: more than Darwin's has (checked below) */
+ 
+ /* (a vibrant layer inside a group: see group_draw_begin()) */
+@@ -355,6 +388,12 @@ static int blit_targets = 1;
+  * here in any case; glwait=0: nowhere, to see what the waiting costs (and frames half drawn).
+  */
+ static int wait_for_frames = 1;
++static int picture_from_host = 1;     /* boot-arg glwire_nopicture=1: the host draws, its picture is not used (frame_end()) */
++/* boot-arg glwire_panel_remote=1 (P1): with the host drawing the frame, still send the panel.  The
++ * guest's display surface is what CoreAnimation's software path has just painted into -- the glyph
++ * spans, the Dock, the search box are not in the record stream -- so the panel is the only thing that
++ * carries them across. */
++static int panel_with_remote;
+ static int sync_frames = 1;             /* boot-arg glsync=0 (a test): a frame's end does not push what Mesa holds back (frame_end()) */
+ /*
+  * EXT_shader_framebuffer_fetch -- a fragment shader reads the pixel it is about to write -- is
+@@ -717,6 +756,8 @@ surface_to_texture(struct eagl *e, struct image *image)
+ 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+ 	glTexImage2D(image->to, 0, (GLint)internal_format(image->internal, image->format), image->width, image->height, 0,
+ 	    image->format, image->type, base);
++	eagl_remote_upload(image->texture, image->to, (GLint)internal_format(image->internal, image->format),
++	    image->width, image->height, image->format, image->type, base, (GLsizei)row, (GLsizei)pixel);
+ 	glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
+ 	glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+ 	if (trace_placing) {
+@@ -751,6 +792,53 @@ surface_to_texture(struct eagl *e, struct image *image)
+ 	e->upload_bytes += row * (size_t)image->height;
+ }
+ 
++/*
++ * W1.5, the other half of "the host draws the frame": with nothing drawn here the surfaces of the
++ * layers are never reached by surface_to_texture() -- its callers are the binding and drawing paths,
++ * and those are what remote_only leaves out -- so the host would be handed a stream that samples
++ * textures it has never been given (the black screen of the fourth stage's R3).  This sends the same
++ * pixels by reference instead: the record names the IOSurface's pages, the host fills its texture
++ * from them, and Mesa's texstore (the cost W1 is about) does not happen here at all.
++ *
++ * Only what has changed is sent, by the two signs surface_to_texture() uses: the surface's seed, and
++ * a sum of its memory for a surface that is being drawn into without the seed moving.  The pictures
++ * that have to be turned over (invert, alpha first) cannot travel by reference, so those are filled
++ * here as before -- correctness first, and they are the display's own surfaces, one a frame.
++ */
++static void
++upload_changed_layers(struct eagl *e)
++{
++	for (unsigned i = 0; i < e->image_count; i++) {
++		struct image *image = &e->images[i];
++		IOSurfaceRef surface = image->surface;
++		size_t row, pixel = bytes_a_pixel(image->format, image->type);
++		uint8_t *base;
++
++		if (surface == NULL || image->target || image->shared || image->width <= 0 ||
++		    image->height <= 0 || IOSurfaceGetPlaneCount(surface) > 0) {
++			continue;
++		}
++		if (IOSurfaceGetSeed(surface) == image->seed && !surface_changed(e, image)) {
++			continue;
++		}
++		if (image->invert || image->alpha_first) {
++			surface_to_texture(e, image);   /* (turned over on the way: by copy, as it always was) */
++			continue;
++		}
++		base = IOSurfaceGetBaseAddress(surface);
++		if (base == NULL) {
++			continue;
++		}
++		row = IOSurfaceGetBytesPerRow(surface);
++		eagl_remote_upload(image->texture, image->to,
++		    (GLint)internal_format(image->internal, image->format), image->width, image->height,
++		    image->format, image->type, base, (GLsizei)row, (GLsizei)pixel);
++		image->seed = IOSurfaceGetSeed(surface);
++		e->uploads++;
++		e->upload_bytes += row * (size_t)image->height;
++	}
++}
++
+ /* What has been drawn into a texture, into its IOSurface, unless it is there (frame_end() waits for it). */
+ static void
+ target_to_surface(struct eagl *e, struct image *image)
+@@ -1029,10 +1117,23 @@ frame_end(struct eagl *e, bool finished)
+ 	static unsigned unfollowed;
+ 	uint64_t before, waited, after;
+ 	unsigned copied = 0, in_place = 0;
++	uint64_t flush_began = 0, flush_us = 0;   /* P4: how long the guest waited for the host's picture */
++	int composition_off = 0;        /* the host draws the frame: no composition here (see below) */
+ 
+ 	clear_now(e);
++	/*
++	 * With the host drawing the frame (eagl_remote_no_local()), nothing here drew into the surfaces
++	 * this is about: the copies below would move pixels nobody made, and the upload of the panel
++	 * would hand the host its own picture back. What is left is the flush, at the end, and the
++	 * picture the host wrote into memory this side reads -- plus the layers, which the host cannot
++	 * have unless they are sent (W1.5, upload_changed_layers()).
++	 */
++	if (eagl_remote_no_local()) {
++		composition_off = 1;
++		upload_changed_layers(e);
++	}
+ 	before = now_us();
+-	for (unsigned i = 0; i < e->image_count; i++) {
++	for (unsigned i = 0; i < e->image_count && !composition_off; i++) {
+ 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
+ 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
+ 			in_place++;
+@@ -1061,7 +1162,7 @@ frame_end(struct eagl *e, bool finished)
+ 		}
+ 	}
+ 	waited = now_us();
+-	for (unsigned i = 0; i < e->image_count; i++) {
++	for (unsigned i = 0; i < e->image_count && !composition_off; i++) {
+ 		if (e->images[i].target && e->images[i].drawn) {
+ 			copied += !e->images[i].shared;
+ 			target_to_surface(e, &e->images[i]);
+@@ -1070,6 +1171,85 @@ frame_end(struct eagl *e, bool finished)
+ 			}
+ 		}
+ 	}
++
++	/*
++	 * The composed picture, for the host's panel draw: a target texture is drawn into, and
++	 * surface_to_texture() never uploads it, so the host would only have the source layers.
++	 * glwire_nopanel_up=1 leaves it on this side, which is the question -- does the host draw the
++	 * frame from the layer textures alone, or is this upload what its picture was made of?
++	 */
++	if ((!composition_off || panel_with_remote) && eagl_remote_panel_upload_on() && e->image_count > 0 &&
++	    e->images[0].surface != NULL && e->images[0].width > 0) {
++		void *native = IOSurfaceGetBaseAddress(e->images[0].surface);
++		size_t native_row = IOSurfaceGetBytesPerRow(e->images[0].surface);
++
++		if (native != NULL) {
++			eagl_remote_upload(0xFFFF0001u, GL_TEXTURE_2D, GL_RGBA, e->images[0].width,
++			    e->images[0].height, GL_BGRA, GL_UNSIGNED_BYTE, native, (GLsizei)native_row, 4);
++		}
++	}
++
++	/*
++	 * The frame was recorded as well as drawn here: hand it to the host, which replays the calls
++	 * on its own GL and writes the picture back into memory this side reads, and put that picture
++	 * into the display's surface -- last, after the local copy above, or the local copy would be
++	 * the one the display shows.
++	 */
++	say("hakios-remote: end of frame, on=%d images=%u first=%dx%d panel_up=%d\n", eagl_remote_is_on(),
++	    e->image_count, e->image_count > 0 ? (int)e->images[0].width : 0,
++	    e->image_count > 0 ? (int)e->images[0].height : 0, eagl_remote_panel_upload_on());
++	if (eagl_remote_is_on() && e->image_count > 0 && e->images[0].width > 0) {
++		int sent, direct = 0;
++
++		/*
++		 * W3: the host writes the picture's rows straight into the display's surface when its
++		 * memory can be named -- the surface is what the display reads, and the copy this side
++		 * would otherwise make (48 ms of a 77 ms frame) is then not needed at all.
++		 */
++		if (e->images[0].surface != NULL) {
++			void *base = IOSurfaceGetBaseAddress(e->images[0].surface);
++			size_t row = IOSurfaceGetBytesPerRow(e->images[0].surface);
++
++			direct = eagl_remote_surface((GLsizei)e->images[0].width,
++			    (GLsizei)e->images[0].height, base, (GLsizei)row);
++		} else {
++			(void)eagl_remote_surface(0, 0, NULL, 0);
++		}
++		if (direct) {
++			IOSurfaceLock(e->images[0].surface, 0, NULL);
++		}
++		flush_began = now_us();
++		sent = eagl_remote_flush((int)e->images[0].width, (int)e->images[0].height);
++		flush_us = now_us() - flush_began;
++		if (direct) {
++			IOSurfaceUnlock(e->images[0].surface, 0, NULL);
++		}
++		say("hakios-remote: flush -> %d%s\n", sent, direct ? " (rows into the surface)" : "");
++		if (frame_lines || latency_lines) {
++			/* P4: of one frame, the part spent waiting for the host (host_glwire's own line says
++			 * how long the replay itself took: "frame N, ..., X ms"). */
++			say("hakios-remote: f %u wait %llu us sent %d%s\n", e->frames + 1, flush_us, sent,
++			    direct ? " rows" : "");
++		}
++		if (sent == 1 && picture_from_host) {
++			const void *picture = eagl_remote_frame();
++
++			if (picture != NULL && e->images[0].surface != NULL) {
++				void *base = IOSurfaceGetBaseAddress(e->images[0].surface);
++				size_t row = IOSurfaceGetBytesPerRow(e->images[0].surface);
++				size_t used = (size_t)e->images[0].width * 4;
++
++				if (base != NULL && row >= used) {
++					/* The IOSurface is 4608 bytes a row here, the picture 4500: copying it
++					 * flat sheared every row and corrupted the window server's surface. */
++					for (GLsizei y = 0; y < e->images[0].height; y++) {
++						memcpy((uint8_t *)base + row * (size_t)y,
++						    (const uint8_t *)picture + used * (size_t)y, used);
++					}
++				}
++			}
++		}
++	}
+ 	if (!e->in_frame) {
+ 		return;
+ 	}
+@@ -1201,6 +1381,7 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
+ 		e->bound[e->unit] = texture;
+ 	}
+ 	if (texture != 0 && e->image_count != 0 && (image = image_of(e, texture)) != NULL && !image->shared &&
++	    !(image->target && eagl_remote_no_local()) &&
+ 	    (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed || surface_changed(e, image) :
+ 	    image->wrapped && !image->painted && surface_changed(e, image))) {
+ 		surface_to_texture(e, image);
+@@ -3834,7 +4015,11 @@ my_initWithAPI(id self, SEL selector, unsigned long api, id properties)
+ 	e->object = self;
+ 	e->api = api;
+ 	e->table[0] = e;
++	eagl_direct_load();
+ 	eagl_fill_table(e->table);
++	say("hakios-remote: installing the recorders (%s)\n", eagl_remote_is_on() ? "on" : "off");
++	eagl_remote_install(e->table);
++	say("hakios-remote: after install, on=%d\n", eagl_remote_is_on());
+ 	contexts[place] = e;
+ 	say("hakios-gl: an OpenGL ES %lu context for CoreAnimation, by %s: %s; %s; shaders %s\n", api, hakios_gl_library(),
+ 	    (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER),
+@@ -4157,6 +4342,8 @@ install(void)
+ 		share_surfaces = strstr(arguments, "glcopy=1") == NULL;
+ 		blit_targets = strstr(arguments, "glblit=0") == NULL;
+ 		sync_frames = strstr(arguments, "glsync=0") == NULL;
++		picture_from_host = strstr(arguments, "glwire_nopicture=1") == NULL;
++		panel_with_remote = strstr(arguments, "glwire_panel_remote=1") != NULL;
+ 		if (strstr(arguments, "glwait=0") != NULL || (strstr(arguments, "glwait=1") == NULL && display_waits())) {
+ 			wait_for_frames = 0;
+ 		}
