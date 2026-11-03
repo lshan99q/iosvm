@@ -39,10 +39,13 @@ def load_pair(prefix):
     picture = np.fromfile(picture_path, dtype=np.uint8)
     if panel.size != width * height * 4 or picture.size != width * height * 4:
         sys.exit(f"diffdump: {panel.size}/{picture.size} bytes, expected {width * height * 4}")
-    # both as height x width x RGB, the way the screen shows them
+    # both as height x width x RGB, the way the screen shows them.  Which way the picture's rows run
+    # is not a constant of the wire: the in-place/panel path writes them bottom first (glReadPixels),
+    # a --no-panel dump of this port comes out top first (measured 2026-11-03: the same frame scores
+    # 31.26% within 8 flipped and 85.35% unflipped).  Both are returned and main() picks the better
+    # one, printing which.
     p = panel.reshape(height, width, 4)[:, :, :3].astype(np.int16)
     q = picture.reshape(height, width, 4)[:, :, [2, 1, 0]].astype(np.int16)
-    q = q[::-1]                                    # picture rows come bottom first
     return panel_path, picture_path, width, height, p, q
 
 
@@ -80,6 +83,13 @@ def main():
         outdir = args[args.index("-o") + 1]
         os.makedirs(outdir, exist_ok=True)
     panel_path, picture_path, width, height, p, q = load_pair(prefix)
+    orientation = "raw rows"
+    if "--orientation" not in args or args[args.index("--orientation") + 1] != "raw":
+        upside = q[::-1]
+        score = lambda a, b: int((np.abs(a - b).max(axis=2) <= (tolerance if tolerance > 0 else 12)).sum())
+        if score(p, upside) > score(p, q):
+            q = upside
+            orientation = "flipped rows (the dump runs the other way)"
     p_sum, q_sum = p.sum(axis=2), q.sum(axis=2)
     missing = (p_sum > 0) & (q_sum == 0)            # the panel has it, the record stream did not
     extra = (q_sum > 0) & (p_sum == 0)
@@ -94,6 +104,7 @@ def main():
           f"({100.0 * missing.sum() / total:.2f}%), box {bbox(missing)}")
     print(f"  extra   (picture paints, panel black):  {int(extra.sum())} "
           f"({100.0 * extra.sum() / total:.2f}%), box {bbox(extra)}")
+    print(f"  picture rows compared as: {orientation}")
     print(f"  differing by more than 12/765: {int(different.sum())} "
           f"({100.0 * different.sum() / total:.2f}%), box {bbox(different)}")
     if tolerance > 0:
