@@ -286,6 +286,26 @@ eagl_remote_no_local(void)
 	return remote_only;
 }
 
+/*
+ * For eagl.c: whether the composed display surface goes on the wire as the panel (0xFFFF0001), which
+ * the host draws on screen and hashes against its own picture. glwire_nopanel_up=1 leaves it here and
+ * changes nothing else: what the host then has of the frame is the CoreAnimation calls and the layer
+ * textures alone, so whether its picture still is the desk answers "who draws the picture".
+ * A boot-arg, so one image answers both halves; on unless the boot asks otherwise.
+ */
+int
+eagl_remote_panel_upload_on(void)
+{
+	static int on = -1;
+
+	if (on < 0) {
+		on = remote_boot_arg("glwire_nopanel_up=1") == NULL;
+		remote_say("hakios-remote: the panel %s\n",
+		    on ? "goes on the wire (0xFFFF0001)" : "stays here (glwire_nopanel_up=1)");
+	}
+	return on;
+}
+
 size_t
 eagl_remote_pending(void)
 {

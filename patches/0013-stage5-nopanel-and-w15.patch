@@ -1,0 +1,250 @@
+# 0013: the panel upload switch, and W1.5 -- the layer uploads the host alone needs
+#
+# The fifth stage asked one question first: is the picture of a --no-panel boot the host's own replay,
+# or is it the composed display surface (0xFFFF0001) the guest uploads every frame?  A boot-arg,
+# glwire_nopanel_up=1, stops that upload and changes nothing else; the boot that answered it is in
+# docs/gpu-acceleration-stage5-results.md section 1 (a desktop, 38.1% not black, with no panel
+# upload in the whole run).
+#
+# The rest is W1.5, the other half of "the host draws the frame": remote_only stops running the
+# recorded calls here, which also stopped the layer textures from ever reaching the host (the fourth
+# stage's R3: 0 image refs, a black screen).  upload_changed_layers() sends the non-target IOSurfaces
+# by reference instead -- no Mesa texstore here -- and my_glBindTexture() no longer refills a target
+# image from the guest's stale surface, which would paint over what the host just drew into it.
+#
+# What it did not fix, measured: the labels under the icons, the dock and the search field are not in
+# the record at all (CoreAnimation's software path draws them), so a remote_only screen is 245 KB
+# instead of 448 KB.  That boundary is the next stage's first decision.
+#
+# Apply from the root of the working tree:
+#   patch -p1 < patches/0013-stage5-nopanel-and-w15.patch
+--- a/userland/src/eagl.c
++++ b/userland/src/eagl.c
+@@ -239,6 +239,7 @@
+ const void *eagl_remote_frame(void);
+ int eagl_remote_is_on(void);
+ int eagl_remote_no_local(void);
++int eagl_remote_panel_upload_on(void);
+ int eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes);
+ 
+ #define SLOTS           0x440           /* entries of the table: more than Darwin's has (checked below) */
+@@ -786,6 +787,53 @@
+ 	e->upload_bytes += row * (size_t)image->height;
+ }
+ 
++/*
++ * W1.5, the other half of "the host draws the frame": with nothing drawn here the surfaces of the
++ * layers are never reached by surface_to_texture() -- its callers are the binding and drawing paths,
++ * and those are what remote_only leaves out -- so the host would be handed a stream that samples
++ * textures it has never been given (the black screen of the fourth stage's R3).  This sends the same
++ * pixels by reference instead: the record names the IOSurface's pages, the host fills its texture
++ * from them, and Mesa's texstore (the cost W1 is about) does not happen here at all.
++ *
++ * Only what has changed is sent, by the two signs surface_to_texture() uses: the surface's seed, and
++ * a sum of its memory for a surface that is being drawn into without the seed moving.  The pictures
++ * that have to be turned over (invert, alpha first) cannot travel by reference, so those are filled
++ * here as before -- correctness first, and they are the display's own surfaces, one a frame.
++ */
++static void
++upload_changed_layers(struct eagl *e)
++{
++	for (unsigned i = 0; i < e->image_count; i++) {
++		struct image *image = &e->images[i];
++		IOSurfaceRef surface = image->surface;
++		size_t row, pixel = bytes_a_pixel(image->format, image->type);
++		uint8_t *base;
++
++		if (surface == NULL || image->target || image->shared || image->width <= 0 ||
++		    image->height <= 0 || IOSurfaceGetPlaneCount(surface) > 0) {
++			continue;
++		}
++		if (IOSurfaceGetSeed(surface) == image->seed && !surface_changed(e, image)) {
++			continue;
++		}
++		if (image->invert || image->alpha_first) {
++			surface_to_texture(e, image);   /* (turned over on the way: by copy, as it always was) */
++			continue;
++		}
++		base = IOSurfaceGetBaseAddress(surface);
++		if (base == NULL) {
++			continue;
++		}
++		row = IOSurfaceGetBytesPerRow(surface);
++		eagl_remote_upload(image->texture, image->to,
++		    (GLint)internal_format(image->internal, image->format), image->width, image->height,
++		    image->format, image->type, base, (GLsizei)row, (GLsizei)pixel);
++		image->seed = IOSurfaceGetSeed(surface);
++		e->uploads++;
++		e->upload_bytes += row * (size_t)image->height;
++	}
++}
++
+ /* What has been drawn into a texture, into its IOSurface, unless it is there (frame_end() waits for it). */
+ static void
+ target_to_surface(struct eagl *e, struct image *image)
+@@ -1071,10 +1119,12 @@
+ 	 * With the host drawing the frame (eagl_remote_no_local()), nothing here drew into the surfaces
+ 	 * this is about: the copies below would move pixels nobody made, and the upload of the panel
+ 	 * would hand the host its own picture back. What is left is the flush, at the end, and the
+-	 * picture the host wrote into memory this side reads.
++	 * picture the host wrote into memory this side reads -- plus the layers, which the host cannot
++	 * have unless they are sent (W1.5, upload_changed_layers()).
+ 	 */
+ 	if (eagl_remote_no_local()) {
+ 		composition_off = 1;
++		upload_changed_layers(e);
+ 	}
+ 	before = now_us();
+ 	for (unsigned i = 0; i < e->image_count && !composition_off; i++) {
+@@ -1119,9 +1169,11 @@
+ 	/*
+ 	 * The composed picture, for the host's panel draw: a target texture is drawn into, and
+ 	 * surface_to_texture() never uploads it, so the host would only have the source layers.
++	 * glwire_nopanel_up=1 leaves it on this side, which is the question -- does the host draw the
++	 * frame from the layer textures alone, or is this upload what its picture was made of?
+ 	 */
+-	if (!composition_off && e->image_count > 0 && e->images[0].surface != NULL &&
+-	    e->images[0].width > 0) {
++	if (!composition_off && eagl_remote_panel_upload_on() && e->image_count > 0 &&
++	    e->images[0].surface != NULL && e->images[0].width > 0) {
+ 		void *native = IOSurfaceGetBaseAddress(e->images[0].surface);
+ 		size_t native_row = IOSurfaceGetBytesPerRow(e->images[0].surface);
+ 
+@@ -1137,9 +1189,9 @@
+ 	 * into the display's surface -- last, after the local copy above, or the local copy would be
+ 	 * the one the display shows.
+ 	 */
+-	say("hakios-remote: end of frame, on=%d images=%u first=%dx%d\n", eagl_remote_is_on(),
++	say("hakios-remote: end of frame, on=%d images=%u first=%dx%d panel_up=%d\n", eagl_remote_is_on(),
+ 	    e->image_count, e->image_count > 0 ? (int)e->images[0].width : 0,
+-	    e->image_count > 0 ? (int)e->images[0].height : 0);
++	    e->image_count > 0 ? (int)e->images[0].height : 0, eagl_remote_panel_upload_on());
+ 	if (eagl_remote_is_on() && e->image_count > 0 && e->images[0].width > 0) {
+ 		int sent, direct = 0;
+ 
+@@ -1315,7 +1367,7 @@
+ 		e->bound[e->unit] = texture;
+ 	}
+ 	if (texture != 0 && e->image_count != 0 && (image = image_of(e, texture)) != NULL && !image->shared &&
+-
++	    !(image->target && eagl_remote_no_local()) &&
+ 	    (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed || surface_changed(e, image) :
+ 	    image->wrapped && !image->painted && surface_changed(e, image))) {
+ 		surface_to_texture(e, image);
+--- a/userland/src/eagl_remote.c
++++ b/userland/src/eagl_remote.c
+@@ -286,6 +286,26 @@
+ 	return remote_only;
+ }
+ 
++/*
++ * For eagl.c: whether the composed display surface goes on the wire as the panel (0xFFFF0001), which
++ * the host draws on screen and hashes against its own picture. glwire_nopanel_up=1 leaves it here and
++ * changes nothing else: what the host then has of the frame is the CoreAnimation calls and the layer
++ * textures alone, so whether its picture still is the desk answers "who draws the picture".
++ * A boot-arg, so one image answers both halves; on unless the boot asks otherwise.
++ */
++int
++eagl_remote_panel_upload_on(void)
++{
++	static int on = -1;
++
++	if (on < 0) {
++		on = remote_boot_arg("glwire_nopanel_up=1") == NULL;
++		remote_say("hakios-remote: the panel %s\n",
++		    on ? "goes on the wire (0xFFFF0001)" : "stays here (glwire_nopanel_up=1)");
++	}
++	return on;
++}
++
+ size_t
+ eagl_remote_pending(void)
+ {
+--- a/userland/src/rwtouch.c
++++ b/userland/src/rwtouch.c
+@@ -151,8 +151,23 @@
+ int
+ main(int argc, char **argv)
+ {
+-	/* a gesture is a matter of timing: do not let the rest of a busy system stretch it */
+-	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++	/*
++	 * A gesture is a matter of timing: do not let the rest of a busy system stretch it. `noqos` as
++	 * any argument leaves the thread's class alone -- the fifth stage's S4 takes that variable out
++	 * when it asks whether the interactive class is what makes a driven boot panic.
++	 */
++	int qos = 1;
++
++	for (int i = 1; i < argc; i++) {
++		if (strcmp(argv[i], "noqos") == 0) {
++			qos = 0;
++		}
++	}
++	if (qos) {
++		pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++	} else {
++		fprintf(stderr, "rwtouch: noqos: the thread keeps its class\n");
++	}
+ 	mach_timebase_info(&timebase);
+ 	device = open(HAKIOS_TOUCH_DEVICE, O_RDWR);
+ 	if (device < 0) {
+@@ -162,6 +177,9 @@
+ 	for (int i = 1; i < argc; i++) {
+ 		const char *step = argv[i];
+ 
++		if (strcmp(step, "noqos") == 0) {
++			continue;       /* (read before the device was opened: nothing to do here) */
++		}
+ 		int left = argc - i - 1;
+ 
+ 		if (strcmp(step, "wait") == 0 && left >= 1) {
+--- /dev/null
++++ b/userland/rc.touch1
+@@ -0,0 +1,22 @@
++# rc.touch1 -- one touch process, and nothing else of this round's: the fifth stage's S4.
++#
++# rc.drive (six rwtouch processes, the first of them at 120/150/480 s) panicked four cold boots out
++# of four in the fourth stage while the same kernel without a touch process passed five of five. So
++# the variables come out one at a time: this file has ONE rwtouch process, whose first action is at
++# 600 s (a boot's first frame is five to nine minutes after the kernel starts), and the same driven
++# gesture S5 needs -- the Settings icon, then twenty seconds of its list -- so that a boot that
++# passes also gives the measurement window.  rc.touch2 is this one with `noqos` (the interactive
++# thread class taken out).
++#
++#   /tmp/<label>.log        rwtouch: mark scroll-start / scroll-end are the window's edges
++#   tools/glwire/harness/fps.py reads them, and the driver's own "MiniIOMobileFramebuffer: N frames
++#   in M ms" lines inside.
++
++/redwood/bin/vtop_test &
++
++/redwood/bin/netcfg en0 10.0.2.15 10.0.2.2 &
++
++/redwood/bin/rwtouch wait 600 mark touch-start tap 0.656 0.729 wait 90 mark scroll-start zigzag 0.5 0.74 0.26 2000 10 mark scroll-end &
++
++# and then hand process 1 to the real launchd, as rc.launchd does
++exec /sbin/launchd.darwin
+--- /dev/null
++++ b/userland/rc.touch2
+@@ -0,0 +1,22 @@
++# rc.touch1 -- one touch process, and nothing else of this round's: the fifth stage's S4.
++#
++# rc.drive (six rwtouch processes, the first of them at 120/150/480 s) panicked four cold boots out
++# of four in the fourth stage while the same kernel without a touch process passed five of five. So
++# the variables come out one at a time: this file has ONE rwtouch process, whose first action is at
++# 600 s (a boot's first frame is five to nine minutes after the kernel starts), and the same driven
++# gesture S5 needs -- the Settings icon, then twenty seconds of its list -- so that a boot that
++# passes also gives the measurement window.  rc.touch2 is this one with `noqos` (the interactive
++# thread class taken out).
++#
++#   /tmp/<label>.log        rwtouch: mark scroll-start / scroll-end are the window's edges
++#   tools/glwire/harness/fps.py reads them, and the driver's own "MiniIOMobileFramebuffer: N frames
++#   in M ms" lines inside.
++
++/redwood/bin/vtop_test &
++
++/redwood/bin/netcfg en0 10.0.2.15 10.0.2.2 &
++
++/redwood/bin/rwtouch noqos wait 600 mark touch-start tap 0.656 0.729 wait 90 mark scroll-start zigzag 0.5 0.74 0.26 2000 10 mark scroll-end &
++
++# and then hand process 1 to the real launchd, as rc.launchd does
++exec /sbin/launchd.darwin

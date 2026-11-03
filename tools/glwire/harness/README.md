@@ -10,7 +10,8 @@
 | `cold-boots.sh` | 连跑冷启动直到 N 次通过 R1 的判据（`IMAGE=…` 指定镜像） |
 | `decrec.py FILE.records [-v]` | 把 `GLWIRE_SAVE_RECORDS` 存下来的记录流逐条解码（opcode 是 `spec.def` 的顺序） |
 | `bgra2png.py PREFIX` | 把 `GLWIRE_DUMP` 的 `-picture-WxH.bgra` / `-panel-WxH.rgba` 转成 PNG（按屏幕方向）并统计非黑像素与颜色数 |
-| `fps.py GUEST.LOG [HOST.LOG]` | 读 `rwtouch: mark` 划出的窗口，算窗口内驱动自报的稳态帧率（R5 用的就是这一列） |
+| `fps.py GUEST.LOG [HOST.LOG]` | 读 `rwtouch: mark` 划出的窗口，算窗口内驱动自报的稳态帧率（R5 用的就是这一列）。**要日志里有内核时间戳**；一处都没有（第五阶段的日志就是这样）时窗口会是空的 |
+| `window_fps.py GUEST.LOG [HOST.LOG]` | 同一个窗口，**按两个 mark 在文件里的位置取**，不需要时间戳：把窗口内的 `MiniIOMobileFramebuffer: N frames in M ms` 加起来。第五阶段的 6.74 fps 是它算的 |
 
 用过的两条命令：
 
@@ -21,12 +22,22 @@ IMAGE=/tmp/root-fixed-net.apfs WANT=4 ./cold-boots.sh
 # R2 的 --no-panel：宿主只重放录制流，面板只用于哈希
 MINFRAMES=120 MINSHOT=1 HOST_ENV="GLWIRE_DUMP=/tmp/r2/f GLWIRE_DUMP_FROM=80" \
   ./boot-measure.sh r2 /tmp/root-fixed-net.apfs 1000 --no-panel
+
+# S5 的那一格（20 s 滚动的驱动稳态）：带着 rc.touch1 的镜像，**关掉提前收工**，
+# 否则它在 200 帧 + 300 KB 就 acceptance 收工，根本到不了 600 s 的触摸
+MINFRAMES=999999 MINSHOT=999999999 ./boot-measure.sh w2 /tmp/root-touch-w15.apfs 800
+python3 harness/window_fps.py /tmp/w2.log /tmp/w2-host.log     # -> 290 frames in 43031 ms = 6.74 fps
 ```
 
-镜像用 `userland/build.sh` 出（约 70 s）：
+镜像用 `userland/build.sh` 出（约 25–70 s）：
 
 ```sh
 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs            # W1+W2：客户机不画
 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop GLWIRE_LOCAL=1 ./build.sh root.apfs  # 客户机照旧本地画
 GL=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs                       # 纯本地基线（不装记录器）
+GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.touch1 ./build.sh root.apfs          # 一次触摸（S4/S5 用）
 ```
+
+`glwire_local=0`（`XCMD=…`）能在同一个镜像上把「客户机照旧本地画」关掉，等于 W1.5 那一列，
+不用重编。
+
