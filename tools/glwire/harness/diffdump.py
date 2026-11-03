@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What the host's replay misses, pixel by pixel: the guest's panel against the host's picture.
 
-    diffdump.py PREFIX [-o OUTDIR]
+    diffdump.py PREFIX [-o OUTDIR] [--tolerance N]
 
 Reads the two files GLWIRE_DUMP=<PREFIX> wrote for one frame -- <PREFIX>-panel-WxH.rgba (the guest's
 own pixels, RGBA, top row first) and <PREFIX>-picture-WxH.bgra (what the host drew from the record
@@ -15,6 +15,10 @@ stream, BGRA, rows from the bottom) -- and reports, as one screen:
 
 P1 asks the question this answers: the picture is what the host can draw without the guest, so what is
 missing is exactly what the record stream does not carry.
+
+--tolerance N is what P2' asks instead: two renderers never agree pixel for pixel, so "the same frame"
+has to be a tolerant question.  It prints how many pixels differ by at most N in every channel, and the
+verdict at the plan's line (>= 95% of the pixels within 8).
 """
 import glob
 import os
@@ -69,6 +73,9 @@ def main():
         sys.exit(__doc__)
     prefix = args[0]
     outdir = None
+    tolerance = 0
+    if "--tolerance" in args:
+        tolerance = int(args[args.index("--tolerance") + 1])
     if "-o" in args:
         outdir = args[args.index("-o") + 1]
         os.makedirs(outdir, exist_ok=True)
@@ -89,6 +96,12 @@ def main():
           f"({100.0 * extra.sum() / total:.2f}%), box {bbox(extra)}")
     print(f"  differing by more than 12/765: {int(different.sum())} "
           f"({100.0 * different.sum() / total:.2f}%), box {bbox(different)}")
+    if tolerance > 0:
+        channel = np.abs(p - q).max(axis=2)
+        within = (channel <= tolerance).sum()
+        share = 100.0 * within / total
+        print(f"  within {tolerance} in every channel: {int(within)}/{total} ({share:.2f}%) -> "
+              f"{'SAME FRAME' if share >= 95.0 else 'NOT the same frame'} (the line is 95%)")
     print("  missing, on a 12 x 26 grid of the screen:")
     for line in grid(missing):
         print("   |" + line + "|")
