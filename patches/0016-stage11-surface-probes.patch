@@ -1,0 +1,325 @@
+--- eleventh stage: the display surface's own fingerprint, and the frame's second surface
+--- guest side: userland/src/eagl.c (hakios-xnu-kernel, against its 15cdcbd; the glslots hunks in
+--- it are the eighth stage's P4', kept because they are part of the same working tree).
+--- The wire's other half is the mirrored tools/glwire/eagl_remote.c (second surface block,
+--- request line grown from six numbers to eight).
+
+diff --git a/userland/src/eagl.c b/userland/src/eagl.c
+index e984f0f..58aaed4 100644
+--- a/userland/src/eagl.c
++++ b/userland/src/eagl.c
+@@ -56,7 +56,9 @@
+  * fetch_offered), glgroup=0 leaves vibrant layers inside groups as they were (see group_draw_begin()), glprecision=0 leaves the shaders' "lowp" and "mediump" as they are (see all_highp), glenv=NAME=VALUE puts that into the environment for the library to find
+  * (its own switches: FD_MESA_DEBUG=sysmem, say), vblur=0 blurs nothing whose radius varies and
+  * vblur=2 paints such blurs by their masks instead (see vblur_on), glframes=1 writes a line for
+- * every frame (see frame_end()).
++ * every frame (see frame_end()), glslots=1 says which entries of the table that can put pixels down
++ * and that the wire does not carry are called, and how often -- the glyphs are drawn through one of
++ * them, or through none of them at all (see watched_slots).
+  */
+ #include <CoreFoundation/CoreFoundation.h>
+ #include <IOKit/IOKitLib.h>
+@@ -241,6 +243,7 @@ int eagl_remote_is_on(void);
+ int eagl_remote_no_local(void);
+ int eagl_remote_panel_upload_on(void);
+ int eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes);
++int eagl_remote_surface2(GLsizei width, GLsizei height, void *base, GLsizei row_bytes);
+ 
+ #define SLOTS           0x440           /* entries of the table: more than Darwin's has (checked below) */
+ 
+@@ -367,6 +370,44 @@ static struct group_texture *group_of(struct eagl *e, GLuint texture);
+ static __thread struct eagl *current;
+ static struct eagl *contexts[8];
+ static uint32_t slot_calls[SLOTS];
++/*
++ * P4' (eighth stage): the entries of the table that can put pixels down and that the wire does not
++ * carry. spec.def holds the 62 calls CoreAnimation is seen to make, and a frame's record is nine
++ * triangles through glDrawArrays/glDrawElements; the glyphs -- the text, the Dock, the search field
++ * -- are in none of them, so with the host drawing the frame (remote_only) the picture comes back
++ * without them. If they are drawn here at all it is through one of the entries below, none of which
++ * has a recorder in tools/glwire/spec.def and so none has a row in the record stream.
++ *
++ * Boot-arg glslots=1: the first call of one of them says so, and every two hundredth frame says how
++ * many each has had (the counts eagl_enter() keeps for the whole table). Without it nothing here
++ * runs. With it the answer to "which entry draws the glyph" is a log line -- or the absence of one,
++ * which is "not an entry of the EAGL table at all" (see watched_slots_report()).
++ *
++ * The names are the table's own (src/eagl_slots.txt), Darwin's spelling of the entry: the two
++ * instanced draws are also known as glDrawArraysInstanced and glDrawElementsInstanced, and
++ * glVertexAttribDivisor is not a draw -- it is what an instanced draw needs set up first, so a call
++ * to it is half the evidence. glMultiDrawArrays, glMultiDrawElements, glDrawArraysIndirect and
++ * glDrawElementsIndirect are not entries of Darwin's table at all (no offset in src/eagl_slots.txt),
++ * so no call through OpenGLES.framework can reach them and they cannot be the answer.
++ */
++static int slots_watched;                       /* boot-arg glslots=1 */
++static const struct watched_slot {
++	const char *name;
++	unsigned offset;
++} watched_slots[] = {
++	{ "glCopyTexImage2D", 0x01b8 },         /* the framebuffer copied into a new texture */
++	{ "glDrawRangeElements", 0x0cb0 },      /* an indexed draw, the range spelled out */
++	{ "glBlitFramebuffer", 0x17a0 },        /* pixels moved from one framebuffer to another */
++	{ "glVertexAttribDivisor", 0x17d0 },    /* instancing set up (not a draw; see above) */
++	{ "glDrawArraysInstanced", 0x17d8 },
++	{ "glDrawElementsInstanced", 0x17e0 },
++	{ "glClearBufferiv", 0x1838 },
++	{ "glClearBufferuiv", 0x1840 },
++	{ "glClearBufferfv", 0x1848 },
++	{ "glClearBufferfi", 0x1850 },
++	{ "glInvalidateFramebuffer", 0x2000 },  /* pixels thrown away rather than drawn */
++	{ "glInvalidateSubFramebuffer", 0x2028 },
++};
+ static int check_errors = 1;            /* ask the library for an error after every call (the first frames) */
+ static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
+ /*
+@@ -428,6 +469,15 @@ eagl_enter(struct eagl *e, unsigned offset)
+ 		current = e;
+ 	}
+ 	slot_calls[offset / 8]++;
++	if (slots_watched && slot_calls[offset / 8] == 1) {
++		/* (glslots=1) the first call of an entry the wire does not carry: P4' is looking for one */
++		for (unsigned i = 0; i < sizeof(watched_slots) / sizeof(watched_slots[0]); i++) {
++			if (watched_slots[i].offset == offset) {
++				say("hakios-gl: slot %s calls %u\n", watched_slots[i].name, slot_calls[offset / 8]);
++				break;
++			}
++		}
++	}
+ 	e->calls++;
+ 	if (slow_calls_us != 0) {
+ 		call_began_us = now_us();
+@@ -526,6 +576,36 @@ note_format(const char *how, GLenum internal, GLenum format, GLenum type, GLsize
+ 	}
+ }
+ 
++/* (glslots=1) One line: the entries the wire does not carry and how many calls each has had.
++ * Printed at frame 30 and every two hundredth frame from there (frame_end()) -- a boot that ends
++ * before frame 200 still says what has been called. */
++static void
++watched_slots_report(struct eagl *e)
++{
++	char line[512];
++	int at = snprintf(line, sizeof(line), "hakios-gl: slots after %u frames:", e->frames);
++	unsigned listed = 0;
++
++	for (unsigned i = 0; i < sizeof(watched_slots) / sizeof(watched_slots[0]); i++) {
++		unsigned calls = slot_calls[watched_slots[i].offset / 8];
++
++		if (calls == 0) {
++			continue;
++		}
++		if (at < (int)sizeof(line)) {
++			at += snprintf(line + at, sizeof(line) - (size_t)at, "%s%s %u", listed == 0 ? " " : ", ",
++			    watched_slots[i].name, calls);
++		}
++		listed++;
++	}
++	if (listed == 0) {
++		say("hakios-gl: slots after %u frames: none of the %zu entries the wire does not carry was called\n", e->frames,
++		    sizeof(watched_slots) / sizeof(watched_slots[0]));
++	} else {
++		say("%s\n", line);
++	}
++}
++
+ static void
+ summary(struct eagl *e)
+ {
+@@ -1111,6 +1191,68 @@ frame_begin(struct eagl *e)
+  * library has been waited for already.
+  */
+ static void frame_functions(struct eagl *e);
++
++/*
++ * Stage 11, P1'''': the display surface's own fingerprint. Five rows, five pixels a row, hashed
++ * exactly as host_glwire hashes the picture it drew (tools/glwire/host_glwire.c, sample_row_hash),
++ * so the guest's log and the host's can be compared number for number: a surface that holds the
++ * host's picture has the same five hashes on both sides, and one that still holds what was there
++ * before does not. "left" is taken before this frame clears the surface (what the last frame left
++ * in it, which says whether somebody cleared it after the host wrote); "after" once the host's rows
++ * have been written into it (in place) or the picture has been copied into it (by hand).
++ */
++static uint32_t
++surface_row_hash(const unsigned char *row, size_t used)
++{
++	uint32_t hash = 2166136261u;
++
++	if (row == NULL || used < 4) {
++		return hash;
++	}
++	for (int i = 0; i < 5; i++) {
++		size_t pixel = ((used / 4) - 1) * (size_t)i / 4 * 4;
++
++		for (int b = 0; b < 4; b++) {
++			hash = (hash ^ row[pixel + (size_t)b]) * 16777619u;
++		}
++	}
++	return hash;
++}
++
++static void
++surface_say(struct eagl *e, const char *when, unsigned frame)
++{
++	struct image *image = e->image_count > 0 ? &e->images[0] : NULL;
++	const unsigned char *base;
++	size_t row, used;
++	int rows[5];
++	uint32_t hash[5];
++	uint32_t px[2] = { 0, 0 };
++
++	if (image == NULL || image->surface == NULL || image->width <= 0 || image->height <= 0) {
++		return;
++	}
++	base = IOSurfaceGetBaseAddress(image->surface);
++	row = IOSurfaceGetBytesPerRow(image->surface);
++	used = (size_t)image->width * 4;
++	if (base == NULL || row < used) {
++		return;
++	}
++	rows[0] = 0;
++	rows[1] = image->height / 4;
++	rows[2] = image->height / 2;
++	rows[3] = (3 * image->height) / 4;
++	rows[4] = image->height - 1;
++	for (int i = 0; i < 5; i++) {
++		hash[i] = surface_row_hash(base + row * (size_t)rows[i], used);
++	}
++	memcpy(px, base + row * (size_t)rows[2], sizeof(px));
++	memcpy(px + 1, base + row * (size_t)rows[2] + used - 4, sizeof(px[1]));
++	say("hakios-remote: s11 %s f %u surface %u %dx%d row %zu rows %08x %08x %08x %08x %08x "
++	    "px %08x %08x\n", when, frame, (unsigned)IOSurfaceGetID(image->surface), image->width,
++	    image->height, row, hash[0], hash[1], hash[2], hash[3], hash[4], px[0], px[1]);
++}
++
+ static void
+ frame_end(struct eagl *e, bool finished)
+ {
+@@ -1120,6 +1262,12 @@ frame_end(struct eagl *e, bool finished)
+ 	uint64_t flush_began = 0, flush_us = 0;   /* P4: how long the guest waited for the host's picture */
+ 	int composition_off = 0;        /* the host draws the frame: no composition here (see below) */
+ 
++	/* P1'''': what the last frame left in the display surface, before this one clears it. If the
++	 * host's rows landed and nothing wiped them, this equals the host's "surface" hashes of the
++	 * frame before; if it is black while the host's picture was not, somebody cleared it. */
++	if (e->frames < 3 || e->frames % 50 == 0) {
++		surface_say(e, "left", e->frames);
++	}
+ 	clear_now(e);
+ 	/*
+ 	 * With the host drawing the frame (eagl_remote_no_local()), nothing here drew into the surfaces
+@@ -1199,7 +1347,28 @@ frame_end(struct eagl *e, bool finished)
+ 	    e->image_count, e->image_count > 0 ? (int)e->images[0].width : 0,
+ 	    e->image_count > 0 ? (int)e->images[0].height : 0, eagl_remote_panel_upload_on());
+ 	if (eagl_remote_is_on() && e->image_count > 0 && e->images[0].width > 0) {
+-		int sent, direct = 0;
++		int sent, direct = 0, second = -1;
++
++		/* P1'''': which surfaces this frame knows. If the display alternates between two panel-sized
++		 * surfaces (the kernel's swap log says it does: surface 1 and 2, at 3072 and 3008 bytes a
++		 * row), and only images[0] is ever written, the other one keeps the first frame it ever had
++		 * -- which is exactly the black screen a screenshot catches every other time. */
++		if (e->frames < 3 || e->frames % 200 == 0) {
++			char list[400];
++			int at = 0;
++
++			at += snprintf(list + at, sizeof(list) - (size_t)at, "hakios-remote: s11 f %u images %u",
++			    e->frames + 1, e->image_count);
++			for (unsigned i = 0; i < e->image_count && i < 6 && at < (int)sizeof(list) - 64; i++) {
++				struct image *im = &e->images[i];
++
++				at += snprintf(list + at, sizeof(list) - (size_t)at, " %u:%u%c%c %dx%d/%zu", i,
++				    im->surface != NULL ? (unsigned)IOSurfaceGetID(im->surface) : 0,
++				    im->target ? 'T' : '-', im->drawn ? 'D' : '-', (int)im->width, (int)im->height,
++				    im->surface != NULL ? IOSurfaceGetBytesPerRow(im->surface) : (size_t)0);
++			}
++			say("%s\n", list);
++		}
+ 
+ 		/*
+ 		 * W3: the host writes the picture's rows straight into the display's surface when its
+@@ -1212,19 +1381,49 @@ frame_end(struct eagl *e, bool finished)
+ 
+ 			direct = eagl_remote_surface((GLsizei)e->images[0].width,
+ 			    (GLsizei)e->images[0].height, base, (GLsizei)row);
++			/*
++			 * P1'''': a frame can name a second surface the size of the panel, and the kernel
++			 * presents the two in turn (swap 6 took surface 1, swap 7 took surface 2). Writing
++			 * only the first leaves the second with the frame it had when the display last
++			 * looked at it, which is the black screenshot every other time. Name it too.
++			 */
++			for (unsigned i = 1; direct && i < e->image_count; i++) {
++				struct image *im = &e->images[i];
++
++				if (im->surface == NULL || !im->target ||
++				    im->width != e->images[0].width || im->height != e->images[0].height) {
++					continue;
++				}
++				if (eagl_remote_surface2((GLsizei)im->width, (GLsizei)im->height,
++				    IOSurfaceGetBaseAddress(im->surface),
++				    (GLsizei)IOSurfaceGetBytesPerRow(im->surface))) {
++					second = (int)i;
++				}
++				break;
++			}
+ 		} else {
+ 			(void)eagl_remote_surface(0, 0, NULL, 0);
+ 		}
+ 		if (direct) {
+ 			IOSurfaceLock(e->images[0].surface, 0, NULL);
+ 		}
++		if (second >= 0) {
++			IOSurfaceLock(e->images[second].surface, 0, NULL);
++		}
+ 		flush_began = now_us();
+ 		sent = eagl_remote_flush((int)e->images[0].width, (int)e->images[0].height);
+ 		flush_us = now_us() - flush_began;
+ 		if (direct) {
+ 			IOSurfaceUnlock(e->images[0].surface, 0, NULL);
+ 		}
+-		say("hakios-remote: flush -> %d%s\n", sent, direct ? " (rows into the surface)" : "");
++		if (second >= 0) {
++			IOSurfaceUnlock(e->images[second].surface, 0, NULL);
++		}
++		say("hakios-remote: flush -> %d%s surface %u row %zu%s\n", sent,
++		    direct ? " (rows into the surface)" : "",
++		    e->images[0].surface != NULL ? (unsigned)IOSurfaceGetID(e->images[0].surface) : 0,
++		    e->images[0].surface != NULL ? IOSurfaceGetBytesPerRow(e->images[0].surface) : (size_t)0,
++		    second >= 0 ? " and a second" : "");
+ 		if (frame_lines || latency_lines) {
+ 			/* P4: of one frame, the part spent waiting for the host (host_glwire's own line says
+ 			 * how long the replay itself took: "frame N, ..., X ms"). */
+@@ -1250,6 +1449,10 @@ frame_end(struct eagl *e, bool finished)
+ 			}
+ 		}
+ 	}
++	/* P1'''': right after the host's rows (or the hand copy) went into the display surface. */
++	if (e->frames < 3 || e->frames % 50 == 0) {
++		surface_say(e, "after", e->frames + 1);
++	}
+ 	if (!e->in_frame) {
+ 		return;
+ 	}
+@@ -1303,6 +1506,10 @@ frame_end(struct eagl *e, bool finished)
+ 		    e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place, after - e->began, e->flushing, waited - before,
+ 		    after - waited, e->attaching);
+ 	}
++	if (slots_watched && (e->frames == 30 || e->frames % 200 == 0)) {
++		/* P4': what the host was never told about, in one line (frame 30, then every two hundredth) */
++		watched_slots_report(e);
++	}
+ 	if (e->frames == 30 || e->frames % 200 == 0) {
+ 		summary(e);
+ 	}
+@@ -4302,6 +4509,12 @@ install(void)
+ 		census_on = strstr(arguments, "glcensus=1") != NULL;
+ 		frame_lines = strstr(arguments, "glframes=1") != NULL;
+ 		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
++		if ((argument = strstr(arguments, "glslots=")) != NULL && strtoul(argument + 8, NULL, 10) != 0) {
++			/* P4': count the entries of the table that can draw and that the wire does not carry */
++			slots_watched = 1;
++			say("hakios-gl: glslots=1: %zu entries the wire does not carry are counted\n",
++			    sizeof(watched_slots) / sizeof(watched_slots[0]));
++		}
+ 		if ((argument = strstr(arguments, "glslow=")) != NULL) {
+ 			slow_calls_us = strtoull(argument + 7, NULL, 10);
+ 		}

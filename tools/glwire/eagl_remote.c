@@ -58,6 +58,17 @@ static wire_segment remote_surface_segments[2048];
 static int remote_surface_segments_count;
 static GLsizei remote_surface_row;              /* the surface's bytes a row */
 
+/*
+ * P1'''': the frame's second panel-sized surface. A frame can name more than one surface the size of
+ * the panel -- the kernel's swap log takes two in turn (3072 and 3008 bytes a row) -- and if only
+ * the first one is written, the other keeps whatever it had, which is the black screen a screenshot
+ * catches every other time. It travels exactly as the first one does: named by its rows, written by
+ * the host, nothing copied here.
+ */
+static wire_segment remote_surface2_segments[2048];
+static int remote_surface2_segments_count;
+static GLsizei remote_surface2_row;
+
 /* Which of the two the frame's request names, and how many bytes it covers. */
 static wire_segment *remote_picture_segments;
 static int remote_picture_segments_count;
@@ -328,6 +339,10 @@ eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes
 
 	remote_surface_segments_count = 0;
 	remote_surface_row = 0;
+	/* (the second one is a per-frame decision too: eagl.c names it after this one, if the frame
+	 * has a second panel-sized target) */
+	remote_surface2_segments_count = 0;
+	remote_surface2_row = 0;
 	if (remote_no_flush || !remote_enabled || wire_vtop_hook == NULL || base == NULL ||
 	    width <= 0 || height <= 0 || row_bytes < width * 4) {
 		return 0;
@@ -346,6 +361,40 @@ eagl_remote_surface(GLsizei width, GLsizei height, void *base, GLsizei row_bytes
 	}
 	remote_surface_segments_count = count;
 	remote_surface_row = row_bytes;
+	return 1;
+}
+
+/*
+ * P1'''': the same for the frame's second panel-sized surface (see remote_surface2_segments). Its
+ * rows are named in the same request, after the first surface's; the host writes the picture into
+ * both, so whichever of the two the display presents next holds the frame.
+ */
+int
+eagl_remote_surface2(GLsizei width, GLsizei height, void *base, GLsizei row_bytes)
+{
+	size_t bytes, covered = 0;
+	int count;
+
+	remote_surface2_segments_count = 0;
+	remote_surface2_row = 0;
+	if (remote_no_flush || !remote_enabled || wire_vtop_hook == NULL || base == NULL ||
+	    width <= 0 || height <= 0 || row_bytes < width * 4) {
+		return 0;
+	}
+	bytes = (size_t)row_bytes * (size_t)height;
+	count = wire_vtop_hook(base, bytes, remote_surface2_segments,
+	    sizeof(remote_surface2_segments) / sizeof(remote_surface2_segments[0]));
+	if (count <= 0) {
+		return 0;
+	}
+	for (int i = 0; i < count; i++) {
+		covered += remote_surface2_segments[i].len;
+	}
+	if (covered != bytes) {
+		return 0;
+	}
+	remote_surface2_segments_count = count;
+	remote_surface2_row = row_bytes;
 	return 1;
 }
 
@@ -410,14 +459,23 @@ eagl_remote_flush(int width, int height)
 		    sizeof(remote_frame_segments) / sizeof(remote_frame_segments[0]));
 	}
 	remote_frame_segments_count = remote_picture_segments_count;
-	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d\n",
+	/* (a second surface is only meaningful when the first target is one) */
+	if (remote_picture_row <= 0) {
+		remote_surface2_segments_count = 0;
+		remote_surface2_row = 0;
+	}
+	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d %d %d\n",
 	    width, height, w.at, (size_t)width * height * 4, remote_picture_segments_count,
-	    remote_picture_row);
+	    remote_picture_row, remote_surface2_segments_count, remote_surface2_row);
 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
 	    (remote_picture_segments_count > 0 &&
 	     send(remote_fd, remote_picture_segments,
 	     (size_t)remote_picture_segments_count * sizeof(wire_segment), 0) !=
 	     (ssize_t)((size_t)remote_picture_segments_count * sizeof(wire_segment))) ||
+	    (remote_surface2_segments_count > 0 &&
+	     send(remote_fd, remote_surface2_segments,
+	     (size_t)remote_surface2_segments_count * sizeof(wire_segment), 0) !=
+	     (ssize_t)((size_t)remote_surface2_segments_count * sizeof(wire_segment))) ||
 	    send(remote_fd, w.base, w.at, 0) != (ssize_t)w.at) {
 		close(remote_fd);
 		remote_fd = -1;

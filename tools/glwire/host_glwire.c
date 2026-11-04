@@ -467,7 +467,7 @@ sample_row_hash(const unsigned char *row, size_t used)
 }
 
 static void
-stage11_report(const unsigned char *picture, int width, int height, size_t row_bytes,
+stage11_report(const char *which, const unsigned char *picture, int width, int height, size_t row_bytes,
     wire_segment *segments, int count, unsigned long long frame)
 {
 	uint32_t picture_hash[5], surface_hash[5];
@@ -492,8 +492,8 @@ stage11_report(const unsigned char *picture, int width, int height, size_t row_b
 			memcpy(first, where, sizeof(first));
 		}
 	}
-	printf("host_glwire: stage11 frame %llu surface %zu B, %zu B a row: picture %08x %08x %08x "
-	    "%08x %08x surface %08x %08x %08x %08x %08x px %08x %08x\n", frame,
+	printf("host_glwire: stage11 %s frame %llu surface %zu B, %zu B a row: picture %08x %08x %08x "
+	    "%08x %08x surface %08x %08x %08x %08x %08x px %08x %08x\n", which, frame,
 	    row_bytes * (size_t)height, row_bytes, picture_hash[0], picture_hash[1], picture_hash[2],
 	    picture_hash[3], picture_hash[4], surface_hash[0], surface_hash[1], surface_hash[2],
 	    surface_hash[3], surface_hash[4], first[0], first[1]);
@@ -602,12 +602,15 @@ serve_frame(struct client *client)
 	char line[192];
 	int at = 0;
 	int width = 0, height = 0, segment_count = 0, row_bytes = 0;
+	/* P1'''': a frame may name a second panel-sized surface (the display presents two in turn). */
+	int segment_count2 = 0, row_bytes2 = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
 	double began, took;
 	unsigned char *records;
 	unsigned char *picture;
 
 	wire_segment *segments = NULL;
+	wire_segment *segments2 = NULL;
 	int in_place = 0;
 	int replayed = 0;
 	/* Taken before the frame's release frees the panel the guest uploaded: the release runs
@@ -629,8 +632,8 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu %d %d", &width, &height, &records_bytes, &frame_bytes,
-	    &segment_count, &row_bytes) < 4) {
+	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
+	    &segment_count, &row_bytes, &segment_count2, &row_bytes2) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
@@ -638,11 +641,12 @@ serve_frame(struct client *client)
 		reply(client, "R badsize\n");
 		return 0;
 	}
-	if (segment_count < 0 || segment_count > 2048) {
+	if (segment_count < 0 || segment_count > 2048 || segment_count2 < 0 || segment_count2 > 2048) {
 		reply(client, "R badsize\n");
 		return 0;
 	}
-	if (row_bytes != 0 && (row_bytes < width * 4 || row_bytes > (1 << 20))) {
+	if ((row_bytes != 0 && (row_bytes < width * 4 || row_bytes > (1 << 20))) ||
+	    (row_bytes2 != 0 && (row_bytes2 < width * 4 || row_bytes2 > (1 << 20)))) {
 		reply(client, "R badsize\n");
 		return 0;
 	}
@@ -650,6 +654,14 @@ serve_frame(struct client *client)
 	if (segment_count > 0 && (segments == NULL ||
 	    !recv_all(client->fd, segments, (size_t)segment_count * sizeof(*segments)))) {
 		free(segments);
+		free(segments2);
+		return -1;
+	}
+	segments2 = segment_count2 > 0 ? calloc((size_t)segment_count2, sizeof(*segments2)) : NULL;
+	if (segment_count2 > 0 && (segments2 == NULL ||
+	    !recv_all(client->fd, segments2, (size_t)segment_count2 * sizeof(*segments2)))) {
+		free(segments);
+		free(segments2);
 		return -1;
 	}
 	records = malloc(records_bytes);
@@ -658,6 +670,7 @@ serve_frame(struct client *client)
 		free(records);
 		free(picture);
 		free(segments);
+		free(segments2);
 		reply(client, "R nomem\n");
 		return 0;
 	}
@@ -665,6 +678,7 @@ serve_frame(struct client *client)
 		free(records);
 		free(picture);
 		free(segments);
+		free(segments2);
 		return -1;
 	}
 	began = now_seconds();
@@ -702,6 +716,7 @@ serve_frame(struct client *client)
 		free(records);
 		free(picture);
 		free(segments);
+		free(segments2);
 		reply(client, "R nocontext\n");
 		return 0;
 	}
@@ -877,15 +892,49 @@ serve_frame(struct client *client)
 		if (at != target_bytes) {
 			in_place = 0;
 		}
+		/* The second surface of the frame: same picture, its own stride and its own segments. If
+		 * it cannot be written the picture travels back, or the surface the display presents next
+		 * would be the only one with anything in it -- and the other one is what makes the screen
+		 * black every other time. */
+		if (in_place && segment_count2 > 0) {
+			size_t target2 = row_bytes2 > 0 ? (size_t)row_bytes2 * (size_t)height : frame_bytes;
+			size_t at2 = 0;
+
+			if (row_bytes2 <= 0) {
+				in_place = 0;
+			}
+			for (int i = 0; in_place && i < segment_count2; i++) {
+				uint64_t pa = segments2[i].pa;
+				uint32_t len = segments2[i].len;
+
+				if (pa < ram_pa_base || pa - ram_pa_base > ram_bytes ||
+				    len > ram_bytes - (size_t)(pa - ram_pa_base)) {
+					in_place = 0;
+					break;
+				}
+				at2 += len;
+			}
+			if (in_place && at2 != target2) {
+				in_place = 0;
+			}
+		}
 		if (in_place && row_bytes > 0) {
 			in_place = write_picture_rows(picture, width, height, (size_t)row_bytes,
 			    segments, segment_count);
+			if (in_place && segment_count2 > 0) {
+				in_place = write_picture_rows(picture, width, height, (size_t)row_bytes2,
+				    segments2, segment_count2);
+			}
 			/* P1'''': five lines a boot would be enough to read, but a stall's frame and the
 			 * frame after a Today rebuild are not the first five -- one every hundred frames
 			 * leaves forty lines in a 4,000-frame boot and still dates the change. */
 			if (in_place && (frames_replayed + 1 <= 5 || (frames_replayed + 1) % 100 == 0)) {
-				stage11_report(picture, width, height, (size_t)row_bytes, segments,
+				stage11_report("first", picture, width, height, (size_t)row_bytes, segments,
 				    segment_count, frames_replayed + 1);
+				if (segment_count2 > 0) {
+					stage11_report("second", picture, width, height, (size_t)row_bytes2,
+					    segments2, segment_count2, frames_replayed + 1);
+				}
 			}
 		} else if (in_place) {
 			at = 0;
@@ -935,6 +984,7 @@ serve_frame(struct client *client)
 			free(records);
 			free(picture);
 			free(segments);
+		free(segments2);
 			return -1;
 		}
 	}
@@ -967,6 +1017,7 @@ serve_frame(struct client *client)
 	free(records);
 	free(picture);
 	free(segments);
+	free(segments2);
 	return 0;
 }
 
