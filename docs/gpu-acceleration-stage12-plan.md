@@ -74,11 +74,24 @@
 ### P2''''' 460 s 的那个帧间隔（1 天）
 
 第十一阶段量到：`host_glwire: frame 3 … interval 460.55 s`（两次启动都一样），它发生在界面**之前**，
-是整段帧率与启动时间的最大单项。要回答：这段时间客机在干什么（渲染？等锁？等 I/O？），
-用什么符号化栈说清；如果它是可去的（例如又一个一次性的布局/构建），给出开关与数字；
-如果不能去，写清「卡在哪一行」。
+是整段帧率与启动时间的最大单项。
 
-判据：≥20 个符号化样本 + 一条因果链；能修则启动到界面 −30%。
+**已有一份只读归因**（第十二阶段 t6，`/tmp/s12-bootgap.md`，五次启动 288.84/292.26/459.44/430.27/368.06 s）：
+- 间隔打在**帧 3** 上，量的是**帧 2→帧 3**：帧 1/2 = 开机 logo，帧 3 = 熄屏空帧（`Set Blanked: YES`，2,424 records B），
+  帧 4 才是界面第一帧（`Set Blanked: NO`，8,858 records B）；
+- 窗口里**客人机 0 帧、宿主阻塞在 recv**，0 条 timeout/deadline → 不是死锁、不是等锁、不是宿主/网络；
+- APFS 是内存盘 → 不是 I/O；`_rootFolderDidChange` 在 440–505 s，**晚于窗口** → 不是 Today 重建；
+- 窗口里 **lsd 的 `denied attempt to escape CPU monitor` 每次都是 690–693 条**（五次几乎不变），时长却差 59%
+  ⇒ **固定工作量 × 变化吞吐**；唯一同相位 `ustacks=top` 样本 busy **117%**（≈1.2/4 核）、lsd 73.9%、
+  containermanagerd 26.9% ⇒ **不饱和，串行**。
+
+所以本阶段要做的是：**用一次带 `ustacks=top` 的启动把它钉死**（标签 `s12gap`，
+`XCMD="… glframes=1 ustacks=top ustacks_at=30 ustacks_ms=1000 ustacks_count=760"`，覆盖 30–789 s），
+然后按证据排序的杠杆试：
+① 砍 lsd 的 LaunchServices 工作（镜像里没有 csstore、每次在 ramfs 重建；rootfs 里 maxdepth≤4 有 191 个 .app）——
+   先做「禁用 lsd 跑一发」的定性实验；② 让第一帧别等 lsd（BootUI 的 activity assertion）；③ 宿主吞吐（tb-size=3072）。
+
+判据：≥20 个符号化样本 + 一条因果链；能修则启动到界面 −30%（否则写清卡在哪一行）。
 
 ### P3''''' 四格表（半天，收尾）
 

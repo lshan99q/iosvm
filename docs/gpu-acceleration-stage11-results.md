@@ -17,7 +17,7 @@
 | P0'''' — the picture on screen | **the transport works; the 300 KB criterion cannot be met** (highest 245 KB); what is missing is content: wallpaper, LA08 glyphs, widget snapshots | same-frame diff **97.7 %** (captain, s11b, `diffdump --tolerance 8`); of 42 PNG screenshots: 15 all black, 14 black + 24 % green, 8 home screen (225–245 KB, 26.6 k colours) |
 | P2'''' — CAImageQueue registration | **the symbol is not interposable, and it is not the wire's business**: 0 registration lines in a boot where the two processes made 24 surfaces, the LA08 among them | 2 pools (backboardd, SpringBoard) × 2 loads, 0 `ciq:` create/register lines; kernel `created surface` 24 lines incl. `312x202 'LA08'`; SpringBoard imports only `_SBSystemAppMain`, backboardd imports no `CAImageQueue*`, QuartzCore calls it with 2 direct `BL`s |
 | P3'''' — the Today rebuild | **one call a boot, removable, but not the stall majority**: `today_off=1` skips it, the interface comes ~60 s earlier, +22 % frames, −17 % stalls (criterion was −50 %) | s11d 3,275 frames / 3.8 fps / 35 stalls vs s11e 4,004 frames / 4.7 fps / 29 stalls; the rebuild itself at 505 s builds the two Today VCs 2.4 s apart |
-| P4'''' — the four cells | **the table is rebuilt with the fixed image** (this section is filled when the queue finishes) | `WINDOW_AFTER=60 WINDOW_FRAMES=1 WINDOW_SPAN=120`, screenshots with `MINSHOT=200000` |
+| P4'''' — the four cells | **W3 is 7.6× the W3-off cell in the same window and no longer black**; the two local cells cannot fill a 120-frame window | W1.5+W3 **8.89 fps** (120 frames / 13.51 s, screenshot 242,259 B) vs W1.5 **1.17 fps** (102.72 s, 243,662 B); pure local / by reference TIMEOUT at 17/129 and 74/170 frames |
 
 One line: **the screen is not black because the pipe is broken.** It is black whenever the guest itself draws an empty frame, or whenever the display presents a panel-sized surface that nobody has written yet. The acceleration path (the host draws the frame and writes its rows into the display's surface) does exactly what it was built to do; what is missing is content (wallpaper, glyph, widget), not the transport.
 
@@ -333,12 +333,31 @@ the 460 s frame gap **before** the interface (a boot-phase hole, not this rebuil
 5 stalls. **The Today rebuild is one real, removable cost, not the stall majority.**
 
 
-## 10. P4'''' — the four cells (待 captain 填)
+## 10. P4'''' — the four cells, with both display surfaces written
 
-> **to be filled by the captain.** Slots:
-> - the four rows (`pure local` / `by reference` / `W1.5` / `W1.5+W3`), each "120 frames / X s" with the clock
->   used (guest or host), `WINDOW_AFTER=60 WINDOW_FRAMES=1 WINDOW_SPAN=120`;
-> - the screenshot size of each cell, with the pairing "screenshot at state X ↔ host picture of the same frame".
+All four cells were rebuilt from the current source (dual writeback included), same host binary,
+`MINSHOT=200000` so the W1.5/W3 look counts as the interface, and the window opened 60 s after it
+(`WINDOW_AFTER=60 WINDOW_FRAMES=1 WINDOW_SPAN=120`; 900 s per boot, `/tmp/s11-p4.txt`):
+
+| cell | image | interface | window: 120 frames | screenshot |
+|---|---|---|---|---|
+| pure local | `GL=1 CONFIGD=1` — no recorder, the guest draws | 600 s | **TIMEOUT**: 17 of 129 guest frames in 900 s (host 0) | 446,859 B |
+| by reference + panel | `GLWIRE_LOCAL=1` — the guest draws as well | 580 s | **TIMEOUT**: 74 of 170 host frames | 446,791 B |
+| W1.5 (W3 off) | `GLREMOTE=1`, `GLWIRE_NO_INPLACE=1` | 420 s | **1.17 fps** — 120 frames in 102.72 s (host 111→231) | 243,662 B |
+| W1.5+W3 | `GLREMOTE=1`, in-place on (both surfaces) | 560 s | **8.89 fps** — 120 frames in 13.51 s (host 549→685) | 242,259 B |
+
+Two readings:
+
+- **W3 is 7.6× the W3-off cell in the same window** (8.89 vs 1.17 fps), and it is no longer black:
+  242,259 B against W1.5's 243,662 B — the same picture minus the same missing content. The stage-10
+  "5.08 fps" was a whole-boot number taken with a black screen; after the interface, with both
+  surfaces written, the window is **8.89 fps**.
+- **the two local cells cannot fill a 120-frame window at all** (17/129 and 74/170 frames in 15 min),
+  so the "same window" rule still cannot be applied to all four cells at once. The fair comparison is
+  the W1.5↔W3 pair: same image, same interface path, only the writeback differs.
+
+Screenshots: `/tmp/s11p4pure-shot.png` (446,859 B), `-local-` (446,791 B), `-w15-` (243,662 B),
+`-w3-` (242,259 B).
 
 ---
 
