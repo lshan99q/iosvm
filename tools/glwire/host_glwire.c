@@ -118,21 +118,53 @@ map_ram(const char *path)
 
 static double now_seconds(void);
 
+/* Pixels to a file, and a line saying so; nothing if the file cannot be made. */
+static int
+write_pixels(const char *path, const void *pixels, size_t bytes)
+{
+	FILE *file = fopen(path, "wb");
+
+	if (file == NULL) {
+		return 0;
+	}
+	fwrite(pixels, 1, bytes, file);
+	fclose(file);
+	printf("host_glwire: wrote %s\n", path);
+	return 1;
+}
+
 /* A byte-for-byte copy of what the host drew, for the acceptance check against the guest's own
- * pixels: the panel is RGBA, the picture BGRA. GLWIRE_DUMP=<prefix> writes them once. */
+ * pixels: the panel is RGBA, the picture BGRA. GLWIRE_DUMP=<prefix> writes them once.
+ *
+ * GLWIRE_DUMP_PAIR=1: the frame after that one as well, as <prefix>-n1-panel-WxH.rgba and
+ * <prefix>-n1-picture-WxH.bgra, once. The panel the guest uploads is the surface as of the
+ * *previous* present -- picture(N) == panel(N+1), see previous_picture_hash -- so comparing what
+ * the host drew with what the guest showed takes a pair of frames, not one. The pair is written
+ * with the next frame that arrives after the dump and then never again. */
 static void
 dump_once(struct client *client, const unsigned char *picture, int width, int height, int number)
 {
-	static int dumped;
+	static int dumped, paired;
 	static double first;
 	const char *prefix = getenv("GLWIRE_DUMP");
 	const char *from = getenv("GLWIRE_DUMP_FROM");
 	const char *at = getenv("GLWIRE_DUMP_AT");
+	const char *pair = getenv("GLWIRE_DUMP_PAIR");
 	char path[512];
-	FILE *file;
 
 	if (first == 0) {
 		first = now_seconds();
+	}
+	/* The frame after the one dumped: the guest's panel of it beside the host's picture of it. */
+	if (dumped && !paired && prefix != NULL && pair != NULL && strtoul(pair, NULL, 10) != 0) {
+		paired = 1;
+		if (client->names.panel != NULL) {
+			snprintf(path, sizeof(path), "%s-n1-panel-%dx%d.rgba", prefix, width, height);
+			write_pixels(path, client->names.panel, (size_t)width * height * 4);
+		}
+		snprintf(path, sizeof(path), "%s-n1-picture-%dx%d.bgra", prefix, width, height);
+		write_pixels(path, picture, (size_t)width * height * 4);
+		fflush(stdout);
 	}
 	/* GLWIRE_DUMP_AT=<seconds>: the first frame that arrives that long after the first one, which is
 	 * how a dump is aimed at a moment (the interface is up eleven minutes into a boot here) rather
@@ -146,20 +178,10 @@ dump_once(struct client *client, const unsigned char *picture, int width, int he
 	dumped = 1;
 	if (client->names.panel != NULL) {
 		snprintf(path, sizeof(path), "%s-panel-%dx%d.rgba", prefix, width, height);
-		file = fopen(path, "wb");
-		if (file != NULL) {
-			fwrite(client->names.panel, 1, (size_t)width * height * 4, file);
-			fclose(file);
-			printf("host_glwire: wrote %s\n", path);
-		}
+		write_pixels(path, client->names.panel, (size_t)width * height * 4);
 	}
 	snprintf(path, sizeof(path), "%s-picture-%dx%d.bgra", prefix, width, height);
-	file = fopen(path, "wb");
-	if (file != NULL) {
-		fwrite(picture, 1, (size_t)width * height * 4, file);
-		fclose(file);
-		printf("host_glwire: wrote %s\n", path);
-	}
+	write_pixels(path, picture, (size_t)width * height * 4);
 	fflush(stdout);
 }
 
@@ -418,6 +440,64 @@ cursor_at(struct guest_cursor *cursor, size_t offset, size_t *available)
 	*available = (size_t)cursor->segments[cursor->index].len - (offset - cursor->at);
 	return ram_memory + (size_t)(cursor->segments[cursor->index].pa - ram_pa_base) +
 	    (offset - cursor->at);
+}
+
+/* Stage 11, P1''''/P0'''': is what the host drew what the guest's display surface now holds? The
+ * same five rows and five pixels a row are sampled on both sides -- here from the picture (packed,
+ * `used` bytes a row) and from the guest's RAM (strided by row_bytes, through the same segments the
+ * write used); the guest samples its own surface the same way (userland/src/eagl.c,
+ * surface_row_hash). Equal hashes mean the rows landed; different ones say the picture never got
+ * there, and which of the two it is can be answered from one pair of logs. */
+static uint32_t
+sample_row_hash(const unsigned char *row, size_t used)
+{
+	uint32_t hash = 2166136261u;
+
+	if (row == NULL || used < 4) {
+		return hash;
+	}
+	for (int i = 0; i < 5; i++) {
+		size_t pixel = ((used / 4) - 1) * (size_t)i / 4 * 4;
+
+		for (int b = 0; b < 4; b++) {
+			hash = (hash ^ row[pixel + (size_t)b]) * 16777619u;
+		}
+	}
+	return hash;
+}
+
+static void
+stage11_report(const unsigned char *picture, int width, int height, size_t row_bytes,
+    wire_segment *segments, int count, unsigned long long frame)
+{
+	uint32_t picture_hash[5], surface_hash[5];
+	int rows[5];
+	uint32_t first[2] = { 0, 0 };
+
+	rows[0] = 0;
+	rows[1] = height / 4;
+	rows[2] = height / 2;
+	rows[3] = (3 * height) / 4;
+	rows[4] = height - 1;
+	for (int i = 0; i < 5; i++) {
+		struct guest_cursor cursor = { segments, count, 0, 0 };
+		size_t available = 0;
+		unsigned char *where = cursor_at(&cursor, (size_t)rows[i] * row_bytes, &available);
+
+		picture_hash[i] = sample_row_hash(picture + (size_t)rows[i] * (size_t)width * 4,
+		    (size_t)width * 4);
+		surface_hash[i] = where != NULL && available >= (size_t)width * 4
+		    ? sample_row_hash(where, (size_t)width * 4) : 0;
+		if (i == 2 && where != NULL && available >= (size_t)width * 4) {
+			memcpy(first, where, sizeof(first));
+		}
+	}
+	printf("host_glwire: stage11 frame %llu surface %zu B, %zu B a row: picture %08x %08x %08x "
+	    "%08x %08x surface %08x %08x %08x %08x %08x px %08x %08x\n", frame,
+	    row_bytes * (size_t)height, row_bytes, picture_hash[0], picture_hash[1], picture_hash[2],
+	    picture_hash[3], picture_hash[4], surface_hash[0], surface_hash[1], surface_hash[2],
+	    surface_hash[3], surface_hash[4], first[0], first[1]);
+	fflush(stdout);
 }
 
 static int
@@ -800,6 +880,13 @@ serve_frame(struct client *client)
 		if (in_place && row_bytes > 0) {
 			in_place = write_picture_rows(picture, width, height, (size_t)row_bytes,
 			    segments, segment_count);
+			/* P1'''': five lines a boot would be enough to read, but a stall's frame and the
+			 * frame after a Today rebuild are not the first five -- one every hundred frames
+			 * leaves forty lines in a 4,000-frame boot and still dates the change. */
+			if (in_place && (frames_replayed + 1 <= 5 || (frames_replayed + 1) % 100 == 0)) {
+				stage11_report(picture, width, height, (size_t)row_bytes, segments,
+				    segment_count, frames_replayed + 1);
+			}
 		} else if (in_place) {
 			at = 0;
 			for (int i = 0; i < segment_count; i++) {
@@ -810,7 +897,7 @@ serve_frame(struct client *client)
 		}
 	}
 	dump_once(client, picture, width, height, (int)frames_replayed + 1);
-	if (save_dir != NULL && ((frames_replayed + 1) % 10 == 1 || (frames_replayed + 1) % 100 == 0)) {
+	if (save_dir != NULL && ((frames_replayed + 1) <= 20 || (frames_replayed + 1) % 100 == 0)) {
 		char path[512];
 		FILE *file;
 

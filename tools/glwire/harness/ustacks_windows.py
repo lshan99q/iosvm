@@ -31,13 +31,14 @@ ROW = re.compile(r"top: +(\d+)\.(\d+)% +(\S+)\[(\d+)\]")
 
 
 def parse(path):
-    frames, samples = [], []          # frames: (t, index); samples: (t, busy, [(name, pct)])
+    frames, samples, stamps = [], [], []   # frames: (t, index); samples: (t, busy, rows); stamps: all
     now = None
     for line in open(path, errors="replace"):
         m = STAMP.search(line)
         if m:
             try:
                 now = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").timestamp()
+                stamps.append(now)
             except ValueError:
                 pass
         m = FRAME.search(line)
@@ -51,7 +52,7 @@ def parse(path):
         m = ROW.search(line)
         if m and samples:
             samples[-1][2].append((m.group(3), int(m.group(1))))
-    return frames, samples
+    return frames, samples, stamps
 
 
 def main():
@@ -63,15 +64,26 @@ def main():
     if "--top" in sys.argv:
         topn = int(sys.argv[sys.argv.index("--top") + 1])
 
-    frames, samples = parse(path)
-    print(f"{path}: {len(frames)} frame lines, {len(samples)} top samples")
-    if len(frames) < 3 or not samples:
-        print("  need glframes=1 (frame lines) and ustacks=top in the same log")
+    frames, samples, stamps = parse(path)
+    # The frame lines are the better clock, but a remote-only boot does not print them (the guest's
+    # e->frames does not move there); every timestamped line is the fallback -- and during a stall the
+    # whole machine is frozen, so *nothing* is stamped, which is exactly the gap being looked for.
+    clock = frames if len(frames) >= 10 else list(zip(stamps, range(len(stamps))))
+    kind = "frame lines" if clock is frames else "timestamped lines"
+    print(f"{path}: {len(frames)} frame lines, {len(stamps)} timestamped lines ({kind} as the clock), "
+          f"{len(samples)} top samples")
+    if len(clock) < 3 or not samples:
+        print("  need a boot with ustacks=top (and preferably glframes=1)")
         return 1
 
-    stalls = [(a, b) for a, b in zip(frames, frames[1:]) if b[0] - a[0] > gap]
-    outside = [s for s in samples if not any(t0 <= s[0] <= t1 for t0, t1, _ in
-                                            [(a[0], b[0], 0) for a, b in stalls])]
+    # the interval from the clock's first entry to the first frame of the UI is not a stall, it is
+    # "nothing was drawn yet", so the pairs start at the second entry
+    stalls = [(a, b) for a, b in zip(clock[1:], clock[2:]) if b[0] - a[0] > gap]
+    # only the windows the sampling actually covered: before ustacks_at the kernel printed nothing,
+    # so a boot-phase gap would read as "0% busy" when it simply has no evidence
+    first_sample = samples[0][0] if samples else 0
+    stalls = [(a, b) for a, b in stalls if a[0] >= first_sample]
+    outside = [s for s in samples if not any(a[0] <= s[0] <= b[0] for a, b in stalls)]
     mean_out = sum(s[1] for s in outside) / len(outside) if outside else 0.0
 
     print(f"\n{'stall from':>12} {'to':>8} {'s':>6} {'busy% in':>8}  busiest inside")
@@ -85,7 +97,7 @@ def main():
                 procs[name] = procs.get(name, 0) + pct
         worst = ", ".join(f"{k} {v}%" for k, v in sorted(procs.items(), key=lambda kv: -kv[1])[:topn])
         b = max((s[1] for s in inside), default=0)
-        print(f"frame {n0:>5}      {n1:>5} {t1 - t0:>6.1f} {b:>7}%  {worst}")
+        print(f"at {t0 - stamps[0]:>7.1f}s  -> {t1 - stamps[0]:>7.1f}s {t1 - t0:>6.1f} {b:>7}%  {worst}")
     if inside_all:
         mean_in = sum(inside_all) / len(inside_all)
         print(f"\nmean busy% inside stalls {mean_in:.0f}%   outside {mean_out:.0f}%   "
