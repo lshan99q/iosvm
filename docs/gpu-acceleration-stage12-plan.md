@@ -68,6 +68,14 @@
 3. **客人机上传**（如果 1/2 都只给「看不见」）：在 `eagl.c` 的 `frame_end` 里，把 LA08 surface 的像素用
    `eagl_remote_upload()`（已有 201 号记录、按引用）送上去——只有在确认「CA 用这张 surface 当纹理」之后做。
 
+**已试过的一发（s12a，16:56 建、16:00–16:13 跑，负结果）**：GOT 重绑（fishhook）版探针，`CIQ=1` 编进镜像并启动。
+重绑确实跑了 ——
+`ciq: got rebind SpringBoard: 37 slot(s) in 35 image(s) (IOSurfaceCreate=34+0 island, CAImageQueueRegisterIOSurfaceBuffer=3+0 island)`
+`ciq: got rebind backboardd: 17 slot(s) in 16 image(s) (IOSurfaceCreate=15+0 island, CAImageQueueRegisterIOSurfaceBuffer=2+0 island)`
+—— 但 **0 条 create 行、内核 0 条 `created surface`、宿主 0 帧、900 s 里截图全是 14,316 B**：这次启动没到界面。
+最可能是替换函数在 `inject_ciq_probe.c:235` 直接调用 `IOSurfaceCreate()`（被自己的 patch 命中），也可能是探针把启动链拖垮。
+**它不能进默认镜像**：`build.sh` 已改成 `CIQ=1` 才编、默认镜像不带它。结论：用户态钩子到此为止，下一发按上面第 1 条走**内核侧**。
+
 判据 P1'''''：一次启动里 `312x202 LA08` 的像素出现在宿主侧，并且哈希与客人机 surface 相等；
 判据 P0'''''：截图 ≥300 KB 且同帧 diff ≥95%。
 
