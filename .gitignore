@@ -48,3 +48,11 @@ tools/scratch/
 *~
 __pycache__/
 *.pyc
+
+# Host build products: sources are in the tree, the binaries are not (provenance rule 4)
+tools/glwire/frame_replay
+tools/glwire/host_glwire
+tools/glwire/map_test
+tools/host-glquad/gpu_host
+tools/host-glquad/gpu_host_ram
+tools/host-glquad/rammap
