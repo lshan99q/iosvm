@@ -1,0 +1,242 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index f93446d..16f776c 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -41,6 +41,7 @@
+ #include <notify.h>
+ #include <objc/message.h>
+ #include <objc/runtime.h>
++#include <pthread.h>
+ #include <stdarg.h>
+ #include <sys/stat.h>
+ #include <stdbool.h>
+@@ -684,6 +685,151 @@ plain_vibrancy(void)
+ 	say("hakios: SpringBoard: no GPU draws, vibrant views are plain (the lock screen's clock is white)\n");
+ }
+ 
++/* ---- the Today view, built again at every layout of the icon model ------------------------------- */
++
++/*
++ * -[SBIconController _rootFolderDidChange] is what has SpringBoard build its Today page: for the home
++ * screen (location 1) and for the cover sheet (location 2) it asks
++ * -[SBIconController _newTodayViewControllerWithIconManager:iconListModel:rootFolder:location:], whose
++ * answer's -[SBTodayViewController loadView] sets up the Spotlight presenter, whose feather blur warms
++ * up MTMaterialView -- and there, under QEMU, all four cores are busy for a second and more (the hot
++ * stack of the tenth stage; qemu/symstack.py names its addresses).
++ * Where the calls come from, in Darwin userland 16.5 (20F66; SpringBoard's own code, read out of the
++ * shared cache with `ipsw dyld` and llvm-objdump; addresses unslid):
++ *   -[SBIconController setModel:] + 0x1b8 (0x1c4bed5ac), right after [model rootFolder] answered
++ *       something (the call sits behind a nil check): one rebuild per icon model installed, and the
++ *       model is installed by -[SBIconController _updateIconModelStore] (0x1c4bed38c), which
++ *       -[SBIconController initWithMainDisplayWindowScene:...] calls at +0x2d4 -- at every boot.
++ *   -[SBIconController _iconModelDidLayout:] (0x1c4bed95c) is one instruction, `b
++ *       _objc_msgSend$_rootFolderDidChange`: the observer -[SBIconController setModel:] registers
++ *       (+0x198, 0x1c4bed58c) for SBIconModelDidLayoutIconStateNotification, posted every time the
++ *       icon model lays its state out -- after the icons are read back, and after an icon list change.
++ * So the Today page is built because the icon state was loaded and laid out, not because Spotlight
++ * starts: the Spotlight presenter is set up from inside the Today page's loadView, a passenger.
++ * -[SBIconController _makeTodayViewControllers] (+0x7c and +0xd4, 0x1c4bf05e0 and 0x1c4bf0638) asks for
++ * the same view controllers, but only where their ivars are nil: it is where a boot gets one built
++ * when setModel:'s call had no root folder to work with.
++ *
++ * Boot arguments (without one of them nothing is replaced, so an ordinary boot runs SpringBoard's own
++ * code and pays nothing for this):
++ *   today_log=1    a line for every call of either method -- time since the kernel booted, which call
++ *                  it is, the thread. One boot then answers how many times the page is rebuilt.
++ *   today_light=1  the view controller is not made (the factory answers nil): the expensive half,
++ *                  loadView and the search presenter and the blur and MTMaterialView's start-up, does
++ *                  not happen, while the rest of _rootFolderDidChange (the default Today layout, the
++ *                  widget suggestion upgrade, the do-not-disturb state) still does.
++ *   today_off=1    _rootFolderDidChange answers without doing anything at all, and the factory answers
++ *                  nil for everyone: no Today page ever exists (the home screen still lays out; the
++ *                  Today page is empty if it is swiped to, and the cover sheet has none).
++ */
++
++#define TODAY_AS_IT_IS  0
++#define TODAY_LIGHT     1       /* the page is not built; everything else about it is */
++#define TODAY_OFF       2       /* nothing of it is done */
++
++static IMP original_root_folder_did_change;
++static IMP original_new_today_view_controller;
++static int today_mode = TODAY_AS_IT_IS;
++static bool today_logs;
++
++static uint64_t
++milliseconds_since_boot(void)
++{
++	static mach_timebase_info_data_t base;
++
++	if (base.denom == 0) {
++		mach_timebase_info(&base);
++	}
++	return mach_absolute_time() * base.numer / base.denom / 1000000;
++}
++
++/* the value of NAME= among the arguments the kernel was given (kern.bootargs), or NULL */
++static const char *
++boot_argument_value(const char *arguments, const char *name)
++{
++	size_t length = strlen(name);
++	const char *argument = arguments;
++
++	while ((argument = strstr(argument, name)) != NULL) {
++		if ((argument == arguments || argument[-1] == ' ') && argument[length] == '=') {
++			return argument + length + 1;
++		}
++		argument++;
++	}
++	return NULL;
++}
++
++static void
++root_folder_did_change(id self, SEL selector)
++{
++	static unsigned calls;
++
++	calls++;
++	if (today_logs) {
++		say("hakios: today: _rootFolderDidChange #%u%s (%llu ms since boot, %s)\n", calls,
++		    calls == 1 ? ", the first of this boot" : "", milliseconds_since_boot(),
++		    pthread_main_np() ? "the main thread" : "NOT the main thread");
++	}
++	if (today_mode == TODAY_OFF) {
++		return;
++	}
++	((void (*)(id, SEL))original_root_folder_did_change)(self, selector);
++}
++
++static id
++new_today_view_controller(id self, SEL selector, id icon_manager, id icon_list_model, id root_folder, long location)
++{
++	static unsigned calls;
++
++	calls++;
++	if (today_logs) {
++		say("hakios: today: the Today view is built, #%u (location %ld%s, %llu ms since boot, %s)\n", calls,
++		    location, today_mode == TODAY_AS_IT_IS ? "" : ", not here", milliseconds_since_boot(),
++		    pthread_main_np() ? "the main thread" : "NOT the main thread");
++	}
++	if (today_mode != TODAY_AS_IT_IS) {
++		return nil;
++	}
++	return ((id (*)(id, SEL, id, id, id, long))original_new_today_view_controller)(self, selector, icon_manager,
++	    icon_list_model, root_folder, location);
++}
++
++static void
++watch_today(void)
++{
++	char arguments[1024] = "";
++	size_t size = sizeof(arguments) - 1;
++	const char *value;
++
++	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0) {
++		return;
++	}
++	if ((value = boot_argument_value(arguments, "today_off")) != NULL && value[0] == '1') {
++		today_mode = TODAY_OFF;
++	}
++	if ((value = boot_argument_value(arguments, "today_light")) != NULL && value[0] == '1' &&
++	    today_mode != TODAY_OFF) {
++		today_mode = TODAY_LIGHT;
++	}
++	if ((value = boot_argument_value(arguments, "today_log")) != NULL && value[0] == '1') {
++		today_logs = true;
++	}
++	if (today_mode == TODAY_AS_IT_IS && !today_logs) {
++		return;         /* nothing asked for: the Today page is SpringBoard's own */
++	}
++	original_root_folder_did_change = replace_method("SBIconController", "_rootFolderDidChange", 0x1c4befa68UL,
++	    (IMP)root_folder_did_change);
++	original_new_today_view_controller = replace_method("SBIconController",
++	    "_newTodayViewControllerWithIconManager:iconListModel:rootFolder:location:", 0x1c4bf74bcUL,
++	    (IMP)new_today_view_controller);
++	say("hakios: today: %s; _rootFolderDidChange %s, _newTodayViewController... %s\n",
++	    today_mode == TODAY_OFF ? "nothing of the Today page is done (today_off=1)" :
++	    today_mode == TODAY_LIGHT ? "the Today view controller is not made (today_light=1)" :
++	    "the Today page as SpringBoard has it",
++	    original_root_folder_did_change ? "hooked" : "NOT hooked",
++	    original_new_today_view_controller ? "hooked" : "NOT hooked");
++}
++
+ /* ---- the side button's long press ---------------------------------------------------------------- */
+ 
+ /*
+@@ -1246,6 +1392,56 @@ load_tweaks(void)
+ 	}
+ }
+ 
++
++/*
++ * Registration from inside SpringBoard.
++ *
++ * LaunchServices answers a plain tool with silence: the workspace is built, the proxy for the
++ * bundle comes back, and registerApplication: is never answered (docs/research, addendum 34a).
++ * SpringBoard is an application the system trusts, and it is the process that ends up drawing the
++ * home screen, so the same call is worth making from here -- a minute in, when lsd has a database
++ * to talk about.
++ */
++static void
++register_test_app(void)
++{
++	Class workspace_class = objc_getClass("LSApplicationWorkspace");
++	Class proxy_class = objc_getClass("LSApplicationProxy");
++	const char *path = "/Applications/TestApp.app";
++	id workspace, proxy, list;
++	CFURLRef url;
++	BOOL registered;
++	long known = -1;
++
++	if (workspace_class == NULL || proxy_class == NULL) {
++		say("hakios: register: LaunchServices classes are not here\n");
++		return;
++	}
++	workspace = ((id (*)(id, SEL))objc_msgSend)((id)workspace_class,
++	    sel_registerName("defaultWorkspace"));
++	if (workspace == NULL) {
++		say("hakios: register: no workspace\n");
++		return;
++	}
++	list = ((id (*)(id, SEL))objc_msgSend)(workspace, sel_registerName("allApplications"));
++	if (list != NULL) {
++		known = (long)((unsigned long (*)(id, SEL))objc_msgSend)(list, sel_registerName("count"));
++	}
++	say("hakios: register: SpringBoard sees %ld applications\n", known);
++	url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), true);
++	proxy = ((id (*)(id, SEL, CFURLRef))objc_msgSend)((id)proxy_class,
++	    sel_registerName("applicationProxyForBundleURL:"), url);
++	say("hakios: register: proxy %p for %s\n", (void *)proxy, path);
++	registered = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
++	    sel_registerName("registerApplication:"), proxy);
++	say("hakios: register: registerApplication: -> %d\n", (int)registered);
++	list = ((id (*)(id, SEL))objc_msgSend)(workspace, sel_registerName("allApplications"));
++	if (list != NULL) {
++		known = (long)((unsigned long (*)(id, SEL))objc_msgSend)(list, sel_registerName("count"));
++	}
++	say("hakios: register: SpringBoard now sees %ld applications\n", known);
++}
++
+ __attribute__((constructor))
+ static void
+ hakios_springboard_init(void)
+@@ -1280,6 +1476,12 @@ hakios_springboard_init(void)
+ 	 * this one opens it, the way a jailbreak's own hook does.
+ 	 */
+ 	load_tweaks();
++	/*
++	 * register_test_app() is not scheduled any more: the call it makes never returns and takes
++	 * SpringBoard's UI down with it (docs/research, addendum 34b). The function stays, unused, so
++	 * the next attempt starts from what was learned rather than from nothing.
++	 */
++	(void)register_test_app;
+ 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
+ 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
+ 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",
+@@ -1287,6 +1489,7 @@ hakios_springboard_init(void)
+ 	snapshot_format = replace_method_of_kind('+', "XBApplicationSnapshotManifestImpl", "_outputFormatForSnapshot:",
+ 	    0x1f1c91480UL, (IMP)snapshot_output_format);
+ 	plain_vibrancy();
++	watch_today();
+ 	original_lock_long_press = (void (*)(id, SEL, id))replace_method("SBLockHardwareButton", "longPress:", 0x1c4f6ab44UL,
+ 	    (IMP)lock_long_press);
+ 	poster_switcher = replace_method("SBMainDisplayPolicyAggregator", "_allowsCapabilityPosterSwitcherWithExplanation:",
