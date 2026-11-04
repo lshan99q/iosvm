@@ -7,7 +7,14 @@
 
 ---
 
-## 零、一句话现状
+## 零、一句话现状（四项判据都有答案了）
+
+| 判据 | 结论 | 关键数字 |
+|---|---|---|
+| P0''' 停顿的栈 | **停顿 = 渲染的 CPU 成本，不是死锁** | 331/400 采样 ≥390% busy（4 核满）；窗口内 SpringBoard 90–98%；热栈是 `SBTodayViewController loadView` / `SBFFeatherBlurView` |
+| P1''' 缩小停顿 | **压不下去：单线程瓶颈** | SMP 4/6/8 → 3.62/3.67/4.07 fps、停顿 16/21/15 次；加核只把占用摊到 400→600→750% |
+| P2''' 测量口径 | **尺子换了、四格各一个数字，但「同一窗口」只在「稳定之后」成立** | 整段 0.06 / 0.10 / 0.53 / **5.08 fps**；「前 20 帧」四格都是 0.04–0.05 fps（落在启动段） |
+| P3''' B 路靶子 | **glyph 是 CoreGraphics 画进 IOSurface，不经记录器** | `312x202 LA08` 覆膜在 25 次 `-texImageIOSurface:` 里 0 次；`metal=1` 下无 MTLDevice；靶子 `CAImageQueueRegisterIOSurfaceBuffer` |
 
 **停顿不是「整机停住」，是「整机 100% 忙于渲染」**：`ustacks=top` 的采样里，UI 阶段 **60 个样本是 ≥399% busy**
 （4 个 cpu 全满，400% 是上限），窗口内最忙的是 **SpringBoard**（窗口内累计 6973%）、`launchd.darwin`、`chronod`；
@@ -153,7 +160,21 @@ thread 0xd0 (running)
 | 文件 | 用途 |
 |---|---|
 | `harness/ustacks_windows.py` | 把内核 top 采样与帧间隔放同一根时钟，回答「停顿窗内是在跑还是在等」 |
+| `harness/drive-scroll.sh` | `WINDOW_FRAMES` / `WINDOW_SPAN` / `WINDOW_CLOCK=host|guest` / `--dry-run`（porter 改） |
+| `qemu/symstack.py` | `SYMSTACK_CACHE` 环境变量；`a2s.json` 的 `?` 污染说明 |
+| `ipsw`（临时） | `/tmp/ipsw` v3.1.741（宿主原本没有；符号化必需） |
 
-## 六、下一步
+提交（`iosvm` main）：`8eb2cc1` 计划、`359d579` P0'''/P1'''/P3'''、`08d10e2` P2''' 的四行数字；
+`qemu/symstack.py` 与 `harness/ustacks_windows.py` 各自一个提交。
 
-（随证据补齐）
+## 六、下一步（第十一阶段的候选，按证据排序）
+
+1. **B 路第一步**（最有价值）：按 P3''' 的靶子 interpose `CAImageQueueRegisterIOSurfaceBuffer`，先只打
+   `surface ID + 尺寸 + 格式 + queue`，与内核 `MiniIOSurface: … created surface` 对表，确认 312x202 LA08 的到达时刻；
+2. **把「界面稳定之后」的窗口定义写死**：`WINDOW_FROM` 用「界面出现后 60 s」或「第 500 帧」，四格重跑一次，
+   拿到真正可比的四个数字（本阶段只做到「各一个数字」）；
+3. **Today 视图的重建**：`_rootFolderDidChange` 每次都会重建（P0''' 的热栈），如果能关掉/避开主屏的 Today 页，
+   停顿数与帧率都会变——这是唯一还没试过、且有证据支持的「减少渲染成本」的杠杆；
+4. **远程配置的屏幕为什么是黑的**：W1.5/W1.5+W3 两格 host 有 423/4,101 帧、客机截图却 <300 KB（黑屏），
+   与第七阶段 P1b 的「`remote_only` 显示面 0 像素」是同一件事，行写回（W3）并没有把画面送到屏幕上；
+   这条直接影响「加速后到底看不看得见」，下一阶段要给它一个结论。
