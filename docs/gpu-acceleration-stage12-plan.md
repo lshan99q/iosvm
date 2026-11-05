@@ -209,6 +209,24 @@ legacy 格式不兼容是真的，但它影响的是「服务端自己画的字�
 下一步用 `GLWIRE_DUMP_DRAWS` 把一帧里每次 draw 的 FBO 图落盘，看 program 13 的那 10 次 draw 到底画到了哪个
 FBO/什么位置（怀疑落到了一个不会被合成的 FBO，或顶点/状态被覆盖）。
 
+**第四发（s12dump，21:33–21:48，`GLWIRE_DUMP_DRAWS`：一帧里每一笔 draw 之后的 FBO 图都落盘）**：
+把 1500 帧的 9 笔 draw 全量对比，字形的谜底落到**一笔具体 draw**上：
+
+```
+draw 0 fbo 1 program 13 viewport 0,0 750x1624 scissor 0,0 0x0 blend off 1 0 | unit 0 texture 49 146x90 | unit 1 texture 8 64x19
+draw 1 fbo 3 program 7  ... blend on 1 771 ...
+draw 2 fbo 3 program 5  ... unit 0 texture 50 180x180 ...
+```
+
+- 落盘结果：**draw 0 之后 FBO 1 一个非零像素都没有**（`nonzero_px=0`）；而 draw 1..8 落在 FBO 3 上，
+  彼此差几百到 6135 个像素（时钟指针、图标分别更新）——所以**字形那笔 draw 什么也没写进去**，且
+  该帧 `glerror 0x0`（不是 GL 报错，是它写出的就是透明黑）。
+- 它的状态值得记：`blend off`（src ONE, dst ZERO）意味着**着色器输出原样写进 FBO**；输出全 0 就只能解释为
+  「颜色/属性/均匀量没有送到宿主」——最可能是**文字颜色的 uniform 或顶点色没被录制/没生效**，于是预乘颜色=0。
+
+所以现在靶子从「backboardd 的 CA 不绑纹理」收紧成「**program 13 这条文字 draw 的输入（uniform / 顶点属性）在 wire 上丢了**」。
+下一步：把 program 13 那几笔 draw 的 uniform 值（`glUniform4f`/`4fv`）和顶点属性数据打印出来，与可见的 program 23/5 对比。
+
 **下一步（P0''''' 需要的）**：在 backboardd 的 CA 里找「收到的 image 为什么没有变成纹理」——候选：
 `CA::Render::Image` 的解码、layer 可见性/内容类型（LA08 是 luminance+alpha 的 mask，可能走另一条着色器路径）、
 或 `-texImageIOSurface:` 之外的绑定入口（`glTexImage2D` with client storage / EGLImage）。若这条路补不齐，

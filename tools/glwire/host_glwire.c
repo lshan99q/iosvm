@@ -433,7 +433,16 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	logged++;
 	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
 	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-	printf("glwire: draw#%u %s mode %#x count %d program %d", logged, how, mode, (int) count, (int) program);
+	{
+		GLint viewport[4] = { 0, 0, 0, 0 };
+		GLint framebuffer = 0;
+
+		glGetIntegerv(GL_VIEWPORT, viewport);
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+		printf("glwire: draw#%u %s mode %#x count %d program %d fbo %d viewport %d,%d %dx%d", logged, how, mode,
+		    (int) count, (int) program, (int) framebuffer, (int) viewport[0], (int) viewport[1], (int) viewport[2],
+		    (int) viewport[3]);
+	}
 	for (unsigned unit = 0; unit < 8; unit++) {
 		GLint bound = 0;
 
