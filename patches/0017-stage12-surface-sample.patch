@@ -1,0 +1,121 @@
+--- twelfth stage: a surface's pixels, said every five seconds from the panel's presenter
+--- (boot-arg surfsample=<id> surfsample_b=<id>); see docs/gpu-acceleration-stage12-plan.md
+
+--- a/xnu-src/xnu-8796.121.2/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/xnu-src/xnu-8796.121.2/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -181,6 +181,106 @@
+  */
+ static TUNABLE(uint32_t, gTouchLat, "touch_lat", 0);
+ 
++/*
++ * Twelfth stage, P1''''': the pixels of a surface that no texture bind names. The kernel's own log
++ * says SpringBoard makes a 312x202 'LA08' overlay (the text) and a 184x124 BGRA surface (a widget
++ * snapshot), and the render server's texture binds name neither; whether they hold anything at all
++ * is what separates "the text was never drawn" from "it was drawn and never composited". boot-arg
++ * surfsample=<id> (and surfsample_b=<id>) names them; the panel's presenter samples each every five
++ * seconds: five row hashes (the same FNV the glwire probes use) and how much of the sampling is not
++ * zero.
++ */
++static TUNABLE(uint32_t, gSurfSampleA, "surfsample", 0);
++static TUNABLE(uint32_t, gSurfSampleB, "surfsample_b", 0);
++
++static uint32_t
++sampleRowHash(const uint8_t * row, uint32_t used)
++{
++	uint32_t hash = 2166136261u;
++
++	if (row == NULL || used < 4) {
++		return hash;
++	}
++	for (uint32_t i = 0; i < 5; i++) {
++		uint32_t pixel = (used / 4 - 1) * i / 4;
++		for (uint32_t b = 0; b < 4; b++) {
++			hash = (hash ^ row[pixel * 4 + b]) * 16777619u;
++		}
++	}
++	return hash;
++}
++
++static void
++sampleOneSurface(uint32_t sid)
++{
++	MiniIOSurface * s;
++	uint32_t hash[5], nonzero = 0, samples = 0;
++	uint32_t width, height, rowBytes;
++	size_t used;
++	uint8_t * p;
++
++	if (sid == 0) {
++		return;
++	}
++	s = MiniIOSurfaceCopy(sid);
++	if (s == NULL) {
++		IOLog("MiniIOSurface: surfsample %u: no such surface\n", sid);
++		return;
++	}
++	width = s->info.width;
++	height = s->info.height;
++	rowBytes = s->info.bytesPerRow;
++	p = s->pixels();
++	/* (a 'LA08' surface is luminance+alpha, two bytes a pixel: the row holds width * bytesPerElement,
++	 * not width * 4 -- the first version of this check asked for four and never read a glyph surface) */
++	used = (size_t) width * (size_t) s->info.bytesPerElement;
++	if (used > rowBytes) {
++		used = rowBytes;
++	}
++	if (p == NULL || width == 0 || height == 0 || used < 4) {
++		IOLog("MiniIOSurface: surfsample %u: %ux%u, %u bytes a row, no pixels to read\n", sid, width, height, rowBytes);
++		MiniIOSurfaceDrop(s);
++		return;
++	}
++	for (uint32_t i = 0; i < 5; i++) {
++		uint32_t y = (height - 1) * i / 4;
++		hash[i] = sampleRowHash(p + (size_t) y * rowBytes, (uint32_t) used);
++	}
++	/* the whole surface, not a sample: how much of it is not zero is what says "there are glyphs in
++	 * this mask" (a few percent) from "it was never drawn" (nearly none) */
++	for (uint32_t y = 0; y < height; y++) {
++		uint8_t * row = p + (size_t) y * rowBytes;
++		for (size_t x = 0; x < used; x++) {
++			nonzero += row[x] != 0;
++			samples++;
++		}
++	}
++	IOLog("MiniIOSurface: surfsample %u %ux%u '%c%c%c%c' %u bytes a row, rows %08x %08x %08x %08x %08x, %u of %u sampled bytes not zero\n",
++	    sid, width, height, (int) (s->info.pixelFormat >> 24 & 0xff), (int) (s->info.pixelFormat >> 16 & 0xff),
++	    (int) (s->info.pixelFormat >> 8 & 0xff), (int) (s->info.pixelFormat & 0xff), rowBytes,
++	    hash[0], hash[1], hash[2], hash[3], hash[4], nonzero, samples);
++	MiniIOSurfaceDrop(s);
++}
++
++static void
++sampleSurfaces(void)
++{
++	static uint64_t last;
++	uint64_t now = mach_absolute_time(), ns = 0;
++
++	if (gSurfSampleA == 0 && gSurfSampleB == 0) {
++		return;
++	}
++	if (last != 0) {
++		absolutetime_to_nanoseconds(now - last, &ns);
++		if (ns < 5 * NSEC_PER_SEC) {
++			return;
++		}
++	}
++	last = now;
++	sampleOneSurface(gSurfSampleA);
++	sampleOneSurface(gSurfSampleB);
++}
+ 
+ static inline uint64_t
+ micros(uint64_t absolute)
+@@ -1244,6 +1344,8 @@
+ 		fStatDrawing = 0;
+ 		fStatSince = 0;
+ 	}
++	/* (boot-arg surfsample=: what a surface no texture bind names holds, five lines a minute) */
++	sampleSurfaces();
+ 	IOLockUnlock(fLock);
+ }
+ 

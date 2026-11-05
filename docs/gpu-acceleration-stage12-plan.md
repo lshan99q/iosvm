@@ -100,6 +100,39 @@ lld 的 `-image_base` / `-segaddr` 都是「not yet implemented」，所以**在
    `Darwin Kernel Version 22.5.0: Thu Nov 5 17:55:15 CST 2026`；150 s 自检：1 次 SpringBoard、0 panic、0 布局错误。
    顺带记一条**死路**：lld 路径加 `-image_base` 没用 —— `ld64.lld` 对 `-image_base` / `-segaddr` 都是 "not yet implemented"。
 
+### P1''''' 的结果（s12surf，18:12–18:33）：画了，但没交出去
+
+工具：内核侧 `surfsample=<id>`（`MiniIOMobileFramebuffer.cpp` 的 presenter 每 5 秒对指定 surface 做 5 行哈希 +
+**全量非零字节统计**）+ 用户态 `surfprobe:`（`inject_sb.c`，SpringBoard 自己 `IOSurfaceLookup(id)`，同一算法）。
+两个视角独立，结果逐位相同：
+
+```
+MiniIOSurface: SpringBoard[10] created surface 3: 184x124 'BGRA', 736 bytes per row, 0 planes, 98304 bytes
+MiniIOSurface: SpringBoard[10] created surface 4: 312x202 'LA08', 640 bytes per row, 0 planes, 131072 bytes
+MiniIOSurface: surfsample 4 312x202 'LA08' 640 bytes a row, rows b9fee455 549649bc c1bd17f0 c1bd17f0 b9fee455, 45412 of 126048 sampled bytes not zero
+surfprobe: id=4 312x202 bpr 640 bpe 2 rows b9fee455 549649bc c1bd17f0 c1bd17f0 b9fee455, 45412 of 126048 sampled bytes not zero (pid 10)
+MiniIOSurface: surfsample 3 184x124 'BGRA' 736 bytes a row, rows b9fee455 dd718f7f 05f98735 79440d15 b9fee455, 79425 of 91264 sampled bytes not zero
+```
+
+结论：
+
+- **字形覆膜不是空的：36.0%（45,412 / 126,048 字节）非零**；widget 快照 **87.0%（79,425 / 91,264）非零**
+  —— CoreGraphics 确实把字和 widget 画进去了，内容还在。
+- 同一次启动里**出帧的只有 backboardd（pid 16：1,001 次 `end of frame`、999 次 `flush`）**；SpringBoard（pid 10）
+  一次都没有。28 张 image 列表与 26 条 `-texImageIOSurface:` 里都没有 3/4 号面。
+- 所以缺的不是「画」，是**客户端 surface 交给渲染服务器这一步**（CA 的 client→server handoff）。图标能出现，
+  是因为 backboardd 自己创建并绘制 180x180 面；wallpaper / widget / 文字这些客户端内容，一张都没到服务器。
+
+判据 P1'''''：**达成**（≥1 条宿主/内核行、哈希与客人机 surface 相等；这里是两个视角各自相等）。
+
+**顺带修的两个采样 bug（都值得记）**：① 内核侧最初用 `width * 4` 判像素宽度，`LA08` 是 2 字节/像素
+（640 B/row，312 宽），于是永远打「no pixels to read」；② 稀疏采样（每 16 行、每 64 字节）把 36% 的内容读成
+「2/130」，改成全量统计才有意义。
+
+**下一步（P0''''' 需要的）**：CA 的 handoff 为什么没发生 —— 查 CAImageQueue 的 mach IPC、surface seed 通知、
+渲染服务器侧的解码路径；如果这条路在端口里根本没有实现，P0''''' 要么补齐它，要么改由客人机把这几张面的像素
+（含位置/矩形）显式送进 wire、在宿主合成。
+
 **第二发（s12b，16:15–16:30，默认镜像 + 全 28 张 image 列表，正结果）**：同一帧的 28 张 image 逐张点名，结论直接：
 - 界面帧：`images 28 0:2T 750x1624/3008  1:1T 750x1624/3072  2:5 180x180 … 9:12 28x65  10:13 28x95  11:14 28x28
   12:15 6x85  13:16 6x6 … 23:26T 19x19` —— **没有 312x202，没有 184x124**；
