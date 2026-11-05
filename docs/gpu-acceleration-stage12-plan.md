@@ -225,7 +225,11 @@ draw 2 fbo 3 program 5  ... unit 0 texture 50 180x180 ...
   「颜色/属性/均匀量没有送到宿主」——最可能是**文字颜色的 uniform 或顶点色没被录制/没生效**，于是预乘颜色=0。
 
 所以现在靶子从「backboardd 的 CA 不绑纹理」收紧成「**program 13 这条文字 draw 的输入（uniform / 顶点属性）在 wire 上丢了**」。
-下一步：把 program 13 那几笔 draw 的 uniform 值（`glUniform4f`/`4fv`）和顶点属性数据打印出来，与可见的 program 23/5 对比。
+
+**并且已经找到第一个嫌疑人**：在同一个转储里，几乎每笔 draw 都会绑的 **64x19 辅助纹理（guest 111，RGBA8，NEAREST）是空的**
+——`mean [0 0 0 0]`、`max 0`；而同一次转储里字形块 `guest 44` 的 146x90 有内容（alpha 均值 28.7、最大 205）。
+文字 shader 是 `u0 = 字形块`、`u1 = 这块 64x19`，输出全透明黑与此吻合：**颜色那一侧（u1）没有内容**。
+下一步：查 guest 111 是怎么被填的（哪个 opcode / 是不是也在那 8 帧 0x502 里），以及它的上传为什么在宿主变成空。
 
 **下一步（P0''''' 需要的）**：在 backboardd 的 CA 里找「收到的 image 为什么没有变成纹理」——候选：
 `CA::Render::Image` 的解码、layer 可见性/内容类型（LA08 是 luminance+alpha 的 mask，可能走另一条着色器路径）、
