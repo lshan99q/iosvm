@@ -415,6 +415,36 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 	return 1;
 }
 
+/*
+ * Stage thirteen, the experiment that tells whether the text's colour really is the 64x19 texture:
+ * GLWIRE_FILL=white replaces an empty 64x19 RGBA8 allocation with white pixels.  If the labels appear,
+ * that texture is the colour side; if they do not, it is not what the text shader is missing.
+ */
+static unsigned char *
+host_fill_special(GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels)
+{
+	const char *what = getenv("GLWIRE_FILL");
+	unsigned char *fill;
+	size_t bytes = (size_t) width * (size_t) height * 4;
+
+	if (what == NULL || pixels != NULL || format != GL_RGBA || type != GL_UNSIGNED_BYTE) {
+		return NULL;
+	}
+	if (width != 64 || height != 19) {
+		return NULL;
+	}
+	fill = malloc(bytes);
+	if (fill != NULL) {
+		memset(fill, what[0] == 'w' ? 0xff : 0x40, bytes);
+		if (what[0] == 'r') {
+			for (size_t i = 0; i < bytes; i += 4) {
+				fill[i] = 0xff;
+			}
+		}
+	}
+	return fill;
+}
+
 static void host_dump_uniforms(struct glstate *g, const char *tag);
 
 /*

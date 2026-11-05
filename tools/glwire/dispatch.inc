@@ -207,10 +207,16 @@ switch (opcode) {
 			glGetIntegerv(GL_TEXTURE_BINDING_2D, &watch_bound);
 			host_watch_upload(g, "teximage", (GLuint) watch_bound, a1, a2, a3, a4, a6, a7, p8, n8);
 		}
-		/* (twelfth stage: GL_ALPHA/LUMINANCE atlases, which this context will not take -- see
-		 * host_legacy_teximage) */
-		if (!host_legacy_teximage(a0, a1, a2, a3, a4, a5, a6, a7, p8)) {
-			glTexImage2D(a0, a1, a2, a3, a4, a5, a6, a7, p8);
+		{
+			unsigned char *filled = host_fill_special(a3, a4, a6, a7, p8);
+			const void *upload = filled != NULL ? (const void *) filled : p8;
+
+			/* (twelfth stage: GL_ALPHA/LUMINANCE atlases, which this context will not take -- see
+			 * host_legacy_teximage) */
+			if (!host_legacy_teximage(a0, a1, a2, a3, a4, a5, a6, a7, upload)) {
+				glTexImage2D(a0, a1, a2, a3, a4, a5, a6, a7, upload);
+			}
+			free(filled);
 		}
 		free(p8);
 		break;
