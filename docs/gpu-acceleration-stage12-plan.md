@@ -164,6 +164,27 @@ MiniIOSurface: backboardd[16] looked up surface 4 (312x202 'LA08') from a port: 
 - 一个对照：图标能显示，而且日历图标上「THU 5」也在 —— 文字**作为图标纹理的一部分**是能上屏的；上不了的只是
   LA08 那种「客户端字形图集 + 颜色」类型的 layer 内容。
 
+**另一条线索（texlog，2026-11-05 19:2x–20:0x）：宿主的 GL 吞掉了一类上传**
+
+给 `eagl.c` / `remote.inc` 加 `texlog=1`（记录 >8000 像素的纹理上传，含 `glTexSubImage2D`），一跑就看到界面阶段
+backboardd 在上传：
+
+```
+hakios-gl: texImage 177x90 format 0x1906 type 0x1401, filled (pid 16)     # 0x1906 = GL_ALPHA
+hakios-gl: texImage 184x90 format 0x1906 type 0x1401, filled (pid 16)
+...  512x512/256x256/128x128 format 0x190a (GL_LUMINANCE_ALPHA)
+```
+
+这些是**字形图集**（每条 90/42 高）。但宿主侧 `host_glwire: replay ... glerror 0x502`（GL_INVALID_OPERATION）在
+每次启动的 **8 帧**上出现 —— 桌面 GL 4.6 不接受 `internalformat = GL_ALPHA`。试了在宿主把三种 legacy 格式展开成
+RGBA 再上传（`host_legacy_teximage`）：
+- 展开确实发生（8 条 `glwire: legacy texture ... expanded to RGBA`），但 0x502 仍有 8 帧；
+- 画面变化只有两处：widget 白块**圆角变直角**（与修复前逐像素差 14,934 px）、搜索框字形略有不同；
+- **App 标签仍然没有** —— 所以这不是缺字的主因。
+
+因此这条修复**默认关闭**（宿主 `GLWIRE_LEGACY_FORMATS=1` 才开），只作为线索记下来：宿主上下文与客人机 GL 的
+legacy 格式不兼容是真的，但它影响的是「服务端自己画的字形」，不是 LA08 那条客户端内容链。
+
 **下一步（P0''''' 需要的）**：在 backboardd 的 CA 里找「收到的 image 为什么没有变成纹理」——候选：
 `CA::Render::Image` 的解码、layer 可见性/内容类型（LA08 是 luminance+alpha 的 mask，可能走另一条着色器路径）、
 或 `-texImageIOSurface:` 之外的绑定入口（`glTexImage2D` with client storage / EGLImage）。若这条路补不齐，

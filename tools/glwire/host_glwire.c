@@ -326,6 +326,95 @@ draw_panel(struct client *client, const unsigned char *panel, int width, int hei
 	glDeleteTextures(1, &texture);
 }
 
+/*
+ * Twelfth stage, and the reason the home screen had no app labels: CoreAnimation uploads its glyph
+ * atlases as GL_ALPHA (0x1906) textures -- 149x90, 152x90, ... -- and a desktop GL context here takes
+ * that as an internal format not at all (GL_INVALID_OPERATION, 0x502: frames of the interface replay
+ * with it).  The guest's GL ES accepted the call and drew nothing with it on this side, so the text
+ * simply was not there.  Expand the three legacy formats to RGBA on the way in; the alpha becomes the
+ * alpha, luminance its three channels.
+ */
+static int
+host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, GLsizei height, GLint border,
+    GLenum format, GLenum type, const void *pixels)
+{
+	enum { LEGACY_ALPHA = 0x1906, LEGACY_LUMINANCE = 0x1909, LEGACY_LUMINANCE_ALPHA = 0x190a };
+	unsigned char *expanded;
+	size_t count, i;
+	int kind;
+	static unsigned said;
+
+	if (level != 0 || type != GL_UNSIGNED_BYTE || width <= 0 || height <= 0) {
+		return 0;
+	}
+	/*
+	 * Off by default: with it on, the eight frames a boot replays with GL_INVALID_OPERATION (0x502,
+	 * the upload of a legacy format this context will not take) go through, but what the screen shows
+	 * of it is the widget boxes losing their rounded corners -- 14,934 pixels, measured -- and the app
+	 * labels are unchanged, so this is not the missing piece.  GLWIRE_LEGACY_FORMATS=1 turns it on for
+	 * whoever picks this thread up.
+	 */
+	{
+		static int wanted = -1;
+
+		if (wanted < 0) {
+			const char *value = getenv("GLWIRE_LEGACY_FORMATS");
+
+			wanted = value != NULL && value[0] == '1';
+		}
+		if (!wanted) {
+			return 0;
+		}
+	}
+	if (internal == LEGACY_ALPHA && format == LEGACY_ALPHA) {
+		kind = 1;
+	} else if (internal == LEGACY_LUMINANCE && format == LEGACY_LUMINANCE) {
+		kind = 2;
+	} else if (internal == LEGACY_LUMINANCE_ALPHA && format == LEGACY_LUMINANCE_ALPHA) {
+		kind = 3;
+	} else {
+		return 0;
+	}
+	count = (size_t) width * (size_t) height;
+	expanded = malloc(count * 4);
+	if (expanded == NULL) {
+		return 0;
+	}
+	for (i = 0; i < count; i++) {
+		const unsigned char *source = pixels != NULL ? (const unsigned char *) pixels : NULL;
+		unsigned char luma = 0, alpha = 0;
+
+		if (source != NULL) {
+			if (kind == 1) {
+				alpha = source[i];
+			} else if (kind == 2) {
+				luma = source[i];
+			} else {
+				luma = source[2 * i];
+				alpha = source[2 * i + 1];
+			}
+		}
+		/*
+		 * GL_ALPHA samples as (0, 0, 0, a) on the guest's GL, and CoreAnimation's mask shaders read the
+		 * three channels as well as the alpha: expanding it to white turned every rounded corner into a
+		 * square (measured: 14,934 pixels of the widget boxes changed).  Keep the legacy sample.
+		 */
+		expanded[4 * i + 0] = kind == 1 ? 0 : luma;
+		expanded[4 * i + 1] = kind == 1 ? 0 : luma;
+		expanded[4 * i + 2] = kind == 1 ? 0 : luma;
+		expanded[4 * i + 3] = kind == 1 ? alpha : (kind == 2 ? 255 : alpha);
+	}
+	if (said < 8) {
+		said++;
+		printf("glwire: legacy texture %dx%d internal %#x format %#x: expanded to RGBA\n", (int) width, (int) height,
+		    internal, format);
+		fflush(stdout);
+	}
+	glTexImage2D(target, level, GL_RGBA8, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, expanded);
+	free(expanded);
+	return 1;
+}
+
 static void host_after_draw(struct glstate *g);
 
 static int
