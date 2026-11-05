@@ -129,9 +129,29 @@ MiniIOSurface: surfsample 3 184x124 'BGRA' 736 bytes a row, rows b9fee455 dd718f
 （640 B/row，312 宽），于是永远打「no pixels to read」；② 稀疏采样（每 16 行、每 64 字节）把 36% 的内容读成
 「2/130」，改成全量统计才有意义。
 
-**下一步（P0''''' 需要的）**：CA 的 handoff 为什么没发生 —— 查 CAImageQueue 的 mach IPC、surface seed 通知、
-渲染服务器侧的解码路径；如果这条路在端口里根本没有实现，P0''''' 要么补齐它，要么改由客人机把这几张面的像素
-（含位置/矩形）显式送进 wire、在宿主合成。
+**再进一步（s12trace，18:34–18:49，`surftrace_of=SpringBoard surftrace=32`，内核现成的追踪）**：
+handoff **是发生的**，丢在服务器里：
+
+```
+MiniIOSurface: SpringBoard[10] created surface 3: 184x124 'BGRA', 736 bytes per row
+MiniIOSurface: SpringBoard[10] created surface 4: 312x202 'LA08', 640 bytes per row
+MiniIOSurface: SpringBoard[10] made a port for surface 3: 0x1c903
+MiniIOSurface: backboardd[16] looked up surface 3 (184x124 'BGRA') from a port: 0; of every 64 bytes 1205 of 1536 begin with a pixel that is not 0 …
+MiniIOSurface: SpringBoard[10] made a port for surface 4: 0x18b03
+MiniIOSurface: backboardd[16] looked up surface 4 (312x202 'LA08') from a port: 0; of every 64 bytes 1441 of 2048 begin with a pixel that is not 0 …
+```
+
+- SpringBoard 确实给 3/4 号面**建了 port**；backboardd **从 port 查到了它们**，还读到了像素（1205/1536、1441/2048 非零）。
+- 但同一台机器上 `-texImageIOSurface:` 只被调用 **25 次，全是别的面（11..22 等）**，没有 3/4；28 张 image 里也没有。
+- 也就是说：**交出去了、服务器也拿到了，但 CA 在 backboardd 里没有把它们变成纹理画出来**。这不是「客户端没发」，
+  是「服务器收到后没绑」。
+- 一个对照：图标能显示，而且日历图标上「THU 5」也在 —— 文字**作为图标纹理的一部分**是能上屏的；上不了的只是
+  LA08 那种「客户端字形图集 + 颜色」类型的 layer 内容。
+
+**下一步（P0''''' 需要的）**：在 backboardd 的 CA 里找「收到的 image 为什么没有变成纹理」——候选：
+`CA::Render::Image` 的解码、layer 可见性/内容类型（LA08 是 luminance+alpha 的 mask，可能走另一条着色器路径）、
+或 `-texImageIOSurface:` 之外的绑定入口（`glTexImage2D` with client storage / EGLImage）。若这条路补不齐，
+退路是：客人机把这几张面的像素连同 layer 矩形显式送进 wire、在宿主合成。
 
 **第二发（s12b，16:15–16:30，默认镜像 + 全 28 张 image 列表，正结果）**：同一帧的 28 张 image 逐张点名，结论直接：
 - 界面帧：`images 28 0:2T 750x1624/3008  1:1T 750x1624/3072  2:5 180x180 … 9:12 28x65  10:13 28x95  11:14 28x28
