@@ -22,6 +22,22 @@
 
 ---
 
+## 零之一、本阶段已经量到的（2026-11-05）
+
+| 问题 | 结论 | 数字/原样行 |
+|---|---|---|
+| 460 s 启动空洞是什么 | **lsd 的串行 LaunchServices 工作**，不是饱和、不是锁、不是宿主 | 启动期 470 个样本：busy 中位 124%、≥4 核仅 7%；lsd 27,598%、containermanagerd 15,240%；界面之后才 399% 中位（SpringBoard 第一） |
+| LA08 字形 / 184x124 widget 面里有没有东西 | **有**：字被画进去了 | LA08 `45412 of 126048` 非零（36.0%）；184x124 `79425 of 91264`（87.0%）；内核与用户态两个视角逐位相同 |
+| 这两张面有没有交给渲染服务器 | **交了**，服务器也读到了 | `SpringBoard[10] made a port for surface 4: 0x18b03` → `backboardd[16] looked up surface 4 (312x202 'LA08') from a port: 0 …` |
+| 那屏幕上为什么没有 | **CA 在 backboardd 里没有把它们变成纹理** | 同一次启动 `-texImageIOSurface:` 25 次全是别的面（11..22 等），28 张 image 里也没有 3/4 |
+
+一句话：**字画了、也交到渲染服务器手里了，但 CA 没画**。下一步的靶子因此非常具体：backboardd 里
+「收到的 image」到「绑成纹理」之间那一步（`CA::Render::Image` 解码、LA08 这类 luminance+alpha 内容的着色器路径、
+或 `-texImageIOSurface:` 之外的绑定入口）。`metal=1` 已排除（该参数只给 `metal_test`，backboardd / SpringBoard
+都「not shown the device」）。
+
+---
+
 ## 一、这一阶段的三个决定
 
 | # | 决定 | 选错的代价 | 选对了解锁 |
