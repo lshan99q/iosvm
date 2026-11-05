@@ -76,6 +76,30 @@
 最可能是替换函数在 `inject_ciq_probe.c:235` 直接调用 `IOSurfaceCreate()`（被自己的 patch 命中），也可能是探针把启动链拖垮。
 **它不能进默认镜像**：`build.sh` 已改成 `CIQ=1` 才编、默认镜像不带它。结论：用户态钩子到此为止，下一发按上面第 1 条走**内核侧**。
 
+**工具债（2026-11-05 发现）**：机器在 11-05 重启过，**`/tmp/cctools` 被清掉**（内核链接器 `aarch64-apple-darwin11-ld` 的
+唯一副本），于是 `IOSVM_USE_LLD=0 tools/make-kernel.sh` 回落到 `ld64.lld`；lld 产出的内核 __TEXT 在 `0x100000000`，
+loader 判 `unexpected kernel layout` 拒载（`xnuloader/loader.c:2901` 要求 `vm_lo ≥ 0xfffffff007000000`）。
+lld 的 `-image_base` / `-segaddr` 都是「not yet implemented」，所以**在 cctools 找回来之前，内核侧改动没法验证**。
+已做的两件事：① `hakios-kernel` 从 `hakios-kernel.prebuilt` 恢复（能正常启动，150 s 自检通过）；
+② 内核侧的 `surfsample=` 采样代码留在树里但**未生效**，改走用户态等价实验（见下）——SpringBoard 自己用
+`IOSurfaceLookup(id)` 读 surface 3/4，5 秒一次打哈希与非零字节数（`inject_sb.c` 的 `surfprobe:`，boot-arg
+`surfsample=4 surfsample_b=3`，无需重编内核）。
+
+**已恢复（2026-11-05 17:5x）**，步骤记下来（下次再被清照这个做）：
+1. 代理下 `git` 的 TLS 会被打断（`gnutls_handshake() failed`）；`GIT_SSL_NO_VERIFY=true git clone --depth 1 …` 就能过
+   （`curl` 到 github API 正常，但 codeload / archive 的跳转不通）。
+2. libdispatch（cctools 的 configure 硬性要求 `-ldispatch`，Ubuntu 无包）：
+   `git clone --depth 1 https://github.com/apple/swift-corelibs-libdispatch` →
+   `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DINSTALL_PRIVATE_HEADERS=YES -DENABLE_SWIFT=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`
+   （**必须用 clang**：libdispatch 的 warning 集 gcc 不认 —— `cc: error: unrecognized command-line option '-Warray-bounds-pointer-arithmetic'`）
+   → `cmake --build build -j16 && sudo cmake --install build && sudo ldconfig`。
+3. cctools-port：`git clone --depth 1 …/tpoechtrager/cctools-port` → `cd cctools && ./configure --prefix=/tmp/cctools
+   --target=aarch64-apple-darwin11 && make -j16 && make install`（ld64 956.6，与之前一致）。
+4. 内核：`LANG=C LC_ALL=C IOSVM_USE_LLD=0 tools/make-kernel.sh -j8` → `hakios-kernel` 的 `__TEXT` 回到
+   `0xfffffff007004000`（`llvm-objdump --macho --private-headers` 验），banner
+   `Darwin Kernel Version 22.5.0: Thu Nov 5 17:55:15 CST 2026`；150 s 自检：1 次 SpringBoard、0 panic、0 布局错误。
+   顺带记一条**死路**：lld 路径加 `-image_base` 没用 —— `ld64.lld` 对 `-image_base` / `-segaddr` 都是 "not yet implemented"。
+
 **第二发（s12b，16:15–16:30，默认镜像 + 全 28 张 image 列表，正结果）**：同一帧的 28 张 image 逐张点名，结论直接：
 - 界面帧：`images 28 0:2T 750x1624/3008  1:1T 750x1624/3072  2:5 180x180 … 9:12 28x65  10:13 28x95  11:14 28x28
   12:15 6x85  13:16 6x6 … 23:26T 19x19` —— **没有 312x202，没有 184x124**；
@@ -102,13 +126,25 @@
   ⇒ **固定工作量 × 变化吞吐**；唯一同相位 `ustacks=top` 样本 busy **117%**（≈1.2/4 核）、lsd 73.9%、
   containermanagerd 26.9% ⇒ **不饱和，串行**。
 
-所以本阶段要做的是：**用一次带 `ustacks=top` 的启动把它钉死**（标签 `s12gap`，
-`XCMD="… glframes=1 ustacks=top ustacks_at=30 ustacks_ms=1000 ustacks_count=760"`，覆盖 30–789 s），
-然后按证据排序的杠杆试：
-① 砍 lsd 的 LaunchServices 工作（镜像里没有 csstore、每次在 ramfs 重建；rootfs 里 maxdepth≤4 有 191 个 .app）——
-   先做「禁用 lsd 跑一发」的定性实验；② 让第一帧别等 lsd（BootUI 的 activity assertion）；③ 宿主吞吐（tb-size=3072）。
+**已钉死（s12gap，2026-11-05 16:40–16:55，`XCMD="… glwire_local=0 glframes=1 ustacks=top ustacks_at=30
+ustacks_ms=1000 ustacks_count=760"`）**：客人机自己的 top 采样 **702 个**（30–790 s），分两相位看，答案非常干净：
 
-判据：≥20 个符号化样本 + 一条因果链；能修则启动到界面 −30%（否则写清卡在哪一行）。
+| 相位 | 样本 | busy 中位 | ≥390%（4 核） | 最忙的进程（累计 %） |
+|---|---|---|---|---|
+| 启动期 30–500 s | 470 | **124%** | 33（7%） | lsd **27,598%**、containermanagerd 15,240%、usermanagerd 4,756%、launchd.darwin 3,238% |
+| 界面之后 500 s+ | 232 | **399%** | 211（91%） | SpringBoard **25,825%**、kernel_task 11,784%、backboardd 6,928% |
+
+读法：
+- **460 s 的空洞不是 CPU 饱和**：启动期中位数只有 1.24 个核，7% 的样本摸到 4 核；最忙的是 **lsd**（LaunchServices
+  的串行工作）+ containermanagerd + usermanagerd。加核、砍 Today、抬锁 deadline 都动不了它。
+- **界面之后才是饱和**（中位 399%、91% 的样本 4 核满）——那才是第十阶段看到的「停顿是渲染成本」，但它在界面**之后**，
+  和那个 460 s 的空洞不是同一件事。
+- 因此杠杆按证据排序仍是：① 砍 lsd 的 LaunchServices 工作（镜像无 csstore、每次在 ramfs 重建；rootfs 里 maxdepth≤4
+  有 191 个 .app）——先做「禁用 lsd 跑一发」的定性实验；② 让第一帧别等 lsd（BootUI 的 activity assertion）；
+  ③ 宿主吞吐（tb-size=3072）。判据「启动到界面 −30%」要等 ① 的实验数字。
+
+判据：进程级样本 ≥20 已达成（702 个）；**线程级符号化栈还没做**（需要 `ustacks=lsd` 的一发 + `ipsw` 符号化，
+`/tmp/ipsw` 在 11-05 的机器重启后丢了，要先装回来）。
 
 ### P3''''' 四格表（半天，收尾）
 
