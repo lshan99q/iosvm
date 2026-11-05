@@ -201,6 +201,12 @@ switch (opcode) {
 		GLenum a7 = wire_get_u32(r);
 		GLsizei n8 = 0;
 		void *p8 = wire_take_image(r, &n8);
+		if (watch_wanted != NULL) {
+			GLint watch_bound = 0;
+
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &watch_bound);
+			host_watch_upload(g, "teximage", (GLuint) watch_bound, a1, a2, a3, a4, a6, a7, p8, n8);
+		}
 		/* (twelfth stage: GL_ALPHA/LUMINANCE atlases, which this context will not take -- see
 		 * host_legacy_teximage) */
 		if (!host_legacy_teximage(a0, a1, a2, a3, a4, a5, a6, a7, p8)) {
@@ -237,6 +243,12 @@ switch (opcode) {
 		GLenum a7 = wire_get_u32(r);
 		GLsizei n8 = 0;
 		void *p8 = wire_take_image(r, &n8);
+		if (watch_wanted != NULL) {
+			GLint watch_bound = 0;
+
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &watch_bound);
+			host_watch_upload(g, "subimage", (GLuint) watch_bound, a1, 0, a4, a5, a6, a7, p8, n8);
+		}
 		glTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7, p8);
 		free(p8);
 		break;

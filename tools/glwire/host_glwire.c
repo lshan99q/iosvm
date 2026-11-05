@@ -466,11 +466,49 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	glActiveTexture((GLenum) active);
 }
 
+/*
+ * Twelfth stage, the last stretch: the text drawer's colour side is a 64x19 RGBA8 texture that arrives
+ * at the host as zeros.  This says how it is made -- GLWIRE_WATCH=64x19 names the size, and every
+ * upload of a texture that size is said with the guest name, the format, whether the pixels came at
+ * all and a hash of them, so an empty upload (or none) is told from an upload whose bytes are black.
+ */
+static void
+host_watch_upload(struct glstate *g, const char *how, GLuint guest, GLint level, GLint internal, GLsizei width,
+    GLsizei height, GLenum format, GLenum type, const void *pixels, GLsizei bytes)
+{
+	const char *watch = getenv("GLWIRE_WATCH");
+	char want[32];
+	static unsigned said;
+	uint32_t hash = 2166136261u;
+	const unsigned char *data = pixels;
+
+	if (watch == NULL || level != 0 || said >= 40 || bytes < 0) {
+		return;
+	}
+	snprintf(want, sizeof(want), "%dx%d", (int) width, (int) height);
+	if (strcmp(watch, want) != 0) {
+		return;
+	}
+	said++;
+	for (GLsizei i = 0; data != NULL && i < bytes; i++) {
+		hash = (hash ^ data[i]) * 16777619u;
+	}
+	printf("glwire: watch %s host%u %dx%d internal %#x format %#x type %#x %s %d B hash %08x first %02x%02x%02x%02x\n",
+	    how, (unsigned) guest, (int) width, (int) height, internal, format, type,
+	    pixels != NULL ? "pixels" : "no-pixels", bytes, hash,
+	    data != NULL && bytes >= 1 ? data[0] : 0, data != NULL && bytes >= 2 ? data[1] : 0,
+	    data != NULL && bytes >= 3 ? data[2] : 0, data != NULL && bytes >= 4 ? data[3] : 0);
+	fflush(stdout);
+	(void) g;
+}
+
 static void host_after_draw(struct glstate *g);
 
 static int
 dispatch(struct glstate *g, wire_buffer *r, uint32_t opcode)
 {
+	const char *watch_wanted = getenv("GLWIRE_WATCH");
+
 #include "dispatch.inc"
 	return 0;
 }
