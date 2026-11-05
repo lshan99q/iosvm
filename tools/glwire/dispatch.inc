@@ -100,6 +100,7 @@ switch (opcode) {
 		GLint a1 = wire_get_i32(r);
 		GLsizei a2 = wire_get_i32(r);
 		g->drawn_framebuffer = g->bound_framebuffer;
+		host_note_draw(g, "arrays", a0, a2);
 		glDrawArrays(a0, a1, a2);
 		names_attribs_release(g);
 		GLWIRE_AFTER_DRAW(g);
@@ -113,6 +114,7 @@ switch (opcode) {
 		GLsizei n3 = 0;
 		void *p3 = wire_take(r, &n3);
 		g->drawn_framebuffer = g->bound_framebuffer;
+		host_note_draw(g, "elements", a0, a1);
 		glDrawElements(a0, a1, a2, p3);
 		names_attribs_release(g);
 		GLWIRE_AFTER_DRAW(g);

@@ -415,6 +415,48 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 	return 1;
 }
 
+/*
+ * Twelfth stage, the question the texture dump leaves open: are the glyph tiles (184x90, 136x42, ...)
+ * ever sampled by a draw?  The replay's draw carries no texture in its signature -- the binding does --
+ * so this asks the host which textures are bound to the first eight units at the moment of a draw, and
+ * which guest name each one is.  GLWIRE_DRAW_LOG=1 writes the first 300 of them.
+ */
+static void
+host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
+{
+	static unsigned logged;
+	GLint program = 0, active = 0;
+
+	if (logged >= 20000 || getenv("GLWIRE_DRAW_LOG") == NULL) {
+		return;
+	}
+	logged++;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	printf("glwire: draw#%u %s mode %#x count %d program %d", logged, how, mode, (int) count, (int) program);
+	for (unsigned unit = 0; unit < 8; unit++) {
+		GLint bound = 0;
+
+		glActiveTexture(GL_TEXTURE0 + unit);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+		if (bound == 0) {
+			continue;
+		}
+		printf(" u%u:host%u", unit, (unsigned) bound);
+		for (size_t i = 0; i < g->textures.capacity; i++) {
+			struct name_entry *entry = &g->textures.entries[i];
+
+			if (entry->state == 1 && (GLuint) entry->host == (GLuint) bound) {
+				printf("(guest%llu)", (unsigned long long) entry->guest);
+				break;
+			}
+		}
+	}
+	printf("\n");
+	fflush(stdout);
+	glActiveTexture((GLenum) active);
+}
+
 static void host_after_draw(struct glstate *g);
 
 static int

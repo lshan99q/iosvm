@@ -189,6 +189,26 @@ legacy 格式不兼容是真的，但它影响的是「服务端自己画的字�
 机制，会把变量塞进 backboardd 的环境）——客人机照常起（644+ 帧、44.9 fps），但串口上**一条 CA 事务日志都没有**：
 这版 QuartzCore 不认这个开关（或它的输出不走 stderr）。这条路不通，别再花时间。
 
+**第三发（s12dump，2026-11-05 20:52–21:07）：字被画了，但画不出东西**
+
+两个宿主探针（都已进仓库）：
+- `GLWIRE_DUMP_TEXTURES=…` + `GLWIRE_DUMP_FROM=1500`：界面稳定后把宿主手上的每张纹理落盘。结果 **144 张**：
+  两张 750x1624 面板、10 张 180x180 图标、还有一批 **90/42 高的字形小块**（`184x90`、`136x42`、`189x90`…），
+  全都**有内容**（`guest17` 的 184x90：alpha 最大 242、非零 91%；`guest47`：rgb≈(7,6,5)、alpha 42）。**没有 312x202** ——
+  LA08 从头到尾没有变成纹理。
+- `GLWIRE_DRAW_LOG=1`：每次 draw 记下 program 和前 8 个纹理单元绑的纹理（含 guest 名）。结果：
+  ```
+  glwire: draw#54 elements mode 0x4 count 6 program 13 u0:host13(guest17) u1:host11(guest15) u2:host10(guest14)
+  ```
+  —— **字形小块确实被 draw 采样**（每个小块出现 ~10 次，program 13），所以不是「CA 没画」。
+
+可是画面上标签位置**一个像素都没变**：把 alpha 展开成 `rgb=255` 与 `rgb=0` 两版截图逐像素对比，差异只在三段
+（状态栏 80–82 行、图标区 1103–1229 行、搜索框 2018–2047 行），**标签行（约 845–880 行）没有任何差异**。
+
+结论再收紧一层：**客户端交面、服务器绑纹理、字形纹理上传、draw 采样——四步都发生了，缺的是最后「画到画面上」的那一下**。
+下一步用 `GLWIRE_DUMP_DRAWS` 把一帧里每次 draw 的 FBO 图落盘，看 program 13 的那 10 次 draw 到底画到了哪个
+FBO/什么位置（怀疑落到了一个不会被合成的 FBO，或顶点/状态被覆盖）。
+
 **下一步（P0''''' 需要的）**：在 backboardd 的 CA 里找「收到的 image 为什么没有变成纹理」——候选：
 `CA::Render::Image` 的解码、layer 可见性/内容类型（LA08 是 luminance+alpha 的 mask，可能走另一条着色器路径）、
 或 `-texImageIOSurface:` 之外的绑定入口（`glTexImage2D` with client storage / EGLImage）。若这条路补不齐，
