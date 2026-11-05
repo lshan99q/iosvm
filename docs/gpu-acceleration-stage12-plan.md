@@ -185,6 +185,10 @@ RGBA 再上传（`host_legacy_teximage`）：
 因此这条修复**默认关闭**（宿主 `GLWIRE_LEGACY_FORMATS=1` 才开），只作为线索记下来：宿主上下文与客人机 GL 的
 legacy 格式不兼容是真的，但它影响的是「服务端自己画的字形」，不是 LA08 那条客户端内容链。
 
+**试过但没用的开关（2026-11-05 20:12–20:27）**：`caenv=CA_DEBUG_TRANSACTIONS=1`（inject.c 现成的 `caenv`
+机制，会把变量塞进 backboardd 的环境）——客人机照常起（644+ 帧、44.9 fps），但串口上**一条 CA 事务日志都没有**：
+这版 QuartzCore 不认这个开关（或它的输出不走 stderr）。这条路不通，别再花时间。
+
 **下一步（P0''''' 需要的）**：在 backboardd 的 CA 里找「收到的 image 为什么没有变成纹理」——候选：
 `CA::Render::Image` 的解码、layer 可见性/内容类型（LA08 是 luminance+alpha 的 mask，可能走另一条着色器路径）、
 或 `-texImageIOSurface:` 之外的绑定入口（`glTexImage2D` with client storage / EGLImage）。若这条路补不齐，
