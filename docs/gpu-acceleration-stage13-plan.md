@@ -120,3 +120,42 @@
   对应文件。若两组都失败，本阶段按「写清为什么」收尾。
 - **P3'''''' 是确定能做完的**（纯宿主代码），但要注意别再动圆角。
 - 本阶段**不追求**「四格表刷新」到新镜像（那是收尾项，数据可沿用第十一阶段，注明即可）。
+
+---
+
+## 八、P1 进展（2026-11-05 22:20–23:50，第一次审计）
+
+**做了什么**：给宿主加了两个探针（已进仓库 `tools/glwire`）：
+
+- `GLWIRE_UNIFORM_LOG=1`：把流里每个 `glUniform1f/4f` 连同 **guest location → host location** 和值打出来；
+- `GLWIRE_UNIFORM_PROGRAM=<n>`（并按「绑定 90/42 高字形块」自动触发）：对文字 draw 打印宿主程序里
+  **全部 active uniform 的名字 + 值**。
+
+**看到什么**：
+
+1. **文字程序（guest 13 / host 13）只有 5 个 uniform，没有颜色 uniform**：
+   ```
+   texmat0(loc 0)=1,1,0,0  texmatD(loc 1)=0.5,0.5,0.5,0.5  texture0(loc 2)=0,0,0,0
+   texture1(loc 3)=1,0,0,0  vertex_matrix(loc 4)=0.003,0,0,0
+   ```
+   名字（`texmat0/texmatD/texture0/texture1`）很像 CA 的**双平面（如 YCbCr）绘制**程序；颜色不在 uniform 里。
+2. 文字的 draw（例如 `draw#59`）状态：`fbo 1`、`viewport 0,0 750x1624`、**scissor 跟着字形块尺寸**（`on 0,0 161x90`）、
+   `blend off`；绑 `u0=字形块`、`u1=一张颜色/色度纹理`、`u2=32x32`。
+3. **稳态（frame 1500）时 scissor 已关**（991/1086 条是 `scissor off`），所以第十二阶段那次「FBO 全 0」**不是裁剪**。
+4. 稳态时 `u1` 是 **64x19 RGBA8（guest 111）**，而它在宿主上 **从头到尾全 0**：`GLWIRE_WATCH=64x19` 一次启动 4 次
+   `glTexImage2D(..., pixels=NULL)`、**0 次填充、0 次 sub-upload**；`GLWIRE_DUMP_TEXTURES` 里它的 `.pixels` 也是 `mean [0 0 0 0]`。
+
+**因此 P1 的结论（当前）**：文字 draw 的输出是透明黑，**因为它的 u1（颜色/色度纹理）在客人机侧就是空的**——不是 uniform
+没送到，也不是被裁剪。下一步要查的是**这张 64x19 纹理本该由谁填**：
+
+- 流里**没有任何 `glTexSubImage2D`**（opcode 25 在所有帧里 0 次），所以不是 sub-upload；
+- `glBlitFramebuffer`（slot 0x17a0）在 `eagl_slots.txt` 里标 `-`（CA 没被观察到调用），且不在 `spec.def` 里——若它其实是填充路径，
+  需要先把它加进 wire；
+- 另一种可能：这张纹理要求 `GL_TEXTURE_RECTANGLE`/`GL_EXT_sRGB` 之类的绑定方式，我们的 replay 没映射。
+
+**下一步（承接 §三 P1）**：① 给 `glBlitFramebuffer` 加录制（slot 已知），跑一发看它是否出现；② 若没有，查 CA 是否用
+`glCopyTexSubImage2D`（已录制，但 did 0 次）；③ 若都没有，就按「客人机从不填这张纹理」写结论，并把靶子转向
+「为什么 CA 不给它内容」（这是 CA 内部状态问题，不是 wire 问题）。
+
+**已经排除**：uniform 映射（值都到了正确位置，5 个 uniform 与访客程序一一对应）；scissor 裁剪（稳态是 off）；
+GL 错误（该帧 `glerror 0x0`）。

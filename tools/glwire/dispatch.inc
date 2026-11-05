@@ -406,6 +406,11 @@ switch (opcode) {
 		/* glUniform1f */
 		GLint a0 = wire_get_i32(r);
 		GLfloat a1 = wire_get_f32(r);
+		{
+			GLfloat uniform_values[1] = { a1 };
+
+			host_log_uniform(g, "1f", a0, names_uniform(g, a0), uniform_values, 1);
+		}
 		glUniform1f(names_uniform(g, a0), a1);
 		break;
 	}
@@ -416,6 +421,11 @@ switch (opcode) {
 		GLfloat a2 = wire_get_f32(r);
 		GLfloat a3 = wire_get_f32(r);
 		GLfloat a4 = wire_get_f32(r);
+		{
+			GLfloat uniform_values[4] = { a1, a2, a3, a4 };
+
+			host_log_uniform(g, "4f", a0, names_uniform(g, a0), uniform_values, 4);
+		}
 		glUniform4f(names_uniform(g, a0), a1, a2, a3, a4);
 		break;
 	}

@@ -415,6 +415,8 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 	return 1;
 }
 
+static void host_dump_uniforms(struct glstate *g, const char *tag);
+
 /*
  * Twelfth stage, the question the texture dump leaves open: are the glyph tiles (184x90, 136x42, ...)
  * ever sampled by a draw?  The replay's draw carries no texture in its signature -- the binding does --
@@ -425,7 +427,7 @@ static void
 host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 {
 	static unsigned logged;
-	GLint program = 0, active = 0;
+	GLint program = 0, active = 0, glyph_height = 0;
 
 	if (logged >= 20000 || getenv("GLWIRE_DRAW_LOG") == NULL) {
 		return;
@@ -437,14 +439,19 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		GLint viewport[4] = { 0, 0, 0, 0 };
 		GLint framebuffer = 0;
 
+		GLint scissor[4] = { 0, 0, 0, 0 };
+
 		glGetIntegerv(GL_VIEWPORT, viewport);
 		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-		printf("glwire: draw#%u %s mode %#x count %d program %d fbo %d viewport %d,%d %dx%d", logged, how, mode,
-		    (int) count, (int) program, (int) framebuffer, (int) viewport[0], (int) viewport[1], (int) viewport[2],
-		    (int) viewport[3]);
+		glGetIntegerv(GL_SCISSOR_BOX, scissor);
+		printf("glwire: draw#%u %s mode %#x count %d program %d (guest %u) fbo %d viewport %d,%d %dx%d "
+		    "scissor %s %d,%d %dx%d", logged, how, mode, (int) count, (int) program,
+		    (unsigned) g->current_program, (int) framebuffer, (int) viewport[0], (int) viewport[1],
+		    (int) viewport[2], (int) viewport[3], glIsEnabled(GL_SCISSOR_TEST) ? "on" : "off",
+		    (int) scissor[0], (int) scissor[1], (int) scissor[2], (int) scissor[3]);
 	}
 	for (unsigned unit = 0; unit < 8; unit++) {
-		GLint bound = 0;
+		GLint bound = 0, height = 0;
 
 		glActiveTexture(GL_TEXTURE0 + unit);
 		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
@@ -460,10 +467,18 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				break;
 			}
 		}
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		if (height == 90 || height == 42) {
+			glyph_height = height;
+		}
 	}
 	printf("\n");
 	fflush(stdout);
 	glActiveTexture((GLenum) active);
+	/* (stage thirteen: a draw that binds a glyph tile is a text draw -- say what its programme holds) */
+	if (glyph_height != 0) {
+		host_dump_uniforms(g, "text-draw");
+	}
 }
 
 /*
@@ -500,6 +515,73 @@ host_watch_upload(struct glstate *g, const char *how, GLuint guest, GLint level,
 	    data != NULL && bytes >= 3 ? data[2] : 0, data != NULL && bytes >= 4 ? data[3] : 0);
 	fflush(stdout);
 	(void) g;
+}
+
+/*
+ * Stage thirteen, P1: where the text drawer's colour is.  Two lines of evidence --
+ * GLWIRE_UNIFORM_LOG=1 says every glUniform the stream carries (guest location, host location, value)
+ * and GLWIRE_UNIFORM_PROGRAM=<guest programme> makes each of that programme's draws say the uniforms
+ * its host programme actually holds, so a value that arrives on the wrong location (or none) is seen.
+ */
+static void
+host_log_uniform(struct glstate *g, const char *how, GLint guest_location, GLint host_location,
+    const GLfloat *values, int count)
+{
+	static unsigned said;
+
+	if (getenv("GLWIRE_UNIFORM_LOG") == NULL || said >= 300) {
+		return;
+	}
+	said++;
+	printf("glwire: uniform %s programme(guest) %u location guest %d host %d value", how,
+	    (unsigned) g->current_program, (int) guest_location, (int) host_location);
+	for (int i = 0; i < count; i++) {
+		printf(" %.4f", (double) values[i]);
+	}
+	printf("\n");
+	fflush(stdout);
+}
+
+static void
+host_dump_uniforms(struct glstate *g, const char *tag)
+{
+	const char *wanted = getenv("GLWIRE_UNIFORM_PROGRAM");
+	static unsigned said;
+	GLint count = 0, max_length = 0;
+	GLuint program = g->current_host_program;
+
+	if (wanted == NULL || program == 0 || said >= 60) {
+		return;
+	}
+	{
+		unsigned long named = strtoul(wanted, NULL, 10);
+
+		/* (the draw log names host programmes; either number is accepted, so the two can be matched) */
+		if (named != (unsigned long) g->current_program && named != (unsigned long) program) {
+			return;
+		}
+	}
+	said++;
+	glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &count);
+	glGetProgramiv(program, GL_ACTIVE_UNIFORM_MAX_LENGTH, &max_length);
+	printf("glwire: %s programme(guest) %u host %u active %d uniforms:", tag, (unsigned) g->current_program,
+	    (unsigned) program, (int) count);
+	for (GLint i = 0; i < count && i < 16; i++) {
+		char name[128] = "?";
+		GLint size = 0, location = -1;
+		GLenum type = 0;
+		GLfloat value[16] = { 0 };
+
+		glGetActiveUniform(program, (GLuint) i, (GLsizei) sizeof(name), NULL, &size, &type, name);
+		location = glGetUniformLocation(program, name);
+		if (location >= 0) {
+			glGetUniformfv(program, location, value);
+		}
+		printf(" %s(loc %d)=%.3f,%.3f,%.3f,%.3f", name, (int) location, (double) value[0],
+		    (double) value[1], (double) value[2], (double) value[3]);
+	}
+	printf("\n");
+	fflush(stdout);
 }
 
 static void host_after_draw(struct glstate *g);
