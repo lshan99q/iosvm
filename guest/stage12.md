@@ -34,3 +34,14 @@ Two sampler bugs worth remembering: the kernel version first required `width * 4
 a 2-bytes-a-pixel `LA08` can never satisfy (it printed "no pixels to read" for the glyph surface);
 and a sparse sample (every 16th row, every 64th byte) read 36 % content as "2 of 130" — a full scan
 is what makes the number mean anything.
+
+## `texlog=1` — what the big texture uploads are
+
+Added to `remote.inc` (and `eagl.c`'s own entry) in the guest tree: with `texlog=1` the first forty
+uploads of more than 8,000 pixels are said, from the recorded stream, so the mode where the host draws
+everything still sees them.  What it found: once the interface is up, backboardd uploads the glyph
+atlases as `internalformat 0x1906` (GL_ALPHA, 177x90, 184x90, ... and 42-tall runs) and
+`0x190a` (GL_LUMINANCE_ALPHA, 512x512 and friends).  The host's desktop GL 4.6 then replays eight
+frames of the boot with `glerror 0x502`; `host_legacy_teximage()` in `host_glwire.c` expands those three
+formats to RGBA, which changes the widget boxes' corners (they lose their rounding) and nothing else --
+so it is off by default (`GLWIRE_LEGACY_FORMATS=1`), a lead rather than the missing piece.
