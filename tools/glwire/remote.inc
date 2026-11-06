@@ -511,6 +511,7 @@ remote_glBindFramebuffer(void *context, GLenum a0, GLuint a1)
 	if (!remote_only && local_entry[49] != NULL) {
 		((void (*)(void *, GLenum, GLuint))local_entry[49])(context, a0, a1);
 	}
+	eagl_note_bind(context, a1);
 	gw_glBindFramebuffer(a0, a1);
 }
 

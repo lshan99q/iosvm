@@ -296,6 +296,9 @@ def emit_slots(calls):
                         (ret, local_type, index, local_args))
             body.append("\t}")
         body += hook_lines(call)
+        if call.name == "glBindFramebuffer":
+            # (stage fifteen: eagl.c's own record of what is bound, which frame_begin() reports)
+            body.append("\teagl_note_bind(context, %s);" % call.a(1))
         call_args = args + ((", " if args else "") + "result") if call.returns else args
         body.append("\tgw_%s(%s);" % (call.name, call_args))
         if call.returns:
