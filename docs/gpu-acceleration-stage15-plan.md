@@ -175,3 +175,37 @@
    scissor 与顶点自洽（P0'''''''' 判据）。
 4. 然后才做 P1''''''''（FBO 0 alias）与 P2''''''''（标签上屏）——顺序不能倒：没有隔离，alias 只会把错误的状态
    写进正确的纹理。
+
+---
+
+## 十、进展（2026-11-06 12:00，上下文测量与跨帧 binding）
+
+**做了什么**
+
+1. **客人机侧 context 标记已上线**：`remote.inc` 的 57 个 wrapper 各加一条
+   `remote_note_context(context)`，`eagl_remote_begin()` 设 `wire_set_record_version(2)`，请求行第九字段 = 2。
+   重建 `root.apfs`（`IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs`，BUILD_RC=0）。
+2. **一发 900 s 的测量**（`/tmp/s14ctx.sh`）：3700 帧，每条记录都带 context，宿主打印
+   `client 17 speaks record version 2`；**全部 draw 都是 ctx 0**（20000 条 draw 日志），
+   `glwire: context 0 at opcode 19, record 0 of frame 1` 之后没有第二条 context 的行。
+   → 第二条 `EAGLContext` 被创建但从未录到 GL 调用。**ADR-011 的动机被推翻**（见其 Amendment）。
+3. **发现真正的状态丢失**：`eagl.c` 用 `glFlush` 结束一帧，CA 的 pass 会跨过去继续；宿主每帧开头强制绑回
+   自己的 framebuffer，续接的 draw 就落到替身上。加 `GLWIRE_KEEP_BINDING=1` 跨帧保留客人机的 binding 后：
+   label draw 的 fbo 从 1 变成真正的层 FBO（guest 6 `750x200`、guest 17 `64x19`、guest 23 `64x9`…），
+   矩阵与 scissor 自洽。记录在 **ADR-012**。
+4. **覆盖实验**：`GLWIRE_LABEL_WHITE=1` 用同一批顶点 + 纯品红片元程序重画 label draw：
+   单笔 11,520–17,010 个非零像素，706 笔里 412 笔非零，截图上品红块正好在字形位置。
+   → 几何/目标/裁剪全对；换成 CA 的程序则恒 0，所以缺的是**片元采样（或乘子）**。
+5. **采样实验（在跑）**：`GLWIRE_LABEL_SAMPLE=1` 把 u0 纹理读回（178x90：14,166 非零、alpha>127 只有 2；
+   130x42：591 个 alpha），`GLWIRE_LABEL_ALPHA=1` 把 atlas alpha 直接画成红色，用来区分「采样到 0」
+   与「程序/乘子是 0」。
+
+**这一节的结论**：P0'''''''' 的「上下文隔离」**不是**本阶段的答案（只有一条 context 在录）；本阶段的
+P1'''''''' 实际由 **ADR-012（跨帧 binding）** 开启，标签问题上移一层——从「画到哪」推进到「片元采样」。
+
+**下一步**
+
+1. 完成 `GLWIRE_LABEL_ALPHA=1` 的判定：若红色块出现，问题在 CA 的片元程序/ uniform；若仍为 0，
+   问题在采样器或纹理绑定（用 2D 采样 vs 纹理目标、sampler 的 min filter）。
+2. 修好后，`GLWIRE_KEEP_BINDING` 默认打开，重跑 P2'''''''' 的截图判据（≥300 KB、diff ≥95%）。
+3. 四格表与 P3'''''''' 收尾按原计划。

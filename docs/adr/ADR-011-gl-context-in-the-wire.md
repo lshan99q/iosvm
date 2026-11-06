@@ -91,3 +91,14 @@ each context in its own GL context.**
 - Two `hakios-gl: an OpenGL ES 3 context for CoreAnimation ... pid=16` lines in `/tmp/s14p0b.log`.
 - `glwire: programme 13 shader 12 ... S = S * (y * y) * (y * y); return D*(1. - S.a) + S;`
   (`/tmp/s14p0b-host.log`): an empty backdrop zeroes programme 13.
+
+## Amendment (2026-11-06 12:00): the measurement refuted the motivation
+
+The first stage-15 boot with the context field in every record (3700 frames, one backboardd) logged
+**only context 0**.  The second `EAGLContext` is created but never records a GL call.  So the label
+pass's state was not another context's, and this ADR's motivation was wrong.
+
+What stays: the record header, the version negotiation (old images still boot), the interning in the
+recorder, and `GLWIRE_CONTEXT_LOG` as a diagnostic.  What does not: "per-context replay is the fix
+for the label pass".  The actual defect and its fix are recorded in
+`ADR-012-frame-boundary-not-a-pass-boundary.md`.

@@ -184,31 +184,32 @@ glwire: draw#58 elements ... program 15 (guest 15) fbo 1 viewport 0,0 750x1624 s
 **结论**：`fbo 1` = `client->framebuffer`，是客人机 **FBO 0（EAGL 默认 framebuffer，也就是屏幕）** 的替身。
 它画完既不读回、也不参与合成——十三阶段「fbo 1 不被任何一笔 draw 采样」到这里有了名字。
 
-### 9.2 P1'''''''：标签为什么是 0 像素 —— **两条 EAGL context 合流 + 空背景**
+### 9.2 P1'''''''：标签为什么是 0 像素 —— **两处已澄清，一处待解**
 
-1. **文字 shader 解码**（`GLWIRE_PROGRAM_SOURCE=1`，`programme 15 shader 14` / `programme 13 shader 12`）：
-   - program 15 片元：`gl_FragData[0] = vec4(t0.a);` —— 纯 mask，覆盖到就该有像素；
-   - program 13 片元：`S = color * vec4(t0.a); darkenSover(S, D)`，而 `darkenSover` 里
-     **`S = S * (y*y) * (y*y)`（y = D 的亮度）**，再 `R = D*(1-S.a) + S`。D = `texture2DProj(texture1, texcoordD)`，
-     `texcoordD = gl_Position.xy * texmatD.xy + ...`（texmatD=0.5）——那张 64x19 是**屏幕背景的缩略**。
-     **D 全 0 时 S 被乘成 0、输出恒 0**，不管覆盖多少像素、顶点色多白。
-     所以十三阶段「把 64x19 填白画面不变」是必然结果：填白改的是纹理对象，D 仍是宿主上那条空纹理。
-2. **1313 笔标签 draw，每一笔之后 FBO 1 都是 0 个非零像素**（`/tmp/s14lab/l-label-*.bgra`）：
-   ```
-   glwire: label draw #1309 framebuffer 1: 0 nonzero pixels, 0 with alpha
-   ```
-   program 13 的 0 由第 1 条解释；program 15（纯 mask）的 0 只能是**没覆盖**。
-3. **目标与 scissor 对不上**：标签 draw 的 `scissor on 0,0 184x90`（正好是字形块尺寸），而同一笔的顶点 0 是
-   `458,433,0,1`（另一笔 `482,457`、`213,1193`，`GLWIRE_DRAW_LOG` 的 attrib 数据）。184x90 的 scissor 配屏幕坐标的顶点，
-   只有两种解释：目标本来是一个 184x90 的字形块渲染目标（那它就不该落在 750x1624 的替身上），或 scissor 与顶点来自两条流。
-4. **两条 EAGL context**：客人机日志一次启动里两条
-   `hakios-gl: an OpenGL ES 3 context for CoreAnimation ... pid=16`（同一个 backboardd），
-   而宿主只见到 **一个** client、**一个** GL context；`userland/src/eagl.c:373` 的 `static struct eagl *contexts[8]`
-   说明每条 context 有自己的 `framebuffer/colour/program/bound[8]/arrays[8]`。
-   wire 把两条流的调用按时间合并，宿主只有一个 FBO 绑定、一个 program、一套 uniform、一套纹理名——
-   标签 pass 拿到的是**另一条 context 的 scissor/矩阵**，而它要采样的 64x19 背景也可能根本不是同一个对象。
-5. **判定**：不是 uniform 错位、不是「64x19 是颜色」、不是「稳态 scissor off」（十三阶段测的是上一条流的 scissor）——
-   是 **GL context 没有隔离**。修复方向写进第十五阶段 P0''''''''/P1''''''''。
+> **2026-11-06 12:00 修订**：第十五阶段的测量（记录头带 context）推翻了本节原先「两条 EAGL context
+> 合流」的结论。下面按最新证据重写；ADR-011 保留 wire 格式与版本交涉（它们仍有用），但它的动机作废，
+> 真正的修复记录在 ADR-012。
+
+1. **文字 shader 的解码不变**：program 15 片元 = `vec4(t0.a)`（纯 mask）；program 13 片元 =
+   `darkenSover(color*glyph.a, backdrop)`，其中 `S = S * y^4`（y = backdrop 亮度），backdrop 全 0 时输出恒 0。
+   那张 64x19 是屏幕背景缩略（`texcoordD = NDC*0.5+0.5`），不是颜色。
+2. **一：eagl.c 的 frame boundary 不是 CA 的 pass boundary。** `eagl.c` 在 `glFlush` 结束一帧，而
+   CoreAnimation 的 pass 会跨过这次 flush 继续下去；宿主每帧开头强制绑回自己的 framebuffer，于是**续接的
+   draw**落在 750x1624 的替身上。证据：`GLWIRE_KEEP_BINDING=1` 之后，label draw 的 fbo 从 1 变成真正的层
+   FBO（guest 6 `750x200`、guest 17 `64x19`、guest 23 `64x9`…），并且状态自洽——`64x19` 目标 +
+   `scissor 0,0 64x19` + `vertex_matrix 0.0312…-15.0 / 0.1053…-86.58` 把顶点精确映射进该目标，status complete。
+   **修**：跨帧保留客人机的 binding（ADR-012，`GLWIRE_KEEP_BINDING`）。
+3. **二：只有一条 context 真的在录。** 一次 3700 帧的启动，每条记录都带 context（版本 2），**全部是 ctx 0**；
+   第二条 `EAGLContext` 被创建（两条 `an OpenGL ES 3 context for CoreAnimation`）但从未发出一条 GL 调用。
+   所以「两条流互相覆盖」不成立——上一版据此下的结论作废。
+4. **三：几何、目标、裁剪都对，缺的是片元采样。** 用同一批顶点、把片元程序换成纯品红
+   （`GLWIRE_LABEL_WHITE=1`）：单笔 label draw 覆盖 **11,520–17,010** 像素（706 笔里 412 笔非零），
+   截图上的品红块正好落在字形位置。换成 CA 自己的程序则恒 0——所以问题不是「画到哪」、也不是「有没有覆盖」，
+   是**采样（或把采样乘没的那一项）**。
+5. **仍在查**：glyph atlas（`GL_ALPHA`，宿主上经 legacy 展开成 RGBA8）读回是有内容的（178x90：14,166 个
+   非零、alpha>127 只有 2；130x42：591 个 alpha），texcoord 是 `[0,1]` 全图，但 CA 的片元程序采样后仍为 0。
+   正在用 `GLWIRE_LABEL_ALPHA=1`（把 atlas 的 alpha 直接画成红色）区分「采样到 0」与「程序/乘子是 0」。
+6. **判定**：标签的链路已经从「不知道画到哪」推进到「目标已修、覆盖已证、只剩片元采样」。
 
 ### 9.3 P2'''''''：widget 与壁纸的入口 —— 在**另一个进程**里
 
@@ -277,7 +278,7 @@ hakios-remote: s11 f 1 images 28 0:2T- 750x1624/3008 1:1T- 750x1624/3072 2:5T- 1
 | # | 判据 | 结果 |
 |---|---|---|
 | P0''''''' | fbo 1 的尺寸/附件/名字 + 与读回目标对得上 + 3 条原样日志 | **达成**：宿主替身 / 客人机 FBO 0；§9.1 |
-| P1''''''' | 标签上屏、截图 ≥300 KB、diff ≥95% | **未达成**（247,349 B）；根因定位到「两条 context 合流」，§9.2 |
+| P1''''''' | 标签上屏、截图 ≥300 KB、diff ≥95% | **未达成**（247,349 B）；根因拆成三块：跨帧 binding 丢失（已修，ADR-012）、两条 context 合流（已推翻）、片元采样（在查），§9.2 |
 | P2''''''' | 壁纸不再是纯黑、widget 内有内容 | **未达成**；入口定位到「另一个进程的面」，§9.3 |
 | P3''''''' | 两组对照、启动到界面 −30%，否则写清为什么 | **部分**：csstore 不可能；lsd 对照 A 见 §9.4 的数字/结论 |
 | P4''''''' | 四格表 + 0x502=0 + 圆角不回归 | **0x502 与圆角达成**（§9.5）；四格表未刷新（已说明） |
