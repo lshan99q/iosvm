@@ -144,3 +144,149 @@
 | 460 s 空洞 | 未做 | **P3'''''''** |
 | 四格表 / 0x502 | 未做 | **P4'''''''** |
 | 文档推送 | 已推（`cc0863a`、`e6641e3`） | **P5'''''''** |
+
+---
+
+## 九、结果（2026-11-06 09:45）—— 三件做完，标签卡在「两条 context 合流」
+
+> 本节的每一行都来自这次启动的日志/转储；命令与产物路径写在行内。
+
+### 9.1 P0'''''''：fbo 1 的身份 —— **宿主替身，对应客人机的 FBO 0（屏幕）**
+
+不是图层表面，也不是第二面板。三条证据：
+
+```
+glwire: fbo gen client=17 n=1: guest 1 -> host 2
+glwire: fbo bind client=17 target 0x8d40 guest 1 host 2 attachment none ... complete 0x8cd7 drawn-so-far 0
+glwire: fbo attach client=17 fbo host 2 guest 1 attachment 0x8ce0 kind 0x1702 name 1 texture guest 1 host 1 level 0 750x1624 internal 0x1908
+```
+
+每帧一笔 `glGenFramebuffers`，客人机的 FBO 名 1/2/… 映射到宿主 2/3/…，颜色附件就是该帧刚上传的面板纹理
+（`internal 0x1908`，750x1624）。而 `host 1` 是本渲染器自己的 framebuffer（`make_frame_buffer()` 拿到的第一个名字），
+summary 把它记成 `own 1`，并且把**客人机默认 framebuffer 0** 的 draw 记在它名下：
+
+```
+glwire: fbo summary frame frame 1200 client 17 own 1 drawn 2 readback-ready 0:
+  [guest 1 host 2 texture 1 750x1624 binds 3 draws 5] [guest 3 host 2 texture 7 750x1624 binds 606 draws 3433]
+  [guest 4 host 3 texture 4 750x1624 binds 602 draws 3432] ... [guest 0 host 1 none 0 0x0 binds 0 draws 648]
+```
+
+标签 pass 是**每帧的第一笔 draw**，在任何 `glBindFramebuffer` 之前：
+
+```
+glwire: draw#55 elements ... program 11 (guest 11) fbo 1 viewport 0,0 750x1624 scissor on 0,0 750x200 status 0x8cd5 drawbuffer 0x8ce0 u0:host12(guest16) ...
+glwire: draw#57 elements ... program 13 (guest 13) fbo 1 viewport 0,0 750x1624 scissor on 0,0 184x90 ... u0:host13(guest17) u1:host11(guest15) u2:host10(guest14)
+glwire: draw#58 elements ... program 15 (guest 15) fbo 1 viewport 0,0 750x1624 scissor on 0,0 184x90 ... u0:host15(guest18) u1:host11(guest15) u2:host10(guest14)
+```
+
+（长行按排版折行，字段原样。）
+
+**结论**：`fbo 1` = `client->framebuffer`，是客人机 **FBO 0（EAGL 默认 framebuffer，也就是屏幕）** 的替身。
+它画完既不读回、也不参与合成——十三阶段「fbo 1 不被任何一笔 draw 采样」到这里有了名字。
+
+### 9.2 P1'''''''：标签为什么是 0 像素 —— **两条 EAGL context 合流 + 空背景**
+
+1. **文字 shader 解码**（`GLWIRE_PROGRAM_SOURCE=1`，`programme 15 shader 14` / `programme 13 shader 12`）：
+   - program 15 片元：`gl_FragData[0] = vec4(t0.a);` —— 纯 mask，覆盖到就该有像素；
+   - program 13 片元：`S = color * vec4(t0.a); darkenSover(S, D)`，而 `darkenSover` 里
+     **`S = S * (y*y) * (y*y)`（y = D 的亮度）**，再 `R = D*(1-S.a) + S`。D = `texture2DProj(texture1, texcoordD)`，
+     `texcoordD = gl_Position.xy * texmatD.xy + ...`（texmatD=0.5）——那张 64x19 是**屏幕背景的缩略**。
+     **D 全 0 时 S 被乘成 0、输出恒 0**，不管覆盖多少像素、顶点色多白。
+     所以十三阶段「把 64x19 填白画面不变」是必然结果：填白改的是纹理对象，D 仍是宿主上那条空纹理。
+2. **1313 笔标签 draw，每一笔之后 FBO 1 都是 0 个非零像素**（`/tmp/s14lab/l-label-*.bgra`）：
+   ```
+   glwire: label draw #1309 framebuffer 1: 0 nonzero pixels, 0 with alpha
+   ```
+   program 13 的 0 由第 1 条解释；program 15（纯 mask）的 0 只能是**没覆盖**。
+3. **目标与 scissor 对不上**：标签 draw 的 `scissor on 0,0 184x90`（正好是字形块尺寸），而同一笔的顶点 0 是
+   `458,433,0,1`（另一笔 `482,457`、`213,1193`，`GLWIRE_DRAW_LOG` 的 attrib 数据）。184x90 的 scissor 配屏幕坐标的顶点，
+   只有两种解释：目标本来是一个 184x90 的字形块渲染目标（那它就不该落在 750x1624 的替身上），或 scissor 与顶点来自两条流。
+4. **两条 EAGL context**：客人机日志一次启动里两条
+   `hakios-gl: an OpenGL ES 3 context for CoreAnimation ... pid=16`（同一个 backboardd），
+   而宿主只见到 **一个** client、**一个** GL context；`userland/src/eagl.c:373` 的 `static struct eagl *contexts[8]`
+   说明每条 context 有自己的 `framebuffer/colour/program/bound[8]/arrays[8]`。
+   wire 把两条流的调用按时间合并，宿主只有一个 FBO 绑定、一个 program、一套 uniform、一套纹理名——
+   标签 pass 拿到的是**另一条 context 的 scissor/矩阵**，而它要采样的 64x19 背景也可能根本不是同一个对象。
+5. **判定**：不是 uniform 错位、不是「64x19 是颜色」、不是「稳态 scissor off」（十三阶段测的是上一条流的 scissor）——
+   是 **GL context 没有隔离**。修复方向写进第十五阶段 P0''''''''/P1''''''''。
+
+### 9.3 P2'''''''：widget 与壁纸的入口 —— 在**另一个进程**里
+
+```
+MiniIOSurface: SpringBoard[10] created surface 3: 184x124 'BGRA', 736 bytes per row, 0 planes, 98304 bytes
+MiniIOSurface: SpringBoard[10] created surface 4: 312x202 'LA08', 640 bytes per row, 0 planes, 131072 bytes
+hakios-remote: s11 f 1 images 28 0:2T- 750x1624/3008 1:1T- 750x1624/3072 2:5T- 16x16/64 3:6-- 180x180/720 ... 16:19-- 28x65/128 ... 23:26T- 19x19/76 ...
+```
+
+- 界面帧的 28 张 image 里：两张 750x1624 面板、一批 180x180 图标、28x65/28x95/28x28/6x85/6x6/19x19/16x16，
+  **没有 312x202、没有 184x124，也没有任何壁纸尺寸的面**。
+- 两块 widget 白块是 widget 层的背景色（矩形填充），内容面由 SpringBoard 创建却从没以纹理进 backboardd 的流；
+  壁纸同理。它们和标签同源：像素在「另一个进程/另一条 context」里，wire 只录了 backboardd 的一条合并流。
+
+### 9.4 P3'''''''：460 s 空洞（lsd 对照组）
+
+- **窗口与 T_ui**（`/tmp/s12ca.log`）：帧 2 `20:12:02.383` → 帧 3 `20:18:37.931`（`[Display] Set Blanked: YES`，
+  `interval 395.96 s`）→ 帧 4 `20:19:43.921`（`Set Blanked: NO`，66.08 s）。**T_ui = 507.9 s**。
+- **lsd 的行为**：`ipc (mach)` 按需拉起（13 个 MachServices）；窗口里 **702 条**
+  `process lsd[32] denied attempt to escape CPU monitor (missing required entitlement)`（五次启动全是 702 条，
+  首条 20:11:55、末条 20:18:33，与窗口同起同落，内核 `task_policy.c:2867`）；
+  启动期 CPU 中位 124%、≥4 核仅 7%（470 个 1 s 样本），lsd 累计 27,884%（样本和，峰值 3.2 核）。
+  SpringBoard 20:11:22 拉起后**静默 434 s**，20:18:36 才向 backboardd 报到 → 「在等，不在算」。
+- **对照 B（预置 csstore）跑不了**：全盘 0 个 csstore；`/private/var` 每次启动是空 ramfs（`111 directories, 8 files`）；
+  无数据卷/无 shell/只读 md0，取不出客人机里的库。补它需要数据卷或导出程序，不在本阶段预算内。
+- **对照 A 可跑**：唯一改动 `userland/root/LaunchDaemons/com.apple.lsd.plist` 顶层 `Disabled=true`；
+  顺序必须先 build 再改 plist 再 mkapfs（`build.sh:454` 的 mkjobs.py 每次重写该 plist）。
+  硬链接克隆 + `mkapfs.py`（不编译，1.26 s）：未改动的树重建出的镜像与 19:14 的 `root.apfs` **逐字节相同**；
+  改后只差 3435 B，`apfs.py cat` 读回 `Disabled=True`。
+- **两次对照的数字**（同一天、同一脚本、同一 env；base 09:40:17 起、disabled 09:56:21 起）：
+  - **base**：lsd spawn 1、702 denials；帧 2→3 **549.28 s**、3→4 **96.99 s**；**T_ui = 705.2 s**
+    （`Set Blanked: NO` 09:52:02.177）；界面截图 236,083 B（690 s 时）。
+  - **disabled**（镜像只差 `Disabled=true`，3435 B）：lsd spawn **0**、denials **0**；帧 2→3 **6.83 s**
+    （对比 base 的 549.28 s，**−98.8%**）。**但界面没来**：900 s 内 SpringBoard 被拉起 **106 次**、清理 **131 次**，
+    650 条 `com.apple.lsd.* ... 3: No such process`（`mapdb` 等），宿主只有 3 帧、最大截图 14,316 B（黑屏），
+    没有 `Set Blanked: NO`。
+- **判据结论**：460 s 空洞的**成因**是 lsd，这一点被两组对照坐死（去 lsd → 帧间空洞 549 s → 6.8 s）；
+  但「启动到界面 −30%」**不成立**——SpringBoard 依赖 LaunchServices，禁用 lsd 后进不了界面。这就是「查得清、修不动」：
+  真正的修复是让 lsd 的 702 个串行动作变快（预置 csstore / 并行化），不是去掉它；而 csstore 预置在本镜像不可用（上一段）。
+- **判据**：见 P3''''''' 表；单发 A/B 只有在效果远大于抖动（五次空洞 288.84–459.44 s，T_ui 一天从 507.9 漂到 566.8）
+  时才可判；否则按「不可判 + 两次启动」记录。
+
+### 9.5 P4'''''''：0x502 归零 + 圆角不回归（**达成**）
+
+- **0x502 的真正来源不是 legacy 格式**：`GLWIRE_ERROR_LOG=1` 逐 opcode 查错，0x502 只出现在 opcode 32
+  （`glDeleteProgram`）：
+  ```
+  glwire: glerror 0x502 after opcode 32 (6705 records in)
+  glwire: glerror 0x502 after opcode 32 (90590 records in)
+  glwire: glerror 0x502 after opcode 32 (9132 records in)
+  ```
+  `dispatch.inc` 的 case 32 用 `names_program_take()`；它对**未映射**的客人机名字回落成「客人机名字」，
+  拿这个数去删宿主的对象 → `GL_INVALID_OPERATION`（还可能删错对象）。
+- **修**：未映射就 no-op（`dispatch.inc` case 32）。验证运行（`/tmp/s14p4.sh`，`GLWIRE_LEGACY_FORMATS` 保持默认关）：
+  **整次启动 0 条 0x502**（首 12 帧逐 opcode + 帧 1500 的 dump 帧）；`0x500` 只剩一条 `glGetString`
+  （不属本判据）。
+- **圆角**：widget 左上角 40x40 的白像素 **875/1600**，与 s12ca 基线（未展开）逐值相同；打开
+  `GLWIRE_LEGACY_FORMATS=1` 的 s14p0/s14p0b 是 **1600/1600**（直角）。截图 **247,349 B**，界面正常。
+  结论：legacy 展开保持默认关；它不是 0x502 的修复，rgb=0 版本同样破坏圆角。
+- **四格表**：**本阶段没有刷新**。四格要四份客人机构建（纯本地 / 按引用 / W1.5 / W1.5+W3），本阶段时间用在
+  上下文隔离的证据上；当前构建（按引用 + W1.5 + W3）的稳态是 0.02–0.16 s/帧（7–50 fps 抖动，中位约 9 fps），
+  第十一阶段的四格表仍是唯一完整表，明确标注「未刷新」。
+
+### 9.6 判据对照
+
+| # | 判据 | 结果 |
+|---|---|---|
+| P0''''''' | fbo 1 的尺寸/附件/名字 + 与读回目标对得上 + 3 条原样日志 | **达成**：宿主替身 / 客人机 FBO 0；§9.1 |
+| P1''''''' | 标签上屏、截图 ≥300 KB、diff ≥95% | **未达成**（247,349 B）；根因定位到「两条 context 合流」，§9.2 |
+| P2''''''' | 壁纸不再是纯黑、widget 内有内容 | **未达成**；入口定位到「另一个进程的面」，§9.3 |
+| P3''''''' | 两组对照、启动到界面 −30%，否则写清为什么 | **部分**：csstore 不可能；lsd 对照 A 见 §9.4 的数字/结论 |
+| P4''''''' | 四格表 + 0x502=0 + 圆角不回归 | **0x502 与圆角达成**（§9.5）；四格表未刷新（已说明） |
+| P5''''''' | `make test`、两份文档同步、推 GitHub | 见本节提交记录 |
+
+### 9.7 这一阶段真正的收获
+
+1. **fbo 1 从「未知对象」变成「有名字的替身」**：客人机 FBO 0 = 屏幕；标签 pass 的落点与它不读回的事实都清楚了。
+2. **文字链路闭合**：两个片元程序 + 64x19 的真实语义（屏幕背景缩略）+ 1313 笔 0 像素的实测。
+3. **缺内容的统一解释**：标签 = 另一条 context；widget/壁纸 = 另一个进程。不是三个互不相干的问题。
+4. **0x502 收干净**：一个真实的「用客人机名字删宿主对象」的 bug，守卫 + 归零。
+5. **P3 的判据本身被修正**：`MINSHOT` 同时是界面阈值（陷阱）；单发 A/B 的抖动 1.6 倍，必须先跑同日 base。
