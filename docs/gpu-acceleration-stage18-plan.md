@@ -68,6 +68,14 @@ filt_wlprocess -> workq_thread_set_max_qos` 的 ticket spinlock。共同点是�
 QEMU 配置是 `-accel tcg,tb-size=384`（无 `thread=`，即默认 **MTTCG**，每 vCPU 一个宿主线程），宿主另有
 一个 400% CPU 的 Windows 虚拟机。
 
+**已动手（本阶段第一笔代码）**：`qemu/run.sh` 新增 `QEMU_ACCEL`（默认仍是 `tcg`，即行为不变），
+内核工作树提交 `059446e qemu(run): QEMU_ACCEL, so the accel string can be tried without editing the script`。
+
+**第一发对照结果（s18single，700 s，20:17–20:29）**：`QEMU_ACCEL="tcg,thread=single"` →
+**0 panic**（连续 12 分钟没有 ticket-spinlock），但仍**没到界面**（宿主 2 帧、截图 24,960 B 全黑）。
+读法：单线程 TCG 把 vCPU 之间的抢占去掉了，panic 消失；代价是慢——700 s 只走到「backboardd 起 OSMesa」之前。
+下一发同 accel 要放到 **1500 s**，或者先用 `hakios: memory:` / `launchd` 的行号量出它比 MTTCG 慢多少比例。
+
 1. **四个候选（按代价）**：
    - 宿主侧给 qemu 让路：`nice -n -10` / `chrt` / 关掉那个 Windows 虚拟机（后者要主人同意）；
    - `-accel tcg,thread=single`：去掉 vCPU 线程之间的抢占（慢，但确定）；
