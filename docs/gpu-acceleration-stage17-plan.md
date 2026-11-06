@@ -329,3 +329,19 @@ P4 要的四份构建（纯本地 / 按引用 / W1.5 / W1.5+W3）各一次 20 s 
 ③ 启动不稳定被定位到客人机内核 `input_poll` 的 8 ms 自排期 timer，与 GL 无关。
 
 **留给第十八阶段的第一件事**：先让 3 发启动不崩（§十二的三个候选修法），否则任何三发验收都做不了。
+
+### 12.1 修正（2026-11-06 20:10）：不是 `input_poll` 专属
+
+发了一发 **`virtio_input=0`** 的对照（`s17noinput`，20:04–20:09；`run-darwin.sh` 的 cmdline 临时改成 0，
+日志里 `Boot args:` 确认 `virtio_input=0`，客人机日志 **0 行 virtio-input**）：
+
+- **仍然崩**（20:09:50，2 帧后），但**栈换了**：`pid 13: wifid`，`__psynch_mutexwait -> kqueue_scan ->
+  filt_wlprocess -> workq_thread_set_max_qos -> lck_ticket_contended`。
+- 所以「8 ms 的 input_poll 自排期」**不是**根因；它只是当晚第一次崩的时候碰巧在栈上。
+- 两发 QEMU 配置都走 `-accel tcg,tb-size=384`（**没有 `thread=` 参数**，即 QEMU 默认的 **MTTCG**，每个 vCPU
+  一个宿主线程）。真正的共同点是：**vCPU 在持锁期间被宿主调度走**，任何一条内核路径都可能撞上。
+- 已排除的两个变量：`QEMU_SMP=2`（s17fix1，仍崩）、关输入设备（s17noinput，仍崩）。
+
+**留给第十八阶段的四个候选**（按代价）：① 宿主侧给 qemu 让路（`nice`/`chrt`/少跑别的 VM）；
+② `-accel tcg,thread=single`（去掉 vCPU 线程之间的抢占，代价是慢）；③ 关掉宿主上那个 400% CPU 的
+Windows 虚拟机（需要主人同意）；④ 客人机内核侧把 ticket spinlock 换成可让出 CPU 的锁（代价最大）。
