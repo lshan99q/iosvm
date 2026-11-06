@@ -58,6 +58,7 @@ struct glstate {
 	GLuint bound_framebuffer;
 	GLuint drawn_framebuffer;
 	int framebuffer_known;          /* the stream has bound one: the binding is the guest's, not ours */
+	GLuint stand_in;                /* what guest framebuffer 0 maps to: the drawable's stand-in */
 };
 
 static uint64_t

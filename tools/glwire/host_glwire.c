@@ -1725,6 +1725,7 @@ serve_frame(struct client *client)
 	 * GLWIRE_KEEP_BINDING=1 keeps the guest's binding across the boundary; a binding of 0 is the
 	 * drawable, which is what the stand-in is for.
 	 */
+	client->names.stand_in = client->framebuffer;
 	if (keep_binding && client->names.framebuffer_known && client->names.bound_framebuffer != 0) {
 		GLint kind = -1;
 

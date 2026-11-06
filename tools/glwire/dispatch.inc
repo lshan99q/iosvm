@@ -539,7 +539,12 @@ switch (opcode) {
 		/* glBindFramebuffer */
 		GLenum a0 = wire_get_u32(r);
 		GLuint a1 = wire_get_u32(r);
-		GLuint host = names_framebuffer(g, a1);
+		/*
+		 * Guest framebuffer 0 is the EAGL drawable.  This emulation's OSMesa context made a 16x16
+		 * buffer current instead (gl_osmesa.c: WINDOW 16), so a draw to 0 would go nowhere; the
+		 * host binds its own framebuffer as the drawable's stand-in, as it always did at frame start.
+		 */
+		GLuint host = (a1 == 0 && g->stand_in != 0) ? g->stand_in : names_framebuffer(g, a1);
 
 		glBindFramebuffer(a0, host);
 		if (a0 != GL_READ_FRAMEBUFFER) {
