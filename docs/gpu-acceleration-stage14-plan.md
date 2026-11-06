@@ -290,3 +290,17 @@ hakios-remote: s11 f 1 images 28 0:2T- 750x1624/3008 1:1T- 750x1624/3072 2:5T- 1
 3. **缺内容的统一解释**：标签 = 另一条 context；widget/壁纸 = 另一个进程。不是三个互不相干的问题。
 4. **0x502 收干净**：一个真实的「用客人机名字删宿主对象」的 bug，守卫 + 归零。
 5. **P3 的判据本身被修正**：`MINSHOT` 同时是界面阈值（陷阱）；单发 A/B 的抖动 1.6 倍，必须先跑同日 base。
+
+### 9.8 提交与推送
+
+| commit | 内容 |
+|---|---|
+| `d0d311c` | `tools(glwire)`：探针进了 `dispatch.inc` 之后，`frame_replay`/`map_test` 的编译被修好（`probe_stubs.inc`），`make test` 重新可跑 |
+| `5257977` | `host(glwire)`：`GLWIRE_FBO_LOG`/`FBO_TRACE`/`LABEL_DUMP`/`PROGRAM_SOURCE`/`ERROR_LOG` + draw 的 completeness/drawbuffer/16 值矩阵 |
+| `585fde4` | `fix(glwire)`：`glDeleteProgram` 对未映射的客人机名字 no-op（0x502 归零） |
+| `7ba537a` | `docs(stage 14)`：本节的结果 |
+| `873db74` | `docs(stage 15)`：第十五阶段计划 + ADR-011 |
+| `f4b08af` | `tools(glwire)`：记录头带 context（版本 2），两种布局都过测试——第十五阶段第一笔代码 |
+| `945ea0c` | `docs(stage 15)`：起步记录 |
+
+推送：`origin/main`（`3d5e12a..` 之后全部）。
