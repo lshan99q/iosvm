@@ -44,6 +44,7 @@ switch (opcode) {
 		GLuint a0 = wire_get_u32(r);
 		glClear(a0);
 		g->drawn_framebuffer = g->bound_framebuffer;
+		host_fbo_draw(g);
 		break;
 	}
 	case 6: {
@@ -100,6 +101,7 @@ switch (opcode) {
 		GLint a1 = wire_get_i32(r);
 		GLsizei a2 = wire_get_i32(r);
 		g->drawn_framebuffer = g->bound_framebuffer;
+		host_fbo_draw(g);
 		host_note_draw(g, "arrays", a0, a2);
 		glDrawArrays(a0, a1, a2);
 		names_attribs_release(g);
@@ -114,6 +116,7 @@ switch (opcode) {
 		GLsizei n3 = 0;
 		void *p3 = wire_take(r, &n3);
 		g->drawn_framebuffer = g->bound_framebuffer;
+		host_fbo_draw(g);
 		host_note_draw(g, "elements", a0, a1);
 		glDrawElements(a0, a1, a2, p3);
 		names_attribs_release(g);
@@ -210,6 +213,15 @@ switch (opcode) {
 		{
 			unsigned char *filled = host_fill_special(a3, a4, a6, a7, p8);
 			const void *upload = filled != NULL ? (const void *) filled : p8;
+
+			if (filled != NULL) {
+				GLint filled_bound = 0;
+
+				glGetIntegerv(GL_TEXTURE_BINDING_2D, &filled_bound);
+				printf("glwire: fill %s at texture %d, %dx%d\n", getenv("GLWIRE_FILL"),
+				    (int)filled_bound, (int)a3, (int)a4);
+				fflush(stdout);
+			}
 
 			/* (twelfth stage: GL_ALPHA/LUMINANCE atlases, which this context will not take -- see
 			 * host_legacy_teximage) */
@@ -514,6 +526,7 @@ switch (opcode) {
 		if (a0 != GL_READ_FRAMEBUFFER) {
 			g->bound_framebuffer = host;
 		}
+		host_fbo_bind(g, a0, a1, host);
 		break;
 	}
 	case 50: {
@@ -541,6 +554,7 @@ switch (opcode) {
 			for (GLsizei i = 0; i < a0; i++) {
 				names_framebuffer_put(g, ((GLuint *)p1)[i], host_names[i]);
 			}
+			host_fbo_gen(g, a0, (const GLuint *)p1, host_names);
 		}
 		free(host_names);
 		free(p1);
@@ -554,6 +568,7 @@ switch (opcode) {
 		GLuint a3 = wire_get_u32(r);
 		GLint a4 = wire_get_i32(r);
 		glFramebufferTexture2D(a0, a1, a2, names_texture(g, a3), a4);
+		host_fbo_attach(g, a0, a1, a3, a4);
 		break;
 	}
 	case 53: {

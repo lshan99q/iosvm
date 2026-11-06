@@ -453,6 +453,13 @@ static void host_dump_uniforms(struct glstate *g, const char *tag);
  * so this asks the host which textures are bound to the first eight units at the moment of a draw, and
  * which guest name each one is.  GLWIRE_DRAW_LOG=1 writes the first 300 of them.
  */
+static int last_draw_was_glyph;
+static int fbo_trace;
+static unsigned fbo_trace_said;
+
+static void host_program_source(struct glstate *g, GLuint program);
+static void host_attrib_state(struct glstate *g);
+
 static void
 host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 {
@@ -474,11 +481,16 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		glGetIntegerv(GL_VIEWPORT, viewport);
 		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
 		glGetIntegerv(GL_SCISSOR_BOX, scissor);
+		GLint drawbuffer = 0;
+
+		glGetIntegerv(GL_DRAW_BUFFER, &drawbuffer);
 		printf("glwire: draw#%u %s mode %#x count %d program %d (guest %u) fbo %d viewport %d,%d %dx%d "
-		    "scissor %s %d,%d %dx%d", logged, how, mode, (int) count, (int) program,
+		    "scissor %s %d,%d %dx%d status %#x drawbuffer %#x", logged, how, mode, (int) count, (int) program,
 		    (unsigned) g->current_program, (int) framebuffer, (int) viewport[0], (int) viewport[1],
 		    (int) viewport[2], (int) viewport[3], glIsEnabled(GL_SCISSOR_TEST) ? "on" : "off",
-		    (int) scissor[0], (int) scissor[1], (int) scissor[2], (int) scissor[3]);
+		    (int) scissor[0], (int) scissor[1], (int) scissor[2], (int) scissor[3],
+		    (unsigned)glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER),
+		    (unsigned)drawbuffer);
 	}
 	for (unsigned unit = 0; unit < 8; unit++) {
 		GLint bound = 0, height = 0;
@@ -506,8 +518,14 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	fflush(stdout);
 	glActiveTexture((GLenum) active);
 	/* (stage thirteen: a draw that binds a glyph tile is a text draw -- say what its programme holds) */
+	last_draw_was_glyph = glyph_height != 0;
 	if (glyph_height != 0) {
 		host_dump_uniforms(g, "text-draw");
+		/* (stage fourteen: what the text draw actually asks the GPU to do) */
+		if (getenv("GLWIRE_PROGRAM_SOURCE") != NULL) {
+			host_program_source(g, (GLuint) program);
+			host_attrib_state(g);
+		}
 	}
 }
 
@@ -609,6 +627,298 @@ host_dump_uniforms(struct glstate *g, const char *tag)
 		}
 		printf(" %s(loc %d)=%.3f,%.3f,%.3f,%.3f", name, (int) location, (double) value[0],
 		    (double) value[1], (double) value[2], (double) value[3]);
+		if (type == GL_FLOAT_MAT4 && size == 1) {
+			GLfloat matrix[16] = { 0 };
+
+			glGetUniformfv(program, location, matrix);
+			printf(" matrix4x4 %.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f / "
+			    "%.4f %.4f %.4f %.4f", (double)matrix[0], (double)matrix[1], (double)matrix[2],
+			    (double)matrix[3], (double)matrix[4], (double)matrix[5], (double)matrix[6],
+			    (double)matrix[7], (double)matrix[8], (double)matrix[9], (double)matrix[10],
+			    (double)matrix[11], (double)matrix[12], (double)matrix[13], (double)matrix[14],
+			    (double)matrix[15]);
+		}
+	}
+	printf("\n");
+	fflush(stdout);
+}
+
+/*
+ * Stage fourteen: the text draw's outputs are all zero even when its colour texture is filled white, so
+ * the question moves to the draw itself -- what shader does it run, and what vertices does it have?
+ * GLWIRE_PROGRAM_SOURCE=1 prints the vertex and fragment source of every programme a glyph draw runs
+ * (once each) with the shader type and compile status; host_attrib_state() prints every enabled
+ * vertex attribute with the first vertices of the CPU copy the wire carried (opcode 200), so a
+ * degenerate quad (all positions zero) is told from a shader that samples a transparent texel.
+ */
+static void
+host_program_source(struct glstate *g, GLuint program)
+{
+	static GLuint dumped[8];
+	static unsigned said;
+	GLuint shaders[4] = { 0, 0, 0, 0 };
+	GLint count = 0;
+
+	(void)g;
+	if (program == 0 || said >= 8) {
+		return;
+	}
+	for (unsigned i = 0; i < said; i++) {
+		if (dumped[i] == program) {
+			return;
+		}
+	}
+	dumped[said++] = program;
+	glGetAttachedShaders(program, 4, &count, shaders);
+	for (GLint i = 0; i < count && i < 4; i++) {
+		char source[8192];
+		GLint length = 0, type = 0, compiled = 0;
+
+		glGetShaderiv(shaders[i], GL_SHADER_TYPE, &type);
+		glGetShaderiv(shaders[i], GL_COMPILE_STATUS, &compiled);
+		glGetShaderSource(shaders[i], (GLsizei)sizeof(source) - 1, &length, source);
+		source[length > 0 ? length : 0] = '\0';
+		printf("glwire: programme %u shader %u type %#x compiled %d source %d B:\n%s\n---\n", program,
+		    shaders[i], type, (int)compiled, (int)length, source);
+		fflush(stdout);
+	}
+}
+
+static void
+host_attrib_state(struct glstate *g)
+{
+	static unsigned said;
+
+	if (said >= 20) {
+		return;
+	}
+	for (GLint i = 0; i < 16; i++) {
+		GLint enabled = 0, size = 0, type = 0, stride = 0;
+		const float *floats;
+		const unsigned char *bytes;
+
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+		if (!enabled) {
+			continue;
+		}
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
+		printf("glwire: attrib %d size %d type %#x stride %d data %s", (int)i, (int)size, type,
+		    (int)stride, g->attribs[i].data != NULL ? "yes" : "no");
+		if (g->attribs[i].data != NULL && g->attribs[i].size > 0) {
+			floats = g->attribs[i].data;
+			bytes = g->attribs[i].data;
+			printf(" float[0..7] %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f", (double)floats[0],
+			    (double)floats[1], (double)floats[2], (double)floats[3], (double)floats[4],
+			    (double)floats[5], (double)floats[6], (double)floats[7]);
+			printf(" bytes %02x%02x%02x%02x %02x%02x%02x%02x", bytes[0], bytes[1], bytes[2],
+			    bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+		}
+		printf("\n");
+	}
+	said++;
+	fflush(stdout);
+}
+
+/*
+ * Stage fourteen, P0: what is "fbo 1"?  A framebuffer name in the host's context means nothing on its
+ * own -- make_frame_buffer() takes the first name the context hands out (1), the guest names its own
+ * objects, and two clients have two contexts.  GLWIRE_FBO_LOG=1 says, once for every framebuffer the
+ * stream binds, which guest name made it, what its colour attachment is (texture or renderbuffer, the
+ * attachment's guest name, its size and internal format) and whether it is complete; the frame summary
+ * says which framebuffer this client reads its picture from and which one the stream last drew into.
+ * glGenFramebuffers and glFramebufferTexture2D are said too, so an attachment that never gets bound is
+ * still accounted for.
+ */
+#define FBO_SEEN_MAX 64
+
+struct fbo_note {
+	int fd;
+	uint64_t guest, host;
+	unsigned binds, draws;
+	int kind;                       /* GL_TEXTURE, GL_RENDERBUFFER or -1 */
+	uint64_t attach;
+	GLsizei width, height;
+	GLint internal;
+};
+
+static int fbo_log;
+static int probe_errors;
+static int fbo_client_fd = -1;
+static struct fbo_note fbo_notes[FBO_SEEN_MAX];
+static unsigned fbo_note_count;
+
+static uint64_t
+guest_of_host(const struct name_map *map, uint64_t host)
+{
+	for (size_t i = 0; i < map->capacity; i++) {
+		const struct name_entry *entry = &map->entries[i];
+
+		if (entry->state == 1 && entry->host == host) {
+			return entry->guest;
+		}
+	}
+	return 0;
+}
+
+static struct fbo_note *
+host_fbo_note(int fd, uint64_t guest, uint64_t host)
+{
+	for (unsigned i = 0; i < fbo_note_count; i++) {
+		if (fbo_notes[i].fd == fd && fbo_notes[i].host == host && fbo_notes[i].guest == guest) {
+			return &fbo_notes[i];
+		}
+	}
+	if (fbo_note_count < FBO_SEEN_MAX) {
+		struct fbo_note *note = &fbo_notes[fbo_note_count++];
+
+		memset(note, 0, sizeof(*note));
+		note->fd = fd;
+		note->guest = guest;
+		note->host = host;
+		note->kind = -1;
+		return note;
+	}
+	return NULL;
+}
+
+/* The attachment's size, without leaving the unit's texture binding changed. */
+static void
+fbo_texture_size(struct fbo_note *note)
+{
+	GLint previous = 0;
+
+	if (note->kind != GL_TEXTURE || note->attach == 0) {
+		return;
+	}
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)note->attach);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &note->width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &note->height);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &note->internal);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)previous);
+}
+
+static void
+host_fbo_bind(struct glstate *g, GLenum target, GLuint guest, GLuint host)
+{
+	struct fbo_note *note;
+	GLenum query = target == GL_READ_FRAMEBUFFER ? GL_READ_FRAMEBUFFER : GL_DRAW_FRAMEBUFFER;
+	GLint kind = -1, name = 0, complete = 0;
+
+	if (!fbo_log || host == 0) {
+		return;
+	}
+	note = host_fbo_note(fbo_client_fd, guest, host);
+	if (note == NULL) {
+		return;
+	}
+	note->binds++;
+	glGetFramebufferAttachmentParameteriv(query, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+	glGetFramebufferAttachmentParameteriv(query, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+	note->kind = kind;
+	note->attach = (uint64_t)(GLuint)name;
+	fbo_texture_size(note);
+	complete = (GLint)glCheckFramebufferStatus(query);
+	if (fbo_trace && fbo_trace_said < 3000) {
+		fbo_trace_said++;
+		printf("glwire: fbo trace #%u frame %llu guest %u host %u attachment %s %u %dx%d complete %#x\n",
+		    fbo_trace_said, (unsigned long long)frames_replayed, guest, host,
+		    kind == GL_TEXTURE ? "texture" : kind == GL_RENDERBUFFER ? "renderbuffer" : "none",
+		    (unsigned)note->attach, (int)note->width, (int)note->height, complete);
+		fflush(stdout);
+	}
+	if (note->binds > 1) {
+		return;
+	}
+	printf("glwire: fbo bind client=%d target %#x guest %u host %u attachment %s name %u guest %llu "
+	    "%dx%d internal %#x complete %#x drawn-so-far %u\n", fbo_client_fd, target, guest, host,
+	    kind == GL_TEXTURE ? "texture" : kind == GL_RENDERBUFFER ? "renderbuffer" : "none",
+	    (unsigned)note->attach,
+	    (unsigned long long)guest_of_host(&g->textures, note->attach), (int)note->width,
+	    (int)note->height, note->internal, complete, (unsigned)g->drawn_framebuffer);
+	fflush(stdout);
+}
+
+static void
+host_fbo_gen(struct glstate *g, GLsizei n, const GLuint *guest, const GLuint *host)
+{
+	(void)g;
+	if (!fbo_log || n <= 0 || guest == NULL || host == NULL) {
+		return;
+	}
+	printf("glwire: fbo gen client=%d n=%d:", fbo_client_fd, (int)n);
+	for (GLsizei i = 0; i < n && i < 8; i++) {
+		printf(" guest %u -> host %u", guest[i], host[i]);
+	}
+	printf("\n");
+	fflush(stdout);
+}
+
+static void
+host_fbo_attach(struct glstate *g, GLenum target, GLenum attachment, GLuint guest_tex, GLint level)
+{
+	GLint fbo = 0, kind = -1, name = 0, width = 0, height = 0, previous = 0, internal = 0;
+
+	if (!fbo_log) {
+		return;
+	}
+	glGetIntegerv(target == GL_READ_FRAMEBUFFER ? GL_READ_FRAMEBUFFER_BINDING : GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+	if (fbo == 0) {
+		return;
+	}
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, attachment,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+	glBindTexture(GL_TEXTURE_2D, names_texture(g, guest_tex));
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)previous);
+	printf("glwire: fbo attach client=%d fbo host %d guest %llu attachment %#x kind %#x name %d "
+	    "texture guest %u host %u level %d %dx%d internal %#x\n", fbo_client_fd, fbo,
+	    (unsigned long long)guest_of_host(&g->framebuffers, (uint64_t)fbo), attachment, kind, name,
+	    guest_tex, names_texture(g, guest_tex), (int)level, width, height, internal);
+	fflush(stdout);
+}
+
+static void
+host_fbo_draw(struct glstate *g)
+{
+	struct fbo_note *note;
+
+	if (!fbo_log || g->bound_framebuffer == 0) {
+		return;
+	}
+	note = host_fbo_note(fbo_client_fd, guest_of_host(&g->framebuffers, g->bound_framebuffer),
+	    g->bound_framebuffer);
+	if (note != NULL) {
+		note->draws++;
+	}
+}
+
+static void
+host_fbo_summary(const char *tag, unsigned long long frame, struct client *client)
+{
+	printf("glwire: fbo summary %s frame %llu client %d own %u drawn %u readback-ready %u:",
+	    tag, frame, client->fd, (unsigned)client->framebuffer, (unsigned)client->names.drawn_framebuffer,
+	    (unsigned)client->names.bound_framebuffer);
+	for (unsigned i = 0; i < fbo_note_count; i++) {
+		struct fbo_note *note = &fbo_notes[i];
+
+		if (note->fd != client->fd) {
+			continue;
+		}
+		printf(" [guest %llu host %llu %s %llu %dx%d binds %u draws %u]", (unsigned long long)note->guest,
+		    (unsigned long long)note->host,
+		    note->kind == GL_TEXTURE ? "texture" : note->kind == GL_RENDERBUFFER ? "renderbuffer" : "none",
+		    (unsigned long long)note->attach, (int)note->width, (int)note->height, note->binds,
+		    note->draws);
 	}
 	printf("\n");
 	fflush(stdout);
@@ -637,6 +947,51 @@ host_after_draw(struct glstate *g)
 	int number = draws_seen++;
 	unsigned char *pixels;
 
+	/*
+	 * Stage fourteen: every label draw (the one that binds a glyph tile) into the framebuffer the
+	 * host stands in for FBO 0 -- how many pixels it actually covered, and to a file the first few
+	 * times, so "the shader wrote transparent black" is told from "the quad missed the scissor".
+	 */
+	if (getenv("GLWIRE_LABEL_DUMP") != NULL && last_draw_was_glyph) {
+		static unsigned labels, wrote;
+		GLint label_fbo = 0;
+
+		last_draw_was_glyph = 0;
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &label_fbo);
+		if (trace_client != NULL && trace_width > 0 && trace_height > 0 && label_fbo != 0) {
+			size_t bytes = (size_t)trace_width * (size_t)trace_height * 4;
+			unsigned char *shot = malloc(bytes);
+			unsigned nonzero = 0, alpha = 0;
+
+			if (shot != NULL) {
+				memset(shot, 0, bytes);
+				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)label_fbo);
+				glReadPixels(0, 0, trace_width, trace_height, GL_BGRA, GL_UNSIGNED_BYTE, shot);
+				for (size_t i = 0; i + 3 < bytes; i += 4) {
+					if (shot[i] | shot[i + 1] | shot[i + 2] | shot[i + 3]) {
+						nonzero++;
+					}
+					if (shot[i + 3] != 0) {
+						alpha++;
+					}
+				}
+				labels++;
+				printf("glwire: label draw #%u framebuffer %d: %u nonzero pixels, %u with alpha\n",
+				    labels, (int)label_fbo, nonzero, alpha);
+				fflush(stdout);
+				if (labels <= 4) {
+					char path[512];
+
+					snprintf(path, sizeof(path), "%s-label-%u-fbo-%d.bgra", getenv("GLWIRE_LABEL_DUMP"),
+					    labels, (int)label_fbo);
+					if (write_pixels(path, shot, bytes)) {
+						wrote++;
+					}
+				}
+				free(shot);
+			}
+		}
+	}
 	if (!dump_draws || prefix == NULL || trace_client == NULL || trace_width <= 0 || trace_height <= 0) {
 		return;
 	}
@@ -1002,6 +1357,8 @@ serve_frame(struct client *client)
 	}
 	wire_image_refs = 0;
 	wire_image_ref_bytes = 0;
+	fbo_client_fd = client->fd;
+	probe_errors = (getenv("GLWIRE_ERROR_LOG") != NULL && frames_replayed < 12) || dump_draws_runtime;
 	if (!make_client_current(client)) {
 		free(records);
 		free(picture);
@@ -1089,9 +1446,21 @@ serve_frame(struct client *client)
 			r.base = records + offset + 8;
 			r.capacity = length;
 			r.at = 0;
-			if (dispatch(&client->names, &r, opcode) != 0) {
-				fprintf(stderr, "host_glwire: dispatch stopped at opcode %u\n", opcode);
-				break;
+			{
+				static unsigned glerrors;
+				int failed = dispatch(&client->names, &r, opcode);
+				GLenum error = probe_errors ? glGetError() : GL_NO_ERROR;
+
+				if (error != GL_NO_ERROR && glerrors < 20) {
+					glerrors++;
+					printf("glwire: glerror %#x after opcode %u (%d records in)\n", error,
+					    opcode, (int)(offset + 8 + length));
+					fflush(stdout);
+				}
+				if (failed != 0) {
+					fprintf(stderr, "host_glwire: dispatch stopped at opcode %u\n", opcode);
+					break;
+				}
 			}
 			offset += 8 + length;
 		}
@@ -1153,6 +1522,9 @@ serve_frame(struct client *client)
 			    client->names.drawn_framebuffer, box[0], box[1], box[2], box[3]);
 		}
 		fflush(stdout);
+	}
+	if (fbo_log && (frames_replayed + 1 <= 2 || (frames_replayed + 1) % 100 == 0 || dump_draws_runtime)) {
+		host_fbo_summary("frame", frames_replayed + 1, client);
 	}
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 	/*
@@ -1421,6 +1793,8 @@ main(int argc, char **argv)
 	};
 
 	no_in_place = getenv("GLWIRE_NO_INPLACE") != NULL;
+	fbo_log = getenv("GLWIRE_FBO_LOG") != NULL;
+	fbo_trace = getenv("GLWIRE_FBO_TRACE") != NULL;
 	/* (the flag the argument loop set stays set: this used to overwrite it, so "--no-panel" on the
 	 * command line silently did nothing and every acceptance run drew the guest's own panel) */
 	no_panel = no_panel || getenv("GLWIRE_NO_PANEL") != NULL;
