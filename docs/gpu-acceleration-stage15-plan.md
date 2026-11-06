@@ -209,3 +209,15 @@ P1'''''''' 实际由 **ADR-012（跨帧 binding）** 开启，标签问题上移
    问题在采样器或纹理绑定（用 2D 采样 vs 纹理目标、sampler 的 min filter）。
 2. 修好后，`GLWIRE_KEEP_BINDING` 默认打开，重跑 P2'''''''' 的截图判据（≥300 KB、diff ≥95%）。
 3. 四格表与 P3'''''''' 收尾按原计划。
+
+**13:04 的补充（标签一次上屏，未稳定）**
+
+一发 `GLWIRE_KEEP_BINDING=1 GLWIRE_LEGACY_FORMATS=1` 的启动里标签全部出现：截图 **291,909 B**，
+Weather/Calendar（widget 标题）与 FaceTime/Calendar/Photos/Mail/Notes/Reminders/TV/Podcasts/Health/Wallet
+（App 名称）齐全，证据图 `docs/demo/s15-labels-20261106.png`；同一发日志里 283 笔 label draw 落在 750x1624
+的层 FBO、118 笔产生了带 alpha 的像素。但同 env 复跑与只带 KEEP+LEGACY 的一发都是 238–239 KB、无标签
+（0 笔大目标 draw）。**结论**：跨帧保留 binding 是对的，但「保留到哪一次 bind」仍是竞态。
+
+因此 P0'''''''' 的最后一步改成：**客人机自报 binding**——`eagl.c` 本来就在每个 context 里跟踪
+`e->framebuffer`，在每帧的 flush 路径里给下一帧开头补一条 `glBindFramebuffer(FRAMEBUFFER, e->framebuffer)`
+（或一条带 binding 的帧头字段），宿主照单绑定，不再猜。这样 frame boundary 与 CA 的 pass 再无关系。
