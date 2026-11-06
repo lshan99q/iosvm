@@ -728,7 +728,10 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		 * this is the value the guest meant.
 		 */
 		GLfloat u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;
-		int found = 0, vertices = count > 0 && count < 4096 ? count : 6;
+		/* (the attribute buffer holds the vertices the draw used, not one per index: a quad is six
+		 * indices over four vertices, and reading count of them runs off the end -- three corners
+		 * are enough to take the subrectangle's bounds) */
+		int found = 0, vertices = 3;
 
 		for (int i = 0; i < 16 && !found; i++) {
 			struct attrib_state *a = &g->attribs[i];
