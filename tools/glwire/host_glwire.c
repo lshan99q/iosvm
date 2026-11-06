@@ -1011,6 +1011,7 @@ struct fbo_note {
 static int fbo_log;
 static int probe_errors;
 static int keep_binding;
+static int frame_delay_ms;          /* (stage 15: a deliberate per-frame delay, for the timing question) */
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
 static unsigned fbo_note_count;
@@ -1980,6 +1981,10 @@ serve_frame(struct client *client)
 	wire_release();
 	took = now_seconds() - began;
 	frames_replayed++;
+	if (frame_delay_ms > 0) {
+		/* (stage 15: the guest waits for this reply; a delay here is a knob on the frame period) */
+		usleep((useconds_t)frame_delay_ms * 1000);
+	}
 	{
 		char done[64];
 		int length = in_place ? snprintf(done, sizeof(done), "R 0\n")
@@ -2144,6 +2149,7 @@ main(int argc, char **argv)
 
 		keep_binding = keep == NULL || keep[0] != '0';
 	}
+	frame_delay_ms = getenv("GLWIRE_FRAME_DELAY_MS") != NULL ? atoi(getenv("GLWIRE_FRAME_DELAY_MS")) : 0;
 	fbo_trace = getenv("GLWIRE_FBO_TRACE") != NULL;
 	/* (the flag the argument loop set stays set: this used to overwrite it, so "--no-panel" on the
 	 * command line silently did nothing and every acceptance run drew the guest's own panel) */
