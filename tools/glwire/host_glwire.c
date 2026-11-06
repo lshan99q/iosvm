@@ -454,6 +454,14 @@ static void host_dump_uniforms(struct glstate *g, const char *tag);
  * which guest name each one is.  GLWIRE_DRAW_LOG=1 writes the first 300 of them.
  */
 static int last_draw_was_glyph;
+
+/* (stage sixteen: programme 13's 64x19 backdrop is created empty here -- the wire records no fill for
+ * it -- so the darken pass multiplies the text to zero.  GLWIRE_BACKDROP=1 fills that texture from
+ * the panel once per frame, and the darken pass then has something to darken.) */
+static GLuint panel_fbo, backdrop_fbo, backdrop_filled;
+static GLsizei panel_width, panel_height;
+static unsigned long long backdrop_frame;
+static void host_backdrop_fill(struct glstate *g);
 static int fbo_trace;
 static int record_context_known;
 static uint32_t record_context;
@@ -592,6 +600,9 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	glActiveTexture((GLenum) active);
 	/* (stage thirteen: a draw that binds a glyph tile is a text draw -- say what its programme holds) */
 	last_draw_was_glyph = glyph_height != 0;
+	if (last_draw_was_glyph) {
+		host_backdrop_fill(g);
+	}
 	if (glyph_height != 0) {
 		if (getenv("GLWIRE_LABEL_DUMP") != NULL) {
 			GLint matrix_location = glGetUniformLocation((GLuint)program, "vertex_matrix");
@@ -877,6 +888,58 @@ static GLuint label_debug_program;
 static GLint label_debug_matrix;
 static int label_debug_tried;
 
+/*
+ * Stage sixteen: programme 13 samples a 64x19 texture as its backdrop and multiplies its text colour
+ * by that pixel's luminance -- with the texture empty (nothing in the wire ever fills it) the product
+ * is zero and no label is drawn.  Fill it, once per frame per texture, by blitting the last
+ * panel-sized framebuffer into it.  This is an experiment (GLWIRE_BACKDROP=1), not yet the default.
+ */
+static void
+host_backdrop_fill(struct glstate *g)
+{
+	GLint active = 0, texture = 0, width = 0, height = 0, previous = 0, saved = 0;
+	GLint saved_unit7 = 0;
+
+	if (getenv("GLWIRE_BACKDROP") == NULL || panel_fbo == 0 || frames_replayed == backdrop_frame) {
+		return;
+	}
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glActiveTexture(GL_TEXTURE1);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &saved);
+	if (texture == 0) {
+		glActiveTexture((GLenum)active);
+		return;
+	}
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+	if (width <= 0 || height <= 0 || width > 256 || height > 256) {
+		glActiveTexture((GLenum)active);
+		return;
+	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+	if (backdrop_fbo == 0) {
+		glGenFramebuffers(1, &backdrop_fbo);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, panel_fbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, backdrop_fbo);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)texture, 0);
+	if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+		glBlitFramebuffer(0, 0, panel_width, panel_height, 0, 0, width, height,
+		    GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	}
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+	glActiveTexture(GL_TEXTURE7);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &saved_unit7);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)saved);
+	glActiveTexture((GLenum)active);
+	backdrop_filled = (GLuint)texture;
+	backdrop_frame = frames_replayed;
+	(void)g;
+	(void)saved_unit7;
+}
+
 static int
 host_label_begin(struct glstate *g)
 {
@@ -1159,12 +1222,18 @@ host_fbo_draw(struct glstate *g)
 {
 	struct fbo_note *note;
 
-	if (!fbo_log || g->bound_framebuffer == 0) {
+	if (g->bound_framebuffer == 0) {
 		return;
 	}
 	note = host_fbo_note(fbo_client_fd, guest_of_host(&g->framebuffers, g->bound_framebuffer),
 	    g->bound_framebuffer);
-	if (note != NULL) {
+	if (note != NULL && note->width == 750 && note->height == 1624) {
+		/* (stage sixteen: what programme 13's backdrop is downsampled from) */
+		panel_fbo = g->bound_framebuffer;
+		panel_width = note->width;
+		panel_height = note->height;
+	}
+	if (fbo_log && note != NULL) {
 		note->draws++;
 	}
 }
