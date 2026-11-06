@@ -723,32 +723,37 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		 * The third form of the same experiment, and the only one that can be right: derive the
 		 * sampler matrix from the draw's own vertices.  A text quad carries two 2D texcoord arrays
 		 * -- one the unit square (0,0)-(1,1), one the atlas subrectangle the glyph lives in -- and
-		 * programme 13 maps the first into the second with texmat0 = (u1-u0, v1-v0, u0, v0).  If
-		 * the derivation puts the text on screen, the NaN in the stream is a recording fault and
-		 * this is the value the guest meant.
+		 * programme 13 maps the first into the second with texmat0 = (u1-u0, v1-v0, u0, v0).  The
+		 * attributes are read the way host_attrib_state reads them (size, type and stride from the
+		 * GL state, three corners, because a quad is six indices over four vertices).
 		 */
-		GLfloat u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;
-		/* (the attribute buffer holds the vertices the draw used, not one per index: a quad is six
-		 * indices over four vertices, and reading count of them runs off the end -- three corners
-		 * are enough to take the subrectangle's bounds) */
-		int found = 0, vertices = 3;
+		GLfloat u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+		int found = 0;
 
-		for (int i = 0; i < 16 && !found; i++) {
-			struct attrib_state *a = &g->attribs[i];
-			size_t stride;
+		for (GLint i = 0; i < 16 && !found; i++) {
+			GLint enabled = 0, size = 0, type = 0, stride = 0;
+			const unsigned char *base;
 			int unit_square = 1;
 
-			if (a->data == NULL || a->size != 2 || a->type != GL_FLOAT) {
+			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+			if (!enabled || g->attribs[i].data == NULL) {
 				continue;
 			}
-			stride = a->stride > 0 ? (size_t)a->stride : sizeof(GLfloat) * 2;
+			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
+			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
+			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
+			if (size != 2 || type != GL_FLOAT || stride <= 0) {
+				continue;
+			}
+			base = (const unsigned char *)g->attribs[i].data;
 			u0 = v0 = 1e30f;
 			u1 = v1 = -1e30f;
-			for (int v = 0; v < vertices; v++) {
-				const GLfloat *p = (const GLfloat *)((const unsigned char *)a->data +
-				    (size_t)v * stride);
-				GLfloat u = p[0], t = p[1];
+			for (int vertex = 0; vertex < 3; vertex++) {
+				const unsigned char *at = base + (size_t)vertex * (size_t)stride;
+				GLfloat u = 0.0f, t = 0.0f;
 
+				memcpy(&u, at, 4);
+				memcpy(&t, at + 4, 4);
 				if (u < u0) u0 = u;
 				if (u > u1) u1 = u;
 				if (t < v0) v0 = t;
