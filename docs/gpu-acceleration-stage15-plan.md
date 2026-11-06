@@ -221,3 +221,31 @@ Weather/Calendar（widget 标题）与 FaceTime/Calendar/Photos/Mail/Notes/Remin
 因此 P0'''''''' 的最后一步改成：**客人机自报 binding**——`eagl.c` 本来就在每个 context 里跟踪
 `e->framebuffer`，在每帧的 flush 路径里给下一帧开头补一条 `glBindFramebuffer(FRAMEBUFFER, e->framebuffer)`
 （或一条带 binding 的帧头字段），宿主照单绑定，不再猜。这样 frame boundary 与 CA 的 pass 再无关系。
+
+---
+
+## 十一、客人机自报 binding（2026-11-06 13:50）
+
+**为什么自报的值会是旧的**：`glBindFramebuffer` 在 spec 里是 `!local`，remote_only 下 trampoline **不调用**本地实现，
+而 `eagl.c` 的 `my_glBindFramebuffer` 正是那个本地实现——所以 `e->framebuffer` 从装上 recorder 起就不再更新，
+`frame_begin()` 的自报绑的是一个旧名字。
+
+**改法（三处，都在客人机侧）**
+
+1. `eagl.c` 新增 `eagl_note_bind(void *context, GLuint framebuffer)`：把 trampoline 的 `context`（就是
+   `struct eagl *`，`e->table[0] = e`）里的 `e->framebuffer` 更新掉。
+2. `remote.inc` 的 `remote_glBindFramebuffer` 在 `gw_glBindFramebuffer` 之前调用它；`gen.py` 同步加了这一行，
+   仓库里的 `remote.inc` 由生成器重建，工作树那份（带 stage-12 texlog 钩子）手工加同一行。
+3. `frame_begin()` 每帧开头录一条 `glBindFramebuffer(GL_FRAMEBUFFER, e->framebuffer)`——下一帧的第一条记录就是
+   客人机自己说的 binding，宿主不再靠"上一帧最后一条 bind"猜。
+
+**宿主**：`guest FBO 0 → stand_in`（`client->framebuffer`），与原来"0 是 drawable 替身"的语义一致；
+其余 binding 照流里的名字映射。
+
+**验证**：s15bind2 一发（900 s）。
+
+**验证结果（s15bind2，2026-11-06 14:01）**：`ui at 630 s`，截图 **239,632 B**；889 笔 label draw 里只有
+**34 笔落在 750x1624 的层上、14 笔有像素**——**标签没有上屏**。所以「自报 binding」让宿主不再靠猜，
+但这一发里 CA 就是不肯把标签画到大层上（它绑的是小块 label surface，而那些 surface 画出来仍是 0）；
+13:04 那一发的大层策略没有复现。下一阶段（第十六阶段 P0/P1）不再从 binding 找，转去查两件事：
+**CA 为什么选小块 surface**、**小块 surface 的片元采样为什么是 0**。
