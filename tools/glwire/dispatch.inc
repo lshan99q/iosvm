@@ -328,8 +328,20 @@ switch (opcode) {
 	case 32: {
 		/* glDeleteProgram */
 		GLuint a0 = wire_get_u32(r);
-		GLuint host_program = (GLuint)names_program_take(g, a0);
-		glDeleteProgram(host_program);
+		uint64_t present = 0;
+
+		/*
+		 * Stage fourteen: a name this side never made must not fall through to the guest's number --
+		 * the guest's programme 3 may be the host's texture 3 or a programme of another guest name,
+		 * so deleting it either raises GL_INVALID_OPERATION (the eight 0x502 frames of a boot came
+		 * from here, not from the legacy texture formats) or deletes the wrong object.  A delete of
+		 * something the host never had is a no-op.
+		 */
+		if (!name_map_get(&g->programs, a0, &present)) {
+			break;
+		}
+		glDeleteProgram((GLuint)present);
+		names_program_take(g, a0);
 		break;
 	}
 	case 33: {
