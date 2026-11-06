@@ -1651,7 +1651,9 @@ panel_probe_after_draw(void)
 	}
 	if (composite) {
 		label_composites++;
-		if (panel_shadow_on) {
+		/* the first composite of the frame is the one that puts the text in: a later draw that
+		 * samples the same tile again is the frame rebuilding over it */
+		if (panel_shadow_on && shadow_frame != (int)frames_replayed + 1) {
 			shadow_capture((GLuint)fbo, width, height);
 		}
 		return;
