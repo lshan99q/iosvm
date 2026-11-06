@@ -1,0 +1,132 @@
+<!-- 与 /home/lshan/dsh.MD/IOSVM-GPU加速第十六阶段工程.md 同一份；改一处就要改另一处 -->
+
+# IOSVM GPU 加速 —— 第十六阶段工程文档
+
+> 建立时间：2026-11-06 14:00
+> 前置：第十五阶段（结果见 `IOSVM-GPU加速第十五阶段工程.md` §十/§十一：wire 带 context、客人机自报 binding、
+> 一发里标签全部上屏 291,909 B 但不稳定）
+> 本文只回答：**下一阶段做什么、每件事的判据、怎么验、不做什么**
+
+---
+
+## 零、一句话现状
+
+1. **标签在 13:04 的一发里全部上屏**：截图 291,909 B，Weather / Calendar（widget 标题）与十个 App 名称齐全
+   （`iosvm/docs/demo/s15-labels-20261106.png`）。但同 env 复跑是 238 KB、无标签——**不是稳定状态**。
+2. **不稳定的机理已定位，但自报 binding 没有解决它**：`eagl.c` 用 `glFlush` 结束「帧」，CA 的 pass 会跨过去继续；
+   宿主原来每帧强绑自己的 FBO。第十五阶段先改成「宿主保留上一帧的 binding」，再改成「客人机自报 `e->framebuffer`」
+   （`glBindFramebuffer` 是 `!local`，trampoline 不调本地实现，所以加了 `eagl_note_bind()`）。
+   验证（s15bind2，14:01）：**889 笔 label draw、34 笔大层、14 笔有像素、截图 239,632 B、无标签**——自报只是让宿主
+   不再猜，CA 在这发里绑的是小块 label surface，而它们画出来仍为 0。
+3. **文字链路已解码**：program 15 = `vec4(glyph.a)`（纯 mask）；program 13 = `darkenSover(color*glyph.a, backdrop)`，
+   `S *= y^4`、backdrop 为空则恒 0。片元采样（atlas alpha / texmat0）是标签链上的最后一个未知。
+4. **widget 内容与壁纸仍缺**：SpringBoard 建了 `312x202 LA08`、`184x124 BGRA` 两面，但它们从未进入 backboardd 的
+   28 张 image 列表；壁纸所需的服务（`posterboardservices`）在这版镜像里查不到。
+5. **圆角回归**：legacy 格式展开（GL_ALPHA → RGBA）让 widget 圆角从 875/1600 白像素变成 1600/1600（直角）；
+   0x502 已归零，四格表未刷新。
+
+---
+
+## 一、这一阶段的三个决定
+
+| # | 决定 | 选错的代价 | 选对了解锁 |
+|---|---|---|---|
+| D1 | 标签稳定之后：**继续查片元采样** vs **宿主端「补字」**（拿 glyph atlas 自己画） | 补字：快、但一旦 CA 的真实路径修好就变成第二份字；查采样：可能还要挖几层 | 真实的 App 名称 |
+| D2 | 圆角：**把 legacy 展开改成保留采样语义的分叉**（`GL_ALPHA` 用它该有的 alpha、rgb 不动内容）vs 接受直角 | 接受：画面回归，判据写不过；分叉：要弄清那张面给谁用 | widget 圆角 + 标签同时正确 |
+| D3 | widget/壁纸：**按 surface ID 主动拉取** vs **录第二个进程** | 录进程：它不用 GL 就白干；拉面：要客人机侧找到 surface 的 base/stride | widget 内容与壁纸 |
+
+---
+
+## 二、目标与验收（可测）
+
+| # | 需求 | 判据（可测） | 阻塞谁 |
+|---|---|---|---|
+| P0''''''''' | 标签稳定 | **连续 3 发启动**，首页都有 App 名称（截图 ≥300 KB、同帧 diff ≥95%）；3 发里 ≥2 发达标即记为「达成」 | P1''''''''' |
+| P1''''''''' | 文字质量 | 无重影（Reminders 处只有一份清晰的字）；widget 圆角 **875/1600**；标签颜色为白（不是 mask 灰） | 项目可用性 |
+| P2''''''''' | widget 内容 | `312x202`/`184x124` 面以纹理进入宿主（日志里有 attach/upload 行），widget 方块内出现内容；否则给出「不由 GL 生成」的证据链 | 项目可用性 |
+| P3''''''''' | 壁纸 | 主屏背景不是纯黑；或给出「上游没有这张图」的完整证据链（服务不存在 + 镜像里没有资源） | 项目可用性 |
+| P4''''''''' | 性能与收尾 | 四格表（纯本地/按引用/W1.5/W1.5+W3）各 120 帧；`0x502` 每次启动 0 帧；`make test` 通过；文档同步；推 GitHub | — |
+
+---
+
+## 三、实验计划（按顺序，每步都有停下来写结论的检查点）
+
+### P0'''''''''：标签稳定（1–2 天）
+
+**自报 binding 的验证已经做过一发（s15bind2，见 §零.2）：没有标签。所以这一阶段的 P0 不是再压 binding，而是查
+「CA 为什么选小块 surface」。**
+
+1. **两发的对照**：13:04 的发（283 笔大层 draw、118 笔有像素、291,909 B、有标签）vs 14:01 的发（34 笔大层、14 笔
+   有像素、239,632 B、无标签）。同一份镜像/宿主，差的是 CA 的 surface 策略——把两发的首帧 draw 顺序、`images`
+   列表、`surface` 创建日志并排列出来，找出分叉点。
+2. **小块 surface 的采样**：`GLWIRE_LABEL_ALPHA=1` 把 atlas alpha 画成红色；若仍为 0，查 sampler 状态
+   （min filter/wrap/纹理目标）与 texmat0 的录制 payload。
+3. **判据**：3 发里 ≥2 发首页有 App 名称、截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95%。
+4. **记录**：每一发都要有「标签是否出现 + 大目标 label draw 数 + 小块 surface 的采样读数」三行。
+
+### P1'''''''''：片元采样、重影、圆角（1–2 天）
+
+1. **采样**：`GLWIRE_LABEL_ALPHA=1`（把 atlas alpha 画成红色）判定「采样到 0」还是「程序/乘子为 0」；
+   若是 texmat0=NaN，查 `glUniform4fv` 的录制 payload（指针/长度/guest location 映射）。
+2. **重影**：同一帧 dump panel texture 与 label layer，判断「同一批字画两次」还是「合成两份」。
+3. **圆角**：把 `host_legacy_teximage` 的 `GL_ALPHA` 展开改成按用途分叉（mask 用 alpha、采样语义用 swizzle），
+   判据：圆角 875/1600 且标签仍正确；0x502 保持 0。
+4. **标签颜色**：program 15 的 mask 是纯 alpha，合成时用 shader 的 color 还是固定白——用截图判定。
+
+### P2'''''''''：widget 与壁纸（2 天）
+
+1. **先判定**：SpringBoard 的 312x202/184x124 面是否由 GL 画（它有没有加载我们的 eagl、有没有第二条连接）。
+   证伪则走「拉面」。
+2. **拉面**：wire 加一个「按 surface ID 拉取」的 opcode：客人机侧用 `IOSurfaceGetBaseAddress/Row` 找像素，
+   宿主按 pa 上传成纹理；backboardd 的 `texImageIOSurface:` 列表外再补一轮绑定。
+3. **壁纸**：`posterboardservices` 不存在 + 镜像里没有壁纸资源 → 判为上游缺件；判据改成「证据链完整」。
+
+### P3'''''''''：四格表与收尾（1 天）
+
+四份构建（纯本地 / 按引用 / W1.5 / W1.5+W3）各 120 帧；`0x502` 保持 0；`make test`；文档；推送。
+
+---
+
+## 四、不做（已被数据否掉，别重试）
+
+1. **不再猜绑定**：客人机已经自报 `e->framebuffer`，宿主照单绑定。
+2. **不再用「两条 EAGL context 合流」解释标签**：3700 帧全部 ctx 0，第二条 context 从未录到 GL 调用（ADR-011 Amendment）。
+3. **不再把 legacy 展开当 0x502 的修复**：0x502 来自 `glDeleteProgram`，已归零；展开只影响圆角。
+4. **不再把 64x19 当文字颜色**：它是屏幕背景缩略（`S *= y^4`），填白不改画面。
+5. **不动内核**：本阶段是纯用户态 + 宿主。
+
+---
+
+## 五、验证环境与操作规范
+
+- 一把 VM 锁 `/tmp/iosvm-vm.lock`；同一时间只跑一发。
+- 启动：`tools/glwire/harness/boot-measure.sh <label> <root.apfs> <secs>`；要跑满 900 s 又拿界面时刻用
+  `MINFRAMES=999999 MINSHOT=200000`（`MINSHOT` 同时是界面阈值）。
+- 用户态重建：`IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs`（wire 或 eagl 改动都要重建）。
+- 宿主探针：`GLWIRE_KEEP_BINDING`（默认开）、`GLWIRE_LABEL_DUMP`、`GLWIRE_LABEL_ALPHA`、`GLWIRE_LABEL_WHITE`、
+  `GLWIRE_CONTEXT_LOG`、`GLWIRE_FBO_LOG/TRACE`、`GLWIRE_DRAW_LOG`、`GLWIRE_ERROR_LOG`、`GLWIRE_UNIFORM_LOG`。
+- 证据图放 `iosvm/docs/demo/`（名字带日期与场景）。
+
+---
+
+## 六、里程碑
+
+| 天 | 目标 | 产出 |
+|---|---|---|
+| D1 | P0''''''''' 标签稳定 | 3 发标签结论 + 截图 |
+| D2 | P1''''''''' 采样判定 | `GLWIRE_LABEL_ALPHA` 的读数与结论 |
+| D3 | P1''''''''' 重影/圆角 | 圆角 875/1600、无重影的截图 |
+| D4–D5 | P2''''''''' widget/壁纸 | 面进流的日志或「不由 GL 生成」的证据链 |
+| D6 | P3''''''''' 四格表 | 四格数字 + 结论表 |
+| D7 | 收尾 | `make test`、0x502=0、文档、推送 |
+
+---
+
+## 七、诚实的预期
+
+- **P0''''''''' 是确定能出结论的**：三发里要么有标签、要么没有；两种都写清楚。「自报 binding」把猜测成分从宿主移到了
+  客人机自己的记录，剩下的不确定性只有 CA 的 flush 时机。
+- **P1''''''''' 的采样一半概率是 sampler 状态**（min filter/wrap/纹理目标），一半是 uniform 录制；两种都能用现有探针判。
+- **重影**大概率是「同一批字被画两次」（panel texture 里已有 + label layer 再画），修法在宿主侧。
+- **P2''''''''' 的「不是 GL」概率高**：第二个进程一次都没连我们，所以按「主动拉面」设计。
+- **P3''''''''' 的壁纸可能判为不可修**：`posterboardservices` 不存在，这版镜像里没有那张图。
