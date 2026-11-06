@@ -627,6 +627,13 @@ host_fix_nan_texmat(GLuint program)
 			continue;
 		}
 		glGetUniformfv(program, location, value);
+		if (said < 3) {
+			said++;
+			printf("glwire: texmat check programme %u %s location %d: %.4f %.4f %.4f %.4f\n",
+			    (unsigned)program, names[i], (int)location, (double)value[0], (double)value[1],
+			    (double)value[2], (double)value[3]);
+			fflush(stdout);
+		}
 		for (int c = 0; c < 4; c++) {
 			if (value[c] != value[c]) {
 				nan = 1;
@@ -636,8 +643,7 @@ host_fix_nan_texmat(GLuint program)
 			continue;
 		}
 		glUniform4f(location, 1.0f, 1.0f, 0.0f, 0.0f);
-		if (said < 20) {
-			said++;
+		{
 			printf("glwire: %s was NaN for programme %u, set to (1,1,0,0)\n", names[i],
 			    (unsigned)program);
 			fflush(stdout);
@@ -711,6 +717,22 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	last_draw_was_glyph = glyph_height != 0;
 	if (last_draw_was_glyph && getenv("GLWIRE_FIX_TEXMAT") != NULL) {
 		host_fix_nan_texmat((GLuint)program);
+	}
+	if (last_draw_was_glyph && getenv("GLWIRE_TEXMAT_IDENTITY") != NULL) {
+		/* the stronger half of the same experiment: never mind what the stream set, force the
+		 * sampler matrix of the text draw to the identity and see whether the glyph changes */
+		GLint location = glGetUniformLocation((GLuint)program, "texmat0");
+
+		if (location >= 0) {
+			static unsigned said;
+
+			glUniform4f(location, 1.0f, 1.0f, 0.0f, 0.0f);
+			if (said < 5) {
+				said++;
+				printf("glwire: texmat0 forced to (1,1,0,0) for programme %u\n", (unsigned)program);
+				fflush(stdout);
+			}
+		}
 	}
 	if (last_draw_was_glyph) {
 		host_backdrop_fill(g);
