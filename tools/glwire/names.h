@@ -57,6 +57,7 @@ struct glstate {
 	 * ends, and the EGL surface here is a 16x16 pbuffer that holds nothing). */
 	GLuint bound_framebuffer;
 	GLuint drawn_framebuffer;
+	int framebuffer_known;          /* the stream has bound one: the binding is the guest's, not ours */
 };
 
 static uint64_t

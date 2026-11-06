@@ -455,7 +455,76 @@ static void host_dump_uniforms(struct glstate *g, const char *tag);
  */
 static int last_draw_was_glyph;
 static int fbo_trace;
+static int record_context_known;
+static uint32_t record_context;
 static unsigned fbo_trace_said;
+
+/*
+ * Stage fifteen: what does the text sampler actually hold?  At a glyph draw, read the texture bound
+ * to unit 0 back through a scratch framebuffer and say how much of it is non-zero and what its alpha
+ * looks like.  An all-zero atlas is an upload problem; a full atlas with an empty draw is a sampling
+ * or a programme problem -- the two were indistinguishable from the FBO dumps alone.
+ */
+static GLuint label_sample_fbo;
+
+static void
+host_label_sample(struct glstate *g)
+{
+	static unsigned said;
+	GLint previous_fbo = 0, texture = 0, width = 0, height = 0, internal = 0, active = 0;
+	GLenum error;
+
+	if (said >= 8) {
+		return;
+	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+	if (texture == 0) {
+		return;
+	}
+	glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+	if (width <= 0 || height <= 0 || width > 1024 || height > 1024) {
+		glActiveTexture((GLenum)active);
+		return;
+	}
+	if (label_sample_fbo == 0) {
+		glGenFramebuffers(1, &label_sample_fbo);
+	}
+	{
+		size_t bytes = (size_t)width * (size_t)height * 4;
+		unsigned char *pixels = calloc(1, bytes);
+		unsigned nonzero = 0, opaque = 0;
+
+		glBindFramebuffer(GL_FRAMEBUFFER, label_sample_fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)texture, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE && pixels != NULL) {
+			glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+			for (size_t i = 0; i + 3 < bytes; i += 4) {
+				if (pixels[i] | pixels[i + 1] | pixels[i + 2] | pixels[i + 3]) {
+					nonzero++;
+				}
+				if (pixels[i + 3] > 127) {
+					opaque++;
+				}
+			}
+		}
+		error = glGetError();
+		printf("glwire: label sample texture %d %dx%d internal %#x: %u nonzero pixels, %u with alpha, "
+		    "glerror %#x\n", (int)texture, (int)width, (int)height, internal, nonzero, opaque, error);
+		fflush(stdout);
+		free(pixels);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous_fbo);
+	glActiveTexture((GLenum)active);
+	said++;
+	(void)g;
+}
 
 static void host_program_source(struct glstate *g, GLuint program);
 static void host_attrib_state(struct glstate *g);
@@ -484,8 +553,12 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		GLint drawbuffer = 0;
 
 		glGetIntegerv(GL_DRAW_BUFFER, &drawbuffer);
-		printf("glwire: draw#%u %s mode %#x count %d program %d (guest %u) fbo %d viewport %d,%d %dx%d "
-		    "scissor %s %d,%d %dx%d status %#x drawbuffer %#x", logged, how, mode, (int) count, (int) program,
+		printf("glwire: draw#%u", logged);
+		if (record_context_known) {
+			printf(" ctx %u", record_context);
+		}
+		printf(" %s mode %#x count %d program %d (guest %u) fbo %d viewport %d,%d %dx%d "
+		    "scissor %s %d,%d %dx%d status %#x drawbuffer %#x", how, mode, (int) count, (int) program,
 		    (unsigned) g->current_program, (int) framebuffer, (int) viewport[0], (int) viewport[1],
 		    (int) viewport[2], (int) viewport[3], glIsEnabled(GL_SCISSOR_TEST) ? "on" : "off",
 		    (int) scissor[0], (int) scissor[1], (int) scissor[2], (int) scissor[3],
@@ -520,6 +593,42 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	/* (stage thirteen: a draw that binds a glyph tile is a text draw -- say what its programme holds) */
 	last_draw_was_glyph = glyph_height != 0;
 	if (glyph_height != 0) {
+		if (getenv("GLWIRE_LABEL_DUMP") != NULL) {
+			GLint matrix_location = glGetUniformLocation((GLuint)program, "vertex_matrix");
+			GLint texmat_location = glGetUniformLocation((GLuint)program, "texmat0");
+			GLfloat texmat[4] = { 0, 0, 0, 0 };
+			GLfloat matrix[16] = { 0 };
+
+			host_label_sample(g);
+			if (texmat_location >= 0) {
+				glGetUniformfv((GLuint)program, texmat_location, texmat);
+			}
+			if (matrix_location >= 0) {
+				glGetUniformfv((GLuint)program, matrix_location, matrix);
+			}
+			{
+				GLboolean mask[4] = { 0, 0, 0, 0 };
+				GLint blend_src = 0, blend_dst = 0, colour = 0;
+
+				glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+				glGetIntegerv(GL_BLEND_SRC_RGB, &blend_src);
+				glGetIntegerv(GL_BLEND_DST_RGB, &blend_dst);
+				glGetIntegerv(GL_CURRENT_COLOR, &colour);
+				printf("glwire: label state blend %s src %#x dst %#x colormask %d%d%d%d\n",
+				    glIsEnabled(GL_BLEND) ? "on" : "off", blend_src, blend_dst, (int)mask[0],
+				    (int)mask[1], (int)mask[2], (int)mask[3]);
+			}
+			printf("glwire: label state program %d texmat0 %.4f %.4f %.4f %.4f matrix %.4f %.4f %.4f %.4f / "
+			    "%.4f %.4f %.4f %.4f / "
+			    "%.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f\n", (int)program, (double)texmat[0],
+			    (double)texmat[1], (double)texmat[2], (double)texmat[3], (double)matrix[0],
+			    (double)matrix[1], (double)matrix[2], (double)matrix[3], (double)matrix[4],
+			    (double)matrix[5], (double)matrix[6], (double)matrix[7], (double)matrix[8],
+			    (double)matrix[9], (double)matrix[10], (double)matrix[11], (double)matrix[12],
+			    (double)matrix[13], (double)matrix[14], (double)matrix[15]);
+			host_attrib_state(g);
+			fflush(stdout);
+		}
 		host_dump_uniforms(g, "text-draw");
 		/* (stage fourteen: what the text draw actually asks the GPU to do) */
 		if (getenv("GLWIRE_PROGRAM_SOURCE") != NULL) {
@@ -684,6 +793,48 @@ host_program_source(struct glstate *g, GLuint program)
 	}
 }
 
+/* One attribute of one vertex, decoded by its type: the wire's copy carries the values the draw
+ * actually uses, and the array is interleaved, so reading it without the stride was unreadable. */
+static void
+host_attrib_vertex(const struct attrib_state *attrib, int vertex, GLint type, GLint size)
+{
+	const unsigned char *at = (const unsigned char *)attrib->data +
+	    (size_t)vertex * (size_t)(attrib->stride > 0 ? attrib->stride : 0);
+
+	printf(" v%d:", vertex);
+	for (GLint c = 0; c < size && c < 4; c++) {
+		if (type == GL_FLOAT) {
+			float value = 0;
+
+			memcpy(&value, at + c * 4, 4);
+			printf(" %.4f", (double)value);
+		} else if (type == 0x140b) {    /* GL_HALF_FLOAT */
+			uint16_t half = 0;
+			float value = 0;
+			uint32_t sign, exponent, mantissa;
+
+			memcpy(&half, at + c * 2, 2);
+			sign = (half >> 15) & 1;
+			exponent = (half >> 10) & 0x1f;
+			mantissa = half & 0x3ff;
+			if (exponent == 0) {
+				value = (float)mantissa / 1024.0f * (float)(1u << 14);
+			} else if (exponent != 31) {
+				value = (float)(mantissa + 1024) / 1024.0f *
+				    (float)(1u << (exponent > 15 ? exponent - 15 : 0));
+				if (exponent <= 15) {
+					value = (float)(mantissa + 1024) / 1024.0f / (float)(1u << (15 - exponent));
+				}
+			}
+			printf(" %.4f", (double)(sign ? -value : value));
+		} else if (type == GL_UNSIGNED_BYTE) {
+			printf(" %u", (unsigned)at[c]);
+		} else {
+			printf(" ?");
+		}
+	}
+}
+
 static void
 host_attrib_state(struct glstate *g)
 {
@@ -694,8 +845,6 @@ host_attrib_state(struct glstate *g)
 	}
 	for (GLint i = 0; i < 16; i++) {
 		GLint enabled = 0, size = 0, type = 0, stride = 0;
-		const float *floats;
-		const unsigned char *bytes;
 
 		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
 		if (!enabled) {
@@ -707,18 +856,134 @@ host_attrib_state(struct glstate *g)
 		printf("glwire: attrib %d size %d type %#x stride %d data %s", (int)i, (int)size, type,
 		    (int)stride, g->attribs[i].data != NULL ? "yes" : "no");
 		if (g->attribs[i].data != NULL && g->attribs[i].size > 0) {
-			floats = g->attribs[i].data;
-			bytes = g->attribs[i].data;
-			printf(" float[0..7] %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f", (double)floats[0],
-			    (double)floats[1], (double)floats[2], (double)floats[3], (double)floats[4],
-			    (double)floats[5], (double)floats[6], (double)floats[7]);
-			printf(" bytes %02x%02x%02x%02x %02x%02x%02x%02x", bytes[0], bytes[1], bytes[2],
-			    bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+			for (int vertex = 0; vertex < 3; vertex++) {
+				host_attrib_vertex(&g->attribs[i], vertex, type, size);
+			}
 		}
 		printf("\n");
 	}
 	said++;
 	fflush(stdout);
+}
+
+/*
+ * Stage fifteen: the label pass's geometry is right (its matrix maps the quad onto the scissor box)
+ * but every dump is zero, and the shader by itself cannot say whether that is "nothing was covered"
+ * or "the sampled glyph alpha is zero".  GLWIRE_LABEL_WHITE=1 answers it by drawing the same vertices
+ * with a trivial programme that writes opaque magenta: whatever the quad covers turns magenta, so a
+ * still-zero dump means no coverage and a magenta block means the glyph sampling is the question.
+ */
+static GLuint label_debug_program;
+static GLint label_debug_matrix;
+static int label_debug_tried;
+
+static int
+host_label_begin(struct glstate *g)
+{
+	GLint program = 0, position_index = -1;
+	const char *want = getenv("GLWIRE_LABEL_WHITE");
+
+	if (want == NULL || !last_draw_was_glyph) {
+		return 0;
+	}
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	if (program == 0) {
+		return 0;
+	}
+	for (int i = 0; i < 16; i++) {
+		GLint enabled = 0;
+
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+		if (enabled && g->attribs[i].data != NULL && g->attribs[i].size == 4 &&
+		    g->attribs[i].type == GL_FLOAT) {
+			position_index = i;
+			break;
+		}
+	}
+	if (position_index < 0) {
+		return 0;
+	}
+	if (!label_debug_tried) {
+		static const char *vertex_source =
+		    "uniform mat4 vertex_matrix;\nattribute vec4 vertex_position;\n"
+		    "void main() { gl_Position = vertex_matrix * vertex_position; }\n";
+		static const char *alpha_vertex_source =
+		    "uniform mat4 vertex_matrix;\nattribute vec4 vertex_position;\nattribute vec2 uv;\n"
+		    "varying vec2 v;\n"
+		    "void main() { v = uv; gl_Position = vertex_matrix * vertex_position; }\n";
+		static const char *fragment_source =
+		    "void main() { gl_FragData[0] = vec4(1.0, 0.0, 1.0, 1.0); }\n";
+		static const char *alpha_fragment_source =
+		    "varying vec2 v;\nuniform sampler2D texture0;\n"
+		    "void main() { gl_FragData[0] = vec4(texture2D(texture0, v).a, 0.0, 0.0, 1.0); }\n";
+		int want_alpha = getenv("GLWIRE_LABEL_ALPHA") != NULL;
+		GLint texcoord_index = -1;
+		GLuint vertex = glCreateShader(GL_VERTEX_SHADER);
+		GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+		const char *vertex_text = want_alpha ? alpha_vertex_source : vertex_source;
+		const char *fragment_text = want_alpha ? alpha_fragment_source : fragment_source;
+		GLint good = 0;
+
+		for (int i = 0; i < 16; i++) {
+			GLint enabled = 0;
+
+			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+			if (enabled && g->attribs[i].data != NULL && g->attribs[i].size == 2 &&
+			    g->attribs[i].type == GL_FLOAT) {
+				texcoord_index = i;
+				break;
+			}
+		}
+		label_debug_tried = 1;
+		glShaderSource(vertex, 1, &vertex_text, NULL);
+		glCompileShader(vertex);
+		glShaderSource(fragment, 1, &fragment_text, NULL);
+		glCompileShader(fragment);
+		label_debug_program = glCreateProgram();
+		glAttachShader(label_debug_program, vertex);
+		glAttachShader(label_debug_program, fragment);
+		glBindAttribLocation(label_debug_program, (GLuint)position_index, "vertex_position");
+		if (texcoord_index >= 0) {
+			glBindAttribLocation(label_debug_program, (GLuint)texcoord_index, "uv");
+		}
+		glLinkProgram(label_debug_program);
+		glGetProgramiv(label_debug_program, GL_LINK_STATUS, &good);
+		glDeleteShader(vertex);
+		glDeleteShader(fragment);
+		{
+			GLint log_length = 0;
+			char log[512] = "";
+
+			glGetProgramiv(label_debug_program, GL_INFO_LOG_LENGTH, &log_length);
+			if (log_length > 1) {
+				glGetProgramInfoLog(label_debug_program, (GLsizei)sizeof(log) - 1, NULL, log);
+			}
+			printf("glwire: label debug %s: link %d position %d texcoord %d alpha %d %s\n",
+			    want_alpha ? "alpha" : "magenta", (int)good, (int)position_index, (int)texcoord_index,
+			    want_alpha, log);
+			fflush(stdout);
+		}
+		if (!good) {
+			glDeleteProgram(label_debug_program);
+			label_debug_program = 0;
+			return 0;
+		}
+		label_debug_matrix = glGetUniformLocation(label_debug_program, "vertex_matrix");
+	}
+	if (label_debug_program == 0) {
+		return 0;
+	}
+	{
+		GLint location = glGetUniformLocation((GLuint)program, "vertex_matrix");
+		GLfloat matrix[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+		if (location >= 0) {
+			glGetUniformfv((GLuint)program, location, matrix);
+		}
+		glUseProgram(label_debug_program);
+		glUniformMatrix4fv(label_debug_matrix, 1, GL_FALSE, matrix);
+	}
+	return program;
 }
 
 /*
@@ -745,6 +1010,7 @@ struct fbo_note {
 
 static int fbo_log;
 static int probe_errors;
+static int keep_binding;
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
 static unsigned fbo_note_count;
@@ -958,15 +1224,44 @@ host_after_draw(struct glstate *g)
 
 		last_draw_was_glyph = 0;
 		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &label_fbo);
-		if (trace_client != NULL && trace_width > 0 && trace_height > 0 && label_fbo != 0) {
-			size_t bytes = (size_t)trace_width * (size_t)trace_height * 4;
-			unsigned char *shot = malloc(bytes);
+		if (trace_client != NULL && label_fbo != 0) {
+			GLint kind = -1, name = 0, read_width = trace_width, read_height = trace_height;
+			GLint previous = 0;
+			size_t bytes;
+			unsigned char *shot;
 			unsigned nonzero = 0, alpha = 0;
 
+			glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)label_fbo);
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+			if (kind == GL_TEXTURE && name != 0) {
+				GLint texture_width = 0, texture_height = 0;
+
+				glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+				glBindTexture(GL_TEXTURE_2D, (GLuint)name);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &texture_width);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &texture_height);
+				glBindTexture(GL_TEXTURE_2D, (GLuint)previous);
+				if (texture_width > 0 && texture_height > 0) {
+					read_width = texture_width;
+					read_height = texture_height;
+				}
+			}
+			if (read_width <= 0 || read_height <= 0) {
+				read_width = trace_width;
+				read_height = trace_height;
+			}
+			if (read_width <= 0 || read_height <= 0) {
+				read_width = 1;
+				read_height = 1;
+			}
+			bytes = (size_t)read_width * (size_t)read_height * 4;
+			shot = malloc(bytes);
 			if (shot != NULL) {
 				memset(shot, 0, bytes);
-				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)label_fbo);
-				glReadPixels(0, 0, trace_width, trace_height, GL_BGRA, GL_UNSIGNED_BYTE, shot);
+				glReadPixels(0, 0, read_width, read_height, GL_BGRA, GL_UNSIGNED_BYTE, shot);
 				for (size_t i = 0; i + 3 < bytes; i += 4) {
 					if (shot[i] | shot[i + 1] | shot[i + 2] | shot[i + 3]) {
 						nonzero++;
@@ -976,14 +1271,17 @@ host_after_draw(struct glstate *g)
 					}
 				}
 				labels++;
-				printf("glwire: label draw #%u framebuffer %d: %u nonzero pixels, %u with alpha\n",
-				    labels, (int)label_fbo, nonzero, alpha);
+				printf("glwire: label draw #%u framebuffer %d attachment %s %d %dx%d: %u nonzero pixels, "
+				    "%u with alpha, glerror %#x\n", labels, (int)label_fbo,
+				    kind == GL_TEXTURE ? "texture" : kind == GL_RENDERBUFFER ? "renderbuffer" : "none",
+				    name, (int)read_width, (int)read_height, nonzero, alpha, glGetError());
 				fflush(stdout);
 				if (labels <= 4) {
 					char path[512];
 
-					snprintf(path, sizeof(path), "%s-label-%u-fbo-%d.bgra", getenv("GLWIRE_LABEL_DUMP"),
-					    labels, (int)label_fbo);
+					snprintf(path, sizeof(path), "%s-label-%u-fbo-%d-%dx%d.bgra",
+					    getenv("GLWIRE_LABEL_DUMP"), labels, (int)label_fbo, (int)read_width,
+					    (int)read_height);
 					if (write_pixels(path, shot, bytes)) {
 						wrote++;
 					}
@@ -1419,7 +1717,28 @@ serve_frame(struct client *client)
 	if (dump_draws_runtime && (int)(frames_replayed + 1) == dump_frame_runtime) {
 		dump_textures(client, getenv("GLWIRE_DUMP_TEXTURES"));
 	}
-	glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
+	/*
+	 * Stage fifteen: eagl.c ends a frame on glFlush/glFinish, and a CoreAnimation pass need not end
+	 * there -- the label pass continues into the next frame record with the framebuffer its previous
+	 * frame bound.  Resetting the binding to this renderer's own framebuffer made those draws land
+	 * on a 750x1624 stand-in while they were aimed at a 184x90 glyph surface (their scissor says so).
+	 * GLWIRE_KEEP_BINDING=1 keeps the guest's binding across the boundary; a binding of 0 is the
+	 * drawable, which is what the stand-in is for.
+	 */
+	if (keep_binding && client->names.framebuffer_known && client->names.bound_framebuffer != 0) {
+		GLint kind = -1;
+
+		glBindFramebuffer(GL_FRAMEBUFFER, client->names.bound_framebuffer);
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+		if (kind == GL_NONE || glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+			glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
+			client->names.bound_framebuffer = client->framebuffer;
+		}
+	} else {
+		glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
+		client->names.bound_framebuffer = client->framebuffer;
+	}
 	glViewport(0, 0, width, height);
 	if (!no_panel && client->names.panel != NULL && client->names.panel_width == width &&
 	    client->names.panel_height == height) {
@@ -1429,7 +1748,6 @@ serve_frame(struct client *client)
 		size_t offset = 0;
 
 		memset(replay_ops, 0, sizeof(replay_ops));
-		client->names.bound_framebuffer = client->framebuffer;
 		client->names.drawn_framebuffer = 0;
 		replay_used = 1;
 		replayed = 1;
@@ -1453,10 +1771,17 @@ serve_frame(struct client *client)
 				continue;       /* already uploaded before the framebuffer was bound */
 			}
 			context = wire_header_context(records + offset, version);
+			record_context = context;
+			record_context_known = version >= 2;
 			if (getenv("GLWIRE_CONTEXT_LOG") != NULL && (!context_known || context != last_context)) {
-				printf("glwire: context %u first at opcode %u, record %zu of frame %llu\n", context,
-				    opcode, offset, (unsigned long long)frames_replayed + 1);
-				fflush(stdout);
+				static unsigned said;
+
+				if (said < 4000) {
+					said++;
+					printf("glwire: context %u at opcode %u, record %zu of frame %llu\n", context,
+					    opcode, offset, (unsigned long long)frames_replayed + 1);
+					fflush(stdout);
+				}
 				context_known = 1;
 				last_context = context;
 			}
@@ -1812,6 +2137,12 @@ main(int argc, char **argv)
 
 	no_in_place = getenv("GLWIRE_NO_INPLACE") != NULL;
 	fbo_log = getenv("GLWIRE_FBO_LOG") != NULL;
+	{
+		/* (ADR-012: the guest's binding survives eagl.c's frame boundary; "=0" restores stage 14) */
+		const char *keep = getenv("GLWIRE_KEEP_BINDING");
+
+		keep_binding = keep == NULL || keep[0] != '0';
+	}
 	fbo_trace = getenv("GLWIRE_FBO_TRACE") != NULL;
 	/* (the flag the argument loop set stays set: this used to overwrite it, so "--no-panel" on the
 	 * command line silently did nothing and every acceptance run drew the guest's own panel) */

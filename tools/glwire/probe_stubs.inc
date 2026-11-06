@@ -110,4 +110,13 @@ host_fbo_draw(struct glstate *g)
 	(void)g;
 }
 
+/* (stage fifteen: the forced-colour label draw is a host_glwire experiment; the replay tests run
+ * the recorded programme, as they always did) */
+static int
+host_label_begin(struct glstate *g)
+{
+	(void)g;
+	return 0;
+}
+
 #endif /* GLWIRE_PROBE_STUBS */

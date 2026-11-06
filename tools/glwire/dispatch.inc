@@ -118,7 +118,14 @@ switch (opcode) {
 		g->drawn_framebuffer = g->bound_framebuffer;
 		host_fbo_draw(g);
 		host_note_draw(g, "elements", a0, a1);
-		glDrawElements(a0, a1, a2, p3);
+		{
+			GLint restore = host_label_begin(g);
+
+			glDrawElements(a0, a1, a2, p3);
+			if (restore != 0) {
+				glUseProgram((GLuint)restore);
+			}
+		}
 		names_attribs_release(g);
 		GLWIRE_AFTER_DRAW(g);
 		free(p3);
@@ -537,6 +544,7 @@ switch (opcode) {
 		glBindFramebuffer(a0, host);
 		if (a0 != GL_READ_FRAMEBUFFER) {
 			g->bound_framebuffer = host;
+			g->framebuffer_known = 1;
 		}
 		host_fbo_bind(g, a0, a1, host);
 		break;
