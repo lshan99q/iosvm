@@ -200,6 +200,31 @@ remote_wants_local(void)
 	return access("/redwood/etc/glwire_local", F_OK) == 0;
 }
 
+/* Fifteenth stage: every record says which EAGL context made the call.  The trampoline receives the
+ * context itself as its first argument (the EAGL table's convention), so the recorder interns the
+ * pointer into 0..7 and puts that number in the record header; the host replays each context with
+ * its own name maps and its own GL state.  A ninth context shares number 0. */
+static void *remote_context_address[8];
+static uint32_t remote_context_count;
+
+void
+remote_note_context(void *context)
+{
+	for (uint32_t i = 0; i < remote_context_count; i++) {
+		if (remote_context_address[i] == context) {
+			wire_set_record_context(i);
+			return;
+		}
+	}
+	if (remote_context_count < sizeof(remote_context_address) / sizeof(remote_context_address[0])) {
+		remote_context_address[remote_context_count] = context;
+		wire_set_record_context(remote_context_count);
+		remote_context_count++;
+		return;
+	}
+	wire_set_record_context(0);
+}
+
 /* The picture the host draws lands directly after the frame's magic word, in guest memory the host
  * has mapped as the RAM file. The guest only has to read it. */
 /* Where the host is, and whether to use it at all: the file exists only when the boot was set up
@@ -238,6 +263,8 @@ eagl_remote_begin(void)
 		wire_vtop_hook = remote_vtop;
 	}
 	remote_only = wire_vtop_hook != NULL && !remote_wants_local();
+	/* stage fifteen: the record header carries the EAGL context (see remote_note_context) */
+	wire_set_record_version(2);
 	remote_no_flush = remote_boot_arg("glwire_noflush=1") != NULL ||
 	    access("/redwood/etc/glwire_noflush", F_OK) == 0;
 	{
@@ -464,9 +491,10 @@ eagl_remote_flush(int width, int height)
 		remote_surface2_segments_count = 0;
 		remote_surface2_row = 0;
 	}
-	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d %d %d\n",
+	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d %d %d %d\n",
 	    width, height, w.at, (size_t)width * height * 4, remote_picture_segments_count,
-	    remote_picture_row, remote_surface2_segments_count, remote_surface2_row);
+	    remote_picture_row, remote_surface2_segments_count, remote_surface2_row,
+	    2 /* the record header names its context */);
 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
 	    (remote_picture_segments_count > 0 &&
 	     send(remote_fd, remote_picture_segments,
