@@ -152,18 +152,17 @@
 
 ---
 
-## 十四、tile 有内容之后：它没有被任何 draw 采样（2026-11-06 17:25）
+## 十四、tile 的合成：静态日志被 host 名字复用干扰（2026-11-06 17:35，**结论修正**）
 
-在 s16bd 的日志里按帧顺序追：取一笔 64x19、`nz>0` 的 label draw，找它之后所有 `u0:host<T>(` 的 draw：
+在 s16bd 日志里按 host 名字追「有像素的 64x19 tile 之后有没有 draw 采样它」：
 
-- 542 个有像素的 tile（host 8）之后，**没有任何 draw 把 host 8 当 u0 采样**；
-- 唯一引用 host 8 的地方是 `u0:host8(guest87) u1:host8(guest87)` 的 program 7 全屏 draw——**guest87 是另一张
-  750x1624 面板**（host 名字 8 被回收复用），不是我们的 tile。
+- 第一版看法是「没有」——因为唯一大量出现的引用是 `u0:host8(guest87)` 这类；
+- 但同一份日志里也有 `u0:host8(guest86)`、`u1:host8(guest86)` 的 program 7 全屏 draw（draw#1279/1280），
+  而 host 8 在不同时刻分别对应 **guest 86 / 87 / 110 / 121 / 132**（64x19 的 attach 行可以作证）。
 
-结论：**tile 是转瞬即逝的中间体**。会消费它的合成 draw 在记录顺序里出现在 label pass **之前**——
-这正是「`glFlush` 把 CA 的一个 pass 从中间切开」的另一面：面板合成先录到，标签 pass 后录到，合成时 tile 还是空的。
+**所以 host 名字会被回收复用，按 host 名字追 tile 是不成立的**；上面的「没有被采样」结论**作废**。
+要回答「tile 有没有被合成」，必须按 **guest 名字**追：在 label draw 时记下目标 tile 的 guest texture id，
+再在之后的 draw 里匹配 `hostN(guestT)`。
 
-**下一件事**（谨慎，一发定生死）：让客人机**不要在 pass 中间 flush 拆帧**——`eagl.c` 里把 `my_glFlush` 的
-`frame_end` 改成「只置标记、下一次真 present（`glFinish`）才发帧」，或把连续 flush 合并。风险：如果 CA 从不
-调 `glFinish`，帧就永远不发（900 s 超时）。所以先做**带日志的试运行**：把 flush 的时间戳和帧号打出来，
-确认 CA 在一次 present 里调几次 flush、最后一次在哪个 opcode 之后，再决定合并窗口。
+**下一步**（比再跑一发更省）：给宿主加一个 `GLWIRE_NAME_TRACE=<guest>`——把某个 guest 纹理的
+创建/删除/绑定/采样全打出来；用一发 900 s 抓「tile 的 guest id 生命周期」，再决定是合成缺失还是名字复用。
