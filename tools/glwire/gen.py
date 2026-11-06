@@ -278,7 +278,7 @@ def emit_slots(calls):
     out = []
     for index, call in enumerate(calls):
         ret = call.ret_ctype()
-        body = []
+        body = ["\tremote_note_context(context);"]      # (stage fifteen: which EAGL context this is)
         args = ", ".join(name for _, name in call.params)
         local_type = "void *" if not call.params else "void *, " + call.ctypes()
         local_args = "context" if not call.params else "context, " + args
