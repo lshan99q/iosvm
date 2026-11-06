@@ -149,3 +149,21 @@
 **但截图仍无标签**（238 KB）。所以链路变成：tile 有内容 → **tile 的合成没上屏**。下一步查：
 这些 tile 纹理被哪些 draw 采样（之前统计过 host8 被采样 2874 次）、采样时的 blend/alpha 是否把内容乘掉，
 以及面板合成时它们的顶点位置是否落在屏幕上。
+
+---
+
+## 十四、tile 有内容之后：它没有被任何 draw 采样（2026-11-06 17:25）
+
+在 s16bd 的日志里按帧顺序追：取一笔 64x19、`nz>0` 的 label draw，找它之后所有 `u0:host<T>(` 的 draw：
+
+- 542 个有像素的 tile（host 8）之后，**没有任何 draw 把 host 8 当 u0 采样**；
+- 唯一引用 host 8 的地方是 `u0:host8(guest87) u1:host8(guest87)` 的 program 7 全屏 draw——**guest87 是另一张
+  750x1624 面板**（host 名字 8 被回收复用），不是我们的 tile。
+
+结论：**tile 是转瞬即逝的中间体**。会消费它的合成 draw 在记录顺序里出现在 label pass **之前**——
+这正是「`glFlush` 把 CA 的一个 pass 从中间切开」的另一面：面板合成先录到，标签 pass 后录到，合成时 tile 还是空的。
+
+**下一件事**（谨慎，一发定生死）：让客人机**不要在 pass 中间 flush 拆帧**——`eagl.c` 里把 `my_glFlush` 的
+`frame_end` 改成「只置标记、下一次真 present（`glFinish`）才发帧」，或把连续 flush 合并。风险：如果 CA 从不
+调 `glFinish`，帧就永远不发（900 s 超时）。所以先做**带日志的试运行**：把 flush 的时间戳和帧号打出来，
+确认 CA 在一次 present 里调几次 flush、最后一次在哪个 opcode 之后，再决定合并窗口。
