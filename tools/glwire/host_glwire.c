@@ -343,28 +343,27 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 	size_t count, i;
 	int kind;
 	static unsigned said;
+	static int mode = -1;          /* -1 unread: 0 native first, 1 expand, 2 native only */
 
 	if (level != 0 || type != GL_UNSIGNED_BYTE || width <= 0 || height <= 0) {
 		return 0;
 	}
 	/*
-	 * Off by default: with it on, the eight frames a boot replays with GL_INVALID_OPERATION (0x502,
-	 * the upload of a legacy format this context will not take) go through, but what the screen shows
-	 * of it is the widget boxes losing their rounded corners -- 14,934 pixels, measured -- and the app
-	 * labels are unchanged, so this is not the missing piece.  GLWIRE_LEGACY_FORMATS=1 turns it on for
-	 * whoever picks this thread up.
+	 * GLWIRE_LEGACY_FORMATS: the legacy formats (GL_ALPHA, GL_LUMINANCE, GL_LUMINANCE_ALPHA) were
+	 * expanded to RGBA because an earlier host context refused them with GL_INVALID_OPERATION.  It
+	 * does not: measured on this one (4.6 compatibility, V100) all three upload natively with no
+	 * error, and a native upload samples exactly as the guest's GL ES did.  The expansion is still
+	 * what the widget's rounded corners lost with (14,934 pixels of the widget boxes changed), so
+	 * the native upload is tried first now and the expansion is the fallback:
+	 *
+	 *   unset / 0   native first, expand only if the native upload is refused
+	 *   1           always expand (the stage twelve behaviour, for comparison)
+	 *   2           native only: a refusal is left to the caller's own glTexImage2D
 	 */
-	{
-		static int wanted = -1;
+	if (mode < 0) {
+		const char *value = getenv("GLWIRE_LEGACY_FORMATS");
 
-		if (wanted < 0) {
-			const char *value = getenv("GLWIRE_LEGACY_FORMATS");
-
-			wanted = value != NULL && value[0] == '1';
-		}
-		if (!wanted) {
-			return 0;
-		}
+		mode = value == NULL ? 0 : (value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0);
 	}
 	if (internal == LEGACY_ALPHA && format == LEGACY_ALPHA) {
 		kind = 1;
@@ -374,6 +373,26 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 		kind = 3;
 	} else {
 		return 0;
+	}
+	if (mode != 1) {
+		GLenum error = GL_NO_ERROR;
+
+		while (glGetError() != GL_NO_ERROR) {
+		}
+		glTexImage2D(target, level, internal, width, height, border, format, type, pixels);
+		error = glGetError();
+		if (error == GL_NO_ERROR || mode == 2) {
+			if (said < 8) {
+				said++;
+				printf("glwire: legacy texture %dx%d internal %#x format %#x: taken natively\n",
+				    (int)width, (int)height, internal, format);
+				fflush(stdout);
+			}
+			return 1;
+		}
+		printf("glwire: legacy texture %dx%d internal %#x format %#x: native upload refused %#x, "
+		    "expanding\n", (int)width, (int)height, internal, format, error);
+		fflush(stdout);
 	}
 	count = (size_t) width * (size_t) height;
 	expanded = malloc(count * 4);
@@ -823,13 +842,14 @@ host_dump_uniforms(struct glstate *g, const char *tag)
 static void
 host_program_source(struct glstate *g, GLuint program)
 {
-	static GLuint dumped[8];
+	static GLuint dumped[32];
 	static unsigned said;
 	GLuint shaders[4] = { 0, 0, 0, 0 };
 	GLint count = 0;
+	unsigned limit = getenv("GLWIRE_PROGRAM_ALL") != NULL ? 32 : 8;
 
 	(void)g;
-	if (program == 0 || said >= 8) {
+	if (program == 0 || said >= limit) {
 		return;
 	}
 	for (unsigned i = 0; i < said; i++) {
@@ -1123,6 +1143,9 @@ struct fbo_note {
 static int fbo_log;
 static int probe_errors;
 static int keep_binding;
+static int read_panel;              /* (stage 17: read the picture from the panel-sized target) */
+static GLuint panel_drawn_fbo;      /* the panel-sized target this frame last had a draw */
+static int panel_drawn_frame = -1;
 static int frame_delay_ms;          /* (stage 15: a deliberate per-frame delay, for the timing question) */
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
@@ -1276,15 +1299,386 @@ host_fbo_draw(struct glstate *g)
 	}
 	note = host_fbo_note(fbo_client_fd, guest_of_host(&g->framebuffers, g->bound_framebuffer),
 	    g->bound_framebuffer);
+	if (note != NULL && (note->width == 0 || note->kind == -1)) {
+		/* (stage seventeen: every drawn target's size is needed, not only the logged ones: the
+		 * picture is read from the last *panel-sized* target, see serve_frame) */
+		GLint kind = -1, name = 0;
+
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+		note->kind = kind;
+		note->attach = (uint64_t)(GLuint)name;
+		fbo_texture_size(note);
+	}
 	if (note != NULL && note->width == 750 && note->height == 1624) {
 		/* (stage sixteen: what programme 13's backdrop is downsampled from) */
 		panel_fbo = g->bound_framebuffer;
 		panel_width = note->width;
 		panel_height = note->height;
 	}
+	if (note != NULL && trace_width > 0 && note->width == trace_width && note->height == trace_height) {
+		/* (stage seventeen: the target the picture has to come from even when the frame's last
+		 * draw was a small tile -- the size the frame asked for, not a hard-coded one) */
+		panel_drawn_fbo = g->bound_framebuffer;
+		panel_drawn_frame = (int)frames_replayed + 1;
+	}
 	if (fbo_log && note != NULL) {
 		note->draws++;
 	}
+}
+
+/*
+ * Stage seventeen, P0: the label is composited into the panel-sized target and then the rest of the
+ * frame rebuilds that target.  Two probes, both host-side and both off unless asked for:
+ *
+ *   GLWIRE_PANEL_PROBE=1  hashes the label's screen rectangle in a panel-sized target after every
+ *       draw of the frame, so "the composite wrote, then the rebuild erased" is read off the hashes
+ *       rather than argued from the draw order.  The rectangle is the scissor box of the last glyph
+ *       draw -- CoreAnimation sets the scissor to the layer's own rect for the text pass.
+ *
+ *   GLWIRE_PANEL_SHADOW=1 keeps a 750x1624 shadow of that target as it stood right after a draw
+ *       that sampled a texture some framebuffer had drawn into (a layer composite).  At the end of
+ *       the frame the shadow, not the target, supplies the picture (GLWIRE_SHADOW_MODE=1, the whole
+ *       target) or only the label's rectangle is patched back into it (mode 2).  This is the stage's
+ *       experiment: the risk is that the shadow freezes a mid-frame state that the guest would have
+ *       painted over.
+ *
+ * Both keep every piece of GL state they touch -- the framebuffer binding, the texture binding of
+ * the active unit, the pack alignment -- because they run in the middle of the guest's stream.
+ */
+static int panel_probe_on, panel_shadow_on;
+static int shadow_mode = 1;
+static int shadow_apply = 1;
+static GLuint shadow_fbo, shadow_texture;
+static int shadow_width, shadow_height;
+static int shadow_frame = -1;          /* the frame whose composite is in the shadow */
+static int shadow_used;
+static unsigned long long shadow_captures, shadow_uses;
+static int shadow_dump_every;
+static const char *shadow_dump_prefix;
+static int label_rect[4] = { 0, 0, 0, 0 };
+static int label_rect_valid;
+static int label_rect_frame = -1;
+static GLuint drawn_targets[32];
+static unsigned drawn_target_count;
+static GLuint label_tiles[16];      /* textures a text pass has drawn into (the label tile) */
+static unsigned label_tile_count;
+static int label_composites;        /* draws that put such a tile back into the panel */
+static unsigned probe_said;
+
+static int
+panel_target_size(GLuint fbo, GLsizei *width, GLsizei *height)
+{
+	GLint kind = -1, name = 0, previous = 0, w = 0, h = 0;
+
+	*width = 0;
+	*height = 0;
+	if (fbo == 0) {
+		return 0;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+	if (kind == GL_TEXTURE && name != 0) {
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+		glBindTexture(GL_TEXTURE_2D, (GLuint)name);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+		glBindTexture(GL_TEXTURE_2D, (GLuint)previous);
+	} else if (kind == GL_RENDERBUFFER && name != 0) {
+		GLint previous_renderbuffer = 0;
+
+		glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous_renderbuffer);
+		glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)name);
+		glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &w);
+		glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &h);
+		glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)previous_renderbuffer);
+	}
+	*width = (GLsizei)w;
+	*height = (GLsizei)h;
+	return w > 0 && h > 0;
+}
+
+/* Which textures have been drawn into: a draw that samples one of them is compositing a layer. */
+static void
+remember_drawn_target(GLuint fbo)
+{
+	GLint kind = -1, name = 0;
+
+	if (fbo == 0) {
+		return;
+	}
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+	if (kind != GL_TEXTURE) {
+		return;
+	}
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+	if (name == 0) {
+		return;
+	}
+	for (unsigned i = 0; i < drawn_target_count; i++) {
+		if (drawn_targets[i] == (GLuint)name) {
+			return;
+		}
+	}
+	if (drawn_target_count < sizeof(drawn_targets) / sizeof(drawn_targets[0])) {
+		drawn_targets[drawn_target_count++] = (GLuint)name;
+	}
+}
+
+/* Does this draw sample a texture that a text pass drew into?  That is the label composite. */
+static int
+draw_samples_label_tile(void)
+{
+	for (GLint unit = 0; unit < 8; unit++) {
+		GLint texture = 0;
+
+		glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+		if (texture == 0) {
+			continue;
+		}
+		for (unsigned i = 0; i < label_tile_count; i++) {
+			if (label_tiles[i] == (GLuint)texture) {
+				glActiveTexture(GL_TEXTURE0);
+				return 1;
+			}
+		}
+	}
+	glActiveTexture(GL_TEXTURE0);
+	return 0;
+}
+
+/* The rectangle CoreAnimation scissored for the text pass, in screen coordinates. */
+static void
+label_rect_capture(void)
+{
+	GLint viewport[4] = { 0, 0, 0, 0 }, scissor[4] = { 0, 0, 0, 0 };
+
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	glGetIntegerv(GL_SCISSOR_BOX, scissor);
+	if (glIsEnabled(GL_SCISSOR_TEST) && scissor[2] > 0 && scissor[3] > 0) {
+		label_rect[0] = scissor[0];
+		label_rect[1] = scissor[1];
+		label_rect[2] = scissor[2];
+		label_rect[3] = scissor[3];
+	} else {
+		label_rect[0] = viewport[0];
+		label_rect[1] = viewport[1];
+		label_rect[2] = viewport[2];
+		label_rect[3] = viewport[3];
+	}
+	label_rect_valid = label_rect[2] > 0 && label_rect[3] > 0;
+	label_rect_frame = (int)frames_replayed + 1;
+}
+
+static void
+rect_clip(int *x, int *y, int *w, int *h, int width, int height)
+{
+	if (*x < 0) {
+		*w += *x;
+		*x = 0;
+	}
+	if (*y < 0) {
+		*h += *y;
+		*y = 0;
+	}
+	if (*x + *w > width) {
+		*w = width - *x;
+	}
+	if (*y + *h > height) {
+		*h = height - *y;
+	}
+	if (*w < 0) {
+		*w = 0;
+	}
+	if (*h < 0) {
+		*h = 0;
+	}
+}
+
+/* Hash and a little colour, of one rectangle of one framebuffer. */
+static uint64_t
+region_state(GLuint fbo, int x, int y, int w, int h, unsigned *nonzero, unsigned *bright)
+{
+	unsigned char *pixels;
+	size_t bytes, i;
+	uint64_t hash = 1469598103934665603ULL;
+	GLint previous = 0, pack = 4;
+	unsigned nz = 0, bt = 0;
+
+	if (nonzero != NULL) {
+		*nonzero = 0;
+	}
+	if (bright != NULL) {
+		*bright = 0;
+	}
+	if (w <= 0 || h <= 0) {
+		return 0;
+	}
+	bytes = (size_t)w * (size_t)h * 4;
+	pixels = malloc(bytes);
+	if (pixels == NULL) {
+		return 0;
+	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+	glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glReadPixels(x, y, w, h, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+	glPixelStorei(GL_PACK_ALIGNMENT, pack);
+	for (i = 0; i + 3 < bytes; i += 4) {
+		hash = fnv_update(hash, pixels + i, 4);
+		if (pixels[i] | pixels[i + 1] | pixels[i + 2] | pixels[i + 3]) {
+			nz++;
+		}
+		if (pixels[i] >= 200 && pixels[i + 1] >= 200 && pixels[i + 2] >= 200) {
+			bt++;
+		}
+	}
+	free(pixels);
+	if (nonzero != NULL) {
+		*nonzero = nz;
+	}
+	if (bright != NULL) {
+		*bright = bt;
+	}
+	return hash;
+}
+
+static void
+shadow_ensure(int width, int height)
+{
+	GLint active = 0, bound = 0, previous = 0;
+
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+	glGenTextures(1, &shadow_texture);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, shadow_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glGenFramebuffers(1, &shadow_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, shadow_texture, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+	glActiveTexture((GLenum)active);
+	shadow_width = width;
+	shadow_height = height;
+}
+
+static void
+shadow_capture(GLuint from, int width, int height)
+{
+	GLint previous = 0;
+
+	if (shadow_fbo != 0 && (shadow_width != width || shadow_height != height)) {
+		glDeleteFramebuffers(1, &shadow_fbo);
+		glDeleteTextures(1, &shadow_texture);
+		shadow_fbo = 0;
+		shadow_texture = 0;
+	}
+	if (shadow_fbo == 0) {
+		shadow_ensure(width, height);
+	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, from);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, shadow_fbo);
+	glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+	shadow_frame = (int)frames_replayed + 1;
+	shadow_captures++;
+}
+
+/* The stage's probe block: runs after every draw, but only inside a label frame. */
+static void
+panel_probe_after_draw(void)
+{
+	GLint fbo = 0, program = 0;
+	GLsizei width = 0, height = 0;
+	int composite;
+	unsigned nonzero = 0, bright = 0;
+	uint64_t hash;
+	int x, y, w, h;
+
+	if (!panel_probe_on && !panel_shadow_on) {
+		return;
+	}
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+	if (fbo == 0) {
+		return;
+	}
+	remember_drawn_target((GLuint)fbo);
+	if (!panel_target_size((GLuint)fbo, &width, &height) || width != trace_width ||
+	    height != trace_height) {
+		return;
+	}
+	composite = draw_samples_label_tile();
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	/*
+	 * A label composite is hashed over the text's own rectangle (small read-back), and the shadow
+	 * keeps the panel as it stood right after it.  Every other draw of the frame is hashed over its
+	 * own scissor box, if it is small, so the sequence says which draw wrote the text and which one
+	 * painted over it.  Nothing here reads the whole panel: a stall in the host is what makes the
+	 * guest's display lock time out.
+	 */
+	if (panel_probe_on && label_rect_valid) {
+		x = label_rect[0];
+		y = label_rect[1];
+		w = label_rect[2];
+		h = label_rect[3];
+		rect_clip(&x, &y, &w, &h, width, height);
+		if (w > 0 && h > 0 && (size_t)w * (size_t)h <= 200000 && probe_said < 4000) {
+			probe_said++;
+			hash = region_state((GLuint)fbo, x, y, w, h, &nonzero, &bright);
+			printf("glwire: panel probe frame %llu draw %d program %d fbo %d rect %d,%d %dx%d "
+			    "%s hash %016llx nonzero %u bright %u\n",
+			    (unsigned long long)frames_replayed + 1, draws_seen - 1, (int)program, (int)fbo,
+			    x, y, w, h, composite ? "label-composite" : "draw", (unsigned long long)hash,
+			    nonzero, bright);
+			fflush(stdout);
+		}
+	}
+	if (composite) {
+		label_composites++;
+		if (panel_shadow_on) {
+			shadow_capture((GLuint)fbo, width, height);
+		}
+		return;
+	}
+	if (!panel_probe_on || probe_said >= 6000 || !glIsEnabled(GL_SCISSOR_TEST)) {
+		return;
+	}
+	{
+		GLint scissor[4] = { 0, 0, 0, 0 };
+
+		glGetIntegerv(GL_SCISSOR_BOX, scissor);
+		x = scissor[0];
+		y = scissor[1];
+		w = scissor[2];
+		h = scissor[3];
+	}
+	rect_clip(&x, &y, &w, &h, width, height);
+	if (w <= 0 || h <= 0 || (size_t)w * (size_t)h > 200000) {
+		return;
+	}
+	probe_said++;
+	hash = region_state((GLuint)fbo, x, y, w, h, &nonzero, &bright);
+	printf("glwire: panel probe frame %llu draw %d program %d fbo %d rect %d,%d %dx%d "
+	    "hash %016llx nonzero %u bright %u\n",
+	    (unsigned long long)frames_replayed + 1, draws_seen - 1, (int)program, (int)fbo,
+	    x, y, w, h, (unsigned long long)hash, nonzero, bright);
+	fflush(stdout);
 }
 
 static void
@@ -1331,6 +1725,45 @@ host_after_draw(struct glstate *g)
 	const char *prefix = getenv("GLWIRE_DUMP_DRAWS");
 	int number = draws_seen++;
 	unsigned char *pixels;
+
+	/*
+	 * Stage seventeen: the label's own rectangle first (the dump below clears last_draw_was_glyph),
+	 * then the two probes.  They run for every draw of a frame that had a text pass, so the hash
+	 * list reads: the composite wrote, then whichever draw the frame ended with.
+	 */
+	if (last_draw_was_glyph && (panel_probe_on || panel_shadow_on)) {
+		GLint label_fbo = 0;
+
+		label_rect_capture();
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &label_fbo);
+		if (label_fbo != 0) {
+			GLint kind = -1, name = 0;
+
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+			if (kind == GL_TEXTURE && name != 0) {
+				unsigned at;
+
+				for (at = 0; at < label_tile_count; at++) {
+					if (label_tiles[at] == (GLuint)name) {
+						break;
+					}
+				}
+				if (at == label_tile_count && label_tile_count < 16) {
+					label_tiles[label_tile_count++] = (GLuint)name;
+				}
+			}
+		}
+	}
+	if (label_rect_frame == (int)frames_replayed + 1) {
+		panel_probe_after_draw();
+	}
+	if (getenv("GLWIRE_PROGRAM_ALL") != NULL) {
+		glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+		host_program_source(g, (GLuint)program);
+	}
 
 	/*
 	 * Stage fourteen: every label draw (the one that binds a glyph tile) into the framebuffer the
@@ -1856,6 +2289,9 @@ serve_frame(struct client *client)
 	 * drawable, which is what the stand-in is for.
 	 */
 	client->names.stand_in = client->framebuffer;
+	panel_drawn_fbo = 0;             /* (stage seventeen: the frame's panel target starts unknown) */
+	shadow_frame = -1;
+	shadow_used = 0;
 	if (keep_binding && client->names.framebuffer_known && client->names.bound_framebuffer != 0) {
 		GLint kind = -1;
 
@@ -1987,13 +2423,27 @@ serve_frame(struct client *client)
 		 * its own picture back from the texture that was drawn into, not from "whatever was bound
 		 * when the frame ended" (CoreAnimation unbinds before the flush: measured framebuffer 0,
 		 * attachment none, viewport 0x0 -- the EGL surface is a 16x16 pbuffer and holds nothing).
+		 *
+		 * Stage seventeen: "the last draw" is not the panel.  CoreAnimation ends a fair share of
+		 * its frames with the text pass into a 64x19 tile, and the picture read back from that
+		 * framebuffer is 64x19 pixels and black everywhere else -- the panel the frame composed
+		 * one draw earlier is never read.  GLWIRE_READ_PANEL=1 reads the last *panel-sized* target
+		 * the frame drew into instead; GLWIRE_READ_PANEL=0 restores the old choice.
 		 */
-		if (replayed && client->names.drawn_framebuffer != 0 &&
-		    client->names.drawn_framebuffer != (GLuint)bound) {
-			glBindFramebuffer(GL_FRAMEBUFFER, client->names.drawn_framebuffer);
-			glGetIntegerv(GL_VIEWPORT, box);
-			printf("host_glwire: reading from %u instead, viewport %d,%d %dx%d\n",
-			    client->names.drawn_framebuffer, box[0], box[1], box[2], box[3]);
+		{
+			GLuint read_from = client->names.drawn_framebuffer;
+
+			if (read_panel && panel_drawn_fbo != 0 && panel_drawn_frame == (int)frames_replayed + 1) {
+				read_from = panel_drawn_fbo;
+			}
+			if (replayed && read_from != 0 && read_from != (GLuint)bound) {
+				glBindFramebuffer(GL_FRAMEBUFFER, read_from);
+				glGetIntegerv(GL_VIEWPORT, box);
+				printf("host_glwire: reading from %u instead, viewport %d,%d %dx%d%s\n",
+				    read_from, box[0], box[1], box[2], box[3],
+				    read_from == panel_drawn_fbo && read_from != client->names.drawn_framebuffer
+					? " (panel, not the frame's last draw)" : "");
+			}
 		}
 		fflush(stdout);
 	}
@@ -2001,6 +2451,68 @@ serve_frame(struct client *client)
 		host_fbo_summary("frame", frames_replayed + 1, client);
 	}
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+	/*
+	 * Stage seventeen, P0: the label composite is in the shadow.  Either it supplies the picture
+	 * (mode 1, the whole target as it stood right after the composite) or only the text's own
+	 * rectangle is patched back into the frame the stream ended with (mode 2).  Both are the
+	 * experiment; which one is right is what the three run's screenshots say.
+	 */
+	if (panel_shadow_on && shadow_apply && shadow_frame == (int)frames_replayed + 1 && shadow_fbo != 0) {
+		GLint previous = 0;
+
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+		glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
+		if (shadow_mode == 2 && label_rect_valid) {
+			int x = label_rect[0], y = label_rect[1], w = label_rect[2], h = label_rect[3];
+
+			rect_clip(&x, &y, &w, &h, width, height);
+			if (w > 0 && h > 0) {
+				glPixelStorei(GL_PACK_ALIGNMENT, 1);
+				glReadPixels(x, y, w, h, GL_BGRA, GL_UNSIGNED_BYTE,
+				    picture + (size_t)y * (size_t)width * 4 + (size_t)x * 4);
+			}
+		} else {
+			glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+		shadow_used = 1;
+		shadow_uses++;
+	}
+	if (shadow_dump_prefix != NULL && panel_shadow_on && shadow_fbo != 0 &&
+	    shadow_frame == (int)frames_replayed + 1 &&
+	    shadow_dump_every > 0 && ((int)frames_replayed + 1) % shadow_dump_every == 0) {
+		char path[512];
+		FILE *file;
+
+		snprintf(path, sizeof(path), "%s-shadow-%llu-%dx%d.bgra", shadow_dump_prefix,
+		    frames_replayed + 1, width, height);
+		file = fopen(path, "wb");
+		if (file != NULL) {
+			unsigned char *shadow_pixels = malloc(frame_bytes);
+
+			if (shadow_pixels != NULL) {
+				GLint previous = 0;
+
+				glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+				glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
+				glPixelStorei(GL_PACK_ALIGNMENT, 1);
+				glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, shadow_pixels);
+				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+				fwrite(shadow_pixels, 1, frame_bytes, file);
+				free(shadow_pixels);
+				printf("host_glwire: saved %s\n", path);
+				fflush(stdout);
+			}
+			fclose(file);
+		}
+		snprintf(path, sizeof(path), "%s-picture-%llu-%dx%d.bgra", shadow_dump_prefix,
+		    frames_replayed + 1, width, height);
+		file = fopen(path, "wb");
+		if (file != NULL) {
+			fwrite(picture, 1, frame_bytes, file);
+			fclose(file);
+		}
+	}
 	/*
 	 * When the guest named its picture buffer's physical memory, write the picture there: the
 	 * reply is then two bytes and the guest reads the picture where it already is. The same
@@ -2280,6 +2792,22 @@ main(int argc, char **argv)
 	}
 	frame_delay_ms = getenv("GLWIRE_FRAME_DELAY_MS") != NULL ? atoi(getenv("GLWIRE_FRAME_DELAY_MS")) : 0;
 	fbo_trace = getenv("GLWIRE_FBO_TRACE") != NULL;
+	/* (stage seventeen: the two probes for "the label composites and is then rebuilt over") */
+	panel_probe_on = getenv("GLWIRE_PANEL_PROBE") != NULL;
+	panel_shadow_on = getenv("GLWIRE_PANEL_SHADOW") != NULL;
+	shadow_mode = getenv("GLWIRE_SHADOW_MODE") != NULL ? atoi(getenv("GLWIRE_SHADOW_MODE")) : 1;
+	shadow_dump_every = getenv("GLWIRE_SHADOW_EVERY") != NULL ? atoi(getenv("GLWIRE_SHADOW_EVERY")) : 0;
+	shadow_dump_prefix = getenv("GLWIRE_SHADOW_DUMP");
+	{
+		const char *value = getenv("GLWIRE_SHADOW_APPLY");
+
+		shadow_apply = value == NULL || value[0] != '0';
+	}
+	{
+		const char *value = getenv("GLWIRE_READ_PANEL");
+
+		read_panel = value == NULL || value[0] != '0';
+	}
 	/* (the flag the argument loop set stays set: this used to overwrite it, so "--no-panel" on the
 	 * command line silently did nothing and every acceptance run drew the guest's own panel) */
 	no_panel = no_panel || getenv("GLWIRE_NO_PANEL") != NULL;
