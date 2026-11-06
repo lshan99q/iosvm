@@ -249,3 +249,30 @@ Weather/Calendar（widget 标题）与 FaceTime/Calendar/Photos/Mail/Notes/Remin
 但这一发里 CA 就是不肯把标签画到大层上（它绑的是小块 label surface，而那些 surface 画出来仍是 0）；
 13:04 那一发的大层策略没有复现。下一阶段（第十六阶段 P0/P1）不再从 binding 找，转去查两件事：
 **CA 为什么选小块 surface**、**小块 surface 的片元采样为什么是 0**。
+
+---
+
+## 十二、真程序下的读回分类（2026-11-06 14:40）
+
+把四发的 `label draw` 按「目标尺寸 × 程序」分类（`s14mag` 是 `GLWIRE_LABEL_WHITE=1` 的品红对照，
+`s14dia`/`s15bind2`/`s14leg` 是真程序）：
+
+| 发 | label draw | 非零 | 大层 (750x1624) | 小块 (64x19 等) |
+|---|---|---|---|---|
+| `s14mag`（品红） | 850 | **850** | 296/296 | 全部非零 |
+| `s14dia`（真） | 1056 | 125 | **125/283**（全是 program 15） | **0** |
+| `s15bind2`（真） | 967 | 17 | 17/34 | **0** |
+| `s14leg`（真） | 1281 | **0** | 0 | 0 |
+
+三条结论：
+
+1. **覆盖永远不是问题**：品红对照里 850/850 全非零，包括 64x19 / 64x9 / 96x9。
+2. **program 13（darken）全 0 是设计使然**：它的片元是 `darkenSover(color*glyph.a, D)`，
+   `S = S * y^4`，D 是那张 64x19 的屏幕缩略——D 空则恒 0。小块 label surface **只收到 program 13**
+   （s14dia：64x19 的 225 笔全是 13），所以小块永远 0。
+3. **program 15（mask）只在大层上有效**：s14dia 的 125 笔非零全是大层上的 15；大层上的 13 仍是 0。
+   所以 13:04 那张「有标签」的截图 = 大层上落下了 125 笔 program-15 mask，而不是别的路径。
+
+**CA 选不选大层，不是主机速度**：`GLWIRE_FRAME_DELAY_MS=3` 的一发（s16delay，14:45）大层 draw **0 笔**、
+截图 239,283 B、无标签。之前「LABEL_* 的慢」与标签的巧合不成立；再往下要查的是
+**program 13 的 backdrop（64x19）由谁填**——我们的流里 `glCopyTexSubImage2D`/`glTexSubImage2D` 都是 0 次。

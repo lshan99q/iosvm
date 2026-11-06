@@ -18,6 +18,9 @@
    （`glBindFramebuffer` 是 `!local`，trampoline 不调本地实现，所以加了 `eagl_note_bind()`）。
    验证（s15bind2，14:01）：**889 笔 label draw、34 笔大层、14 笔有像素、截图 239,632 B、无标签**——自报只是让宿主
    不再猜，CA 在这发里绑的是小块 label surface，而它们画出来仍为 0。
+   **进一步分类（14:40，四发对照）**：品红对照 850/850 全非零（覆盖已证）；真程序下 program 13 全 0（backdrop 空，
+   设计使然）、program 15 只在大层上有效（s14dia 125/283）；小块 label surface **只收到 program 13**，所以永远 0。
+   3 ms 帧延迟（s16delay）没有带来大层 draw——**主机速度假设否掉**。
 3. **文字链路已解码**：program 15 = `vec4(glyph.a)`（纯 mask）；program 13 = `darkenSover(color*glyph.a, backdrop)`，
    `S *= y^4`、backdrop 为空则恒 0。片元采样（atlas alpha / texmat0）是标签链上的最后一个未知。
 4. **widget 内容与壁纸仍缺**：SpringBoard 建了 `312x202 LA08`、`184x124 BGRA` 两面，但它们从未进入 backboardd 的
@@ -56,9 +59,10 @@
 **自报 binding 的验证已经做过一发（s15bind2，见 §零.2）：没有标签。所以这一阶段的 P0 不是再压 binding，而是查
 「CA 为什么选小块 surface」。**
 
-1. **两发的对照**：13:04 的发（283 笔大层 draw、118 笔有像素、291,909 B、有标签）vs 14:01 的发（34 笔大层、14 笔
-   有像素、239,632 B、无标签）。同一份镜像/宿主，差的是 CA 的 surface 策略——把两发的首帧 draw 顺序、`images`
-   列表、`surface` 创建日志并排列出来，找出分叉点。
+1. **两发的对照（已做）**：13:04 的发（283 笔大层 draw、118 笔有像素、291,909 B、有标签）vs 14:01 的发（34 笔大层、14 笔
+   有像素、239,632 B、无标签）——差的是 CA 的 surface 策略；3 ms 延迟已排除「主机速度」。
+   **下一步**：查 program 13 的 backdrop（64x19）由谁填——我们流里 `glCopyTexSubImage2D`/`glTexSubImage2D` 都是 0 次，
+   要么在第二个 context/进程，要么是上游缺失的一步；用 `GLWIRE_TEXLOG`/attach 日志确认它是否被任何 FBO 渲染过。
 2. **小块 surface 的采样**：`GLWIRE_LABEL_ALPHA=1` 把 atlas alpha 画成红色；若仍为 0，查 sampler 状态
    （min filter/wrap/纹理目标）与 texmat0 的录制 payload。
 3. **判据**：3 发里 ≥2 发首页有 App 名称、截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95%。
