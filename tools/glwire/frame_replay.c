@@ -60,9 +60,13 @@ make_display(void)
 	return display;
 }
 
+#include "probe_stubs.inc"
+
 static int
 dispatch(struct glstate *g, wire_buffer *r, uint32_t opcode)
 {
+	const char *watch_wanted = getenv("GLWIRE_WATCH");
+
 #include "dispatch.inc"
 	return 0;
 }
