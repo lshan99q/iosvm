@@ -148,3 +148,30 @@
 | widget/壁纸 | **入口定位（另一个进程的面）** | 拉取/录制（P2''''''''） |
 | 标签上屏 | 未达成（247,349 B） | **P1''''''''/P2''''''''** |
 | 四格表 | 未刷新 | **P4''''''''** |
+
+---
+
+## 九、起步（2026-11-06 10:35）
+
+**已落地（本阶段第一笔代码）**
+
+- **wire 头有了 context 字段**：`u32 opcode | u32 length | u32 context`（版本 2，12 字节）；版本 1 仍是 8 字节。
+  客人机在请求行里声明版本；只给 8 个字段的旧客人机走版本 1、context 0——**第十四阶段的镜像还能启动/重放**。
+  读取方显式收版本（`wire_header_bytes(version)`、`wire_header_context(record, version)`），因为版本是每条连接的
+  事实，不是进程全局。`GLWIRE_CONTEXT_LOG=1` 打印一帧里每条 context 的第一条记录（第十五阶段 P0'''''''' 要的数据）。
+  提交 `f4b08af`。
+- **测试两种布局同一画面**：`map_test`/`map_stream`/`frame_replay` 记版本 2；`e2e_test.py` 把同一份记录发两遍
+  （带 context 头 / 剥掉 context 头），要求两遍的 picture 逐字节相同——**PASS**。`make test` 现在先建
+  `host_glwire` 再跑 e2e，避免旧二进制混过测试。
+- **ADR-011**（`docs/adr/ADR-011-gl-context-in-the-wire.md`）与本计划一起提交。
+
+**下一步（P0'''''''' 的剩余，按顺序）**
+
+1. 客人机：`remote.inc` 把每个 trampoline 已经收到的 `void *context` intern 成 0..7 写进头；请求行发版本 2。
+   重建镜像：`IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs`。
+2. 宿主：`struct ctx { EGLContext; GLuint framebuffer; struct glstate names; }` 每 context 一份（`eglCreateContext`
+   不共享），记录里的 context 号变了就 `eglMakeCurrent`；`GLWIRE_CONTEXT_MERGE=1` 回退成第十四阶段行为。
+3. 第一发验证：`GLWIRE_CONTEXT_LOG=1` + 900 s，看两条 context 的 program/uniform 各自独立、标签 draw 的
+   scissor 与顶点自洽（P0'''''''' 判据）。
+4. 然后才做 P1''''''''（FBO 0 alias）与 P2''''''''（标签上屏）——顺序不能倒：没有隔离，alias 只会把错误的状态
+   写进正确的纹理。
