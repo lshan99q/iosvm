@@ -537,6 +537,54 @@ host_label_sample(struct glstate *g)
 static void host_program_source(struct glstate *g, GLuint program);
 static void host_attrib_state(struct glstate *g);
 
+/*
+ * Stage sixteen: when a label pass renders into a small texture, does any later draw sample that
+ * texture?  Host names are recycled, so the ring below keys on the *guest* name that the attachment
+ * maps to; a match within a couple of frames is the composite we are looking for.
+ */
+static uint64_t guest_of_host(const struct name_map *map, uint64_t host);
+
+struct tile_note {
+	unsigned long long guest;
+	unsigned long long frame;
+};
+static struct tile_note tile_notes[16];
+static unsigned tile_next;
+static unsigned tile_said;
+
+static void
+tile_note_add(struct glstate *g, GLuint host_texture)
+{
+	uint64_t guest = 0;
+
+	guest = guest_of_host(&g->textures, (uint64_t)host_texture);
+	if (guest != 0) {
+		tile_notes[tile_next] = (struct tile_note) { guest, frames_replayed };
+		tile_next = (tile_next + 1) % (sizeof(tile_notes) / sizeof(tile_notes[0]));
+	}
+}
+
+static void
+tile_note_check(const char *where, GLuint unit, unsigned long long guest, GLint program, GLint fbo)
+{
+	if (getenv("GLWIRE_TILE_TRACE") == NULL || tile_said >= 200) {
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(tile_notes) / sizeof(tile_notes[0]); i++) {
+		struct tile_note *note = &tile_notes[i];
+
+		if (note->guest != guest || frames_replayed < note->frame || frames_replayed - note->frame > 3) {
+			continue;
+		}
+		printf("glwire: tile guest %llu drawn at frame %llu, sampled %s u%u in frame %llu "
+		    "(program %d fbo %d)\n", guest, note->frame, where, unit, frames_replayed,
+		    (int)program, (int)fbo);
+		fflush(stdout);
+		tile_said++;
+		break;
+	}
+}
+
 static void
 host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 {
@@ -587,6 +635,7 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 
 			if (entry->state == 1 && (GLuint) entry->host == (GLuint) bound) {
 				printf("(guest%llu)", (unsigned long long) entry->guest);
+				tile_note_check("draw", unit, entry->guest, (GLint) program, (GLint)g->bound_framebuffer);
 				break;
 			}
 		}
@@ -1294,6 +1343,17 @@ host_after_draw(struct glstate *g)
 
 		last_draw_was_glyph = 0;
 		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &label_fbo);
+		if (label_fbo != 0 && getenv("GLWIRE_TILE_TRACE") != NULL) {
+			GLint kind = -1, name = 0;
+
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+			if (kind == GL_TEXTURE && name != 0) {
+				tile_note_add(g, (GLuint)name);
+			}
+		}
 		if (trace_client != NULL && label_fbo != 0) {
 			GLint kind = -1, name = 0, read_width = trace_width, read_height = trace_height;
 			GLint previous = 0;
