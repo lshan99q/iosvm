@@ -107,7 +107,14 @@ QEMU 配置是 `-accel tcg,tb-size=384`（无 `thread=`，即默认 **MTTCG**，
 |---|---|---|
 | s18label1 | 1500 s；`GLWIRE_DRAW_LOG=1 GLWIRE_PANEL_SHADOW=1 GLWIRE_SHADOW_APPLY=1 GLWIRE_SHADOW_MODE=1`，dump 每 25 帧 | **0 panic、6080 帧**；截图 **252,970 B**（比不放影子的 243,309 B 大）；**每个 App 图标下方出现红色条块**——标签层第一次在屏幕上占到了位置 |
 | s18t2 | 同上 + `GLWIRE_FIX_TEXMAT=1` + `GLWIRE_LABEL_DUMP`，1500 s | **0 panic、7248 帧**；截图 250,620 B；红块不变；`texmat0` 仍为 NaN、修补**没有触发**（原因待查，见下） |
-| s18t3 | 同上 + `GLWIRE_TEXMAT_IDENTITY=1`（无条件把 texmat0 写成 (1,1,0,0)）+ dump 每 25 帧 | 运行中/待填 |
+| s18t3 | 同上 + `GLWIRE_TEXMAT_IDENTITY=1`（无条件把 texmat0 写成 (1,1,0,0)）+ dump 每 25 帧，1400 s | **0 panic、4661 帧**；**红色条块几乎全部消失**（只剩时钟图标下一小块）→ texmat0 确实决定标签的内容；但也没有变成文字 |
+| s18t4 | `GLWIRE_TEXMAT_FROM_ATTRIB=1`：**从本次 draw 的顶点属性推导** texmat0（非单位方块的那个 2D texcoord 数组的 u/v 包围盒 → `(u1-u0, v1-v0, u0, v0)`），1500 s | **推导值全是垃圾**（programme 13 得到 `10450433 1 -10450432 0`）——根因：`count` 是索引数（6），属性数组只有 4 个顶点，读到数组外了。修正为只读 3 个顶点（四边形的三个角足够定包围盒），见 s18t5 |
+| s18t5 | 同上，修正后，1200 s | 运行中/待填 |
+
+**诊断的一个反直觉结果（s18t3）**：`GLWIRE_FIX_TEXMAT` 的诊断行在前三次 glyph draw 读到的是
+`1.0000 1.0000 0.0000 0.0000`（不是 NaN），而同一批 draw 的 `label state` 行在 UI 阶段仍是 `nan nan nan 0.0000`。
+说明**早期绘制与 UI 阶段的 uniform 状态不同**，而强制写 (1,1,0,0) 只对部分 draw 生效（红块消失=生效了，
+但文字没出来=值不对）。所以下一步不是「有没有 NaN」，而是「正确的值是多少」——那就是从顶点推导的 s18t4。
 
 **红色条块是什么（实测 + 推断）**：影子 dump（`/tmp/s18label1/s-shadow-*.bgra`）里，红块的主色是
 **(191,52,43)**、块内有白色竖条；同尺寸的层落在 App 标签的位置（图标正下方）。对着着色器读：
