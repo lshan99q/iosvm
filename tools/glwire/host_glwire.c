@@ -612,6 +612,26 @@ tile_note_check(const char *where, GLuint unit, unsigned long long guest, GLint 
  * lands somewhere defined; if the labels then draw, the NaN is what held them back and the recording
  * of glUniform4fv is where the real fix goes.
  */
+static GLfloat
+half_to_float(uint16_t half)
+{
+	uint32_t sign = (half >> 15) & 1;
+	uint32_t exponent = (half >> 10) & 0x1f;
+	uint32_t mantissa = half & 0x3ff;
+	float value;
+
+	if (exponent == 0) {
+		value = (float)mantissa / 1024.0f * (float)(1u << 14);
+	} else if (exponent == 31) {
+		value = 0.0f;           /* inf/nan: not a texel coordinate */
+	} else if (exponent > 15) {
+		value = (float)(mantissa + 1024) / 1024.0f * (float)(1u << (exponent - 15));
+	} else {
+		value = (float)(mantissa + 1024) / 1024.0f / (float)(1u << (15 - exponent));
+	}
+	return sign ? -value : value;
+}
+
 static void
 host_fix_nan_texmat(GLuint program)
 {
@@ -722,18 +742,25 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		/*
 		 * The third form of the same experiment, and the only one that can be right: derive the
 		 * sampler matrix from the draw's own vertices.  A text quad carries two 2D texcoord arrays
-		 * -- one the unit square (0,0)-(1,1), one the atlas subrectangle the glyph lives in -- and
-		 * programme 13 maps the first into the second with texmat0 = (u1-u0, v1-v0, u0, v0).  The
-		 * attributes are read the way host_attrib_state reads them (size, type and stride from the
-		 * GL state, three corners, because a quad is six indices over four vertices).
+		 * -- the unit square and the atlas subrectangle the glyph lives in -- and programme 13 maps
+		 * the first into the second with texmat0 = (u1-u0, v1-v0, u0, v0).
+		 *
+		 * Measured (s18t6): at the interface's draws the subrectangle array arrives corrupt -- the
+		 * three corners read 0/4.7969, 0/nan and 6.1e28/0 -- while the same array is sane earlier in
+		 * the boot (0.125 .. 0.5).  Those numbers are what half-floats look like read as floats, so
+		 * each vertex is tried both ways and the plausible reading (finite, within a texture's 0..1)
+		 * wins.  If that reading makes the labels draw, the guest's recording of the texcoord array
+		 * is where the real fix goes.
 		 */
 		GLfloat u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
-		int found = 0;
+		int found = 0, half_used = 0;
 
 		for (GLint i = 0; i < 16 && !found; i++) {
 			GLint enabled = 0, size = 0, type = 0, stride = 0;
 			const unsigned char *base;
-			int unit_square = 1;
+			int unit_square = 1, plausible_float = 1, plausible_half = 1;
+			GLfloat fu0 = 1e30f, fv0 = 1e30f, fu1 = -1e30f, fv1 = -1e30f;
+			GLfloat hu0 = 1e30f, hv0 = 1e30f, hu1 = -1e30f, hv1 = -1e30f;
 
 			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
 			if (!enabled || g->attribs[i].data == NULL) {
@@ -742,42 +769,72 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
 			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
 			glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
-			if (size != 2 || type != GL_FLOAT || stride <= 0) {
+			if (size != 2 || stride <= 0) {
 				continue;
 			}
 			base = (const unsigned char *)g->attribs[i].data;
-			u0 = v0 = 1e30f;
-			u1 = v1 = -1e30f;
 			for (int vertex = 0; vertex < 3; vertex++) {
 				const unsigned char *at = base + (size_t)vertex * (size_t)stride;
 				GLfloat u = 0.0f, t = 0.0f;
+				uint16_t hu = 0, ht = 0;
 
 				memcpy(&u, at, 4);
 				memcpy(&t, at + 4, 4);
-				if (u < u0) u0 = u;
-				if (u > u1) u1 = u;
-				if (t < v0) v0 = t;
-				if (t > v1) v1 = t;
-				if (!((u == 0.0f || u == 1.0f) && (t == 0.0f || t == 1.0f))) {
-					unit_square = 0;
+				memcpy(&hu, at, 2);
+				memcpy(&ht, at + 2, 2);
+				if (!(u >= -8.0f && u <= 8.0f) || !(t >= -8.0f && t <= 8.0f)) {
+					plausible_float = 0;
 				}
+				{
+					/* half-float: sign/exponent/mantissa, the same decode host_attrib_vertex uses */
+					GLfloat dh = half_to_float(hu), dv = half_to_float(ht);
+
+					if (!(dh >= -8.0f && dh <= 8.0f) || !(dv >= -8.0f && dv <= 8.0f)) {
+						plausible_half = 0;
+					}
+					if (dh < hu0) hu0 = dh;
+					if (dh > hu1) hu1 = dh;
+					if (dv < hv0) hv0 = dv;
+					if (dv > hv1) hv1 = dv;
+				}
+				if (u < fu0) fu0 = u;
+				if (u > fu1) fu1 = u;
+				if (t < fv0) fv0 = t;
+				if (t > fv1) fv1 = t;
 			}
-			if (!unit_square && u1 > u0 && v1 > v0) {
+			if (plausible_float) {
+				u0 = fu0; v0 = fv0; u1 = fu1; v1 = fv1;
+				half_used = 0;
+			} else if (plausible_half) {
+				u0 = hu0; v0 = hv0; u1 = hu1; v1 = hv1;
+				half_used = 1;
+			} else {
+				continue;
+			}
+			/* the unit square is the array to skip: it is what texmat0 maps *from* */
+			if (!((u0 == 0.0f || u0 == 1.0f) && (u1 == 0.0f || u1 == 1.0f) &&
+			    (v0 == 0.0f || v0 == 1.0f) && (v1 == 0.0f || v1 == 1.0f))) {
 				found = 1;
 			}
+			(void)type;
 		}
 		if (found) {
 			GLint location = glGetUniformLocation((GLuint)program, "texmat0");
 
 			if (location >= 0) {
-				static unsigned said;
+				static unsigned said_float, said_half;
 
 				glUniform4f(location, u1 - u0, v1 - v0, u0, v0);
-				if (said < 5) {
-					said++;
-					printf("glwire: texmat0 derived from the vertices: %.4f %.4f %.4f %.4f "
-					    "for programme %u\n", (double)(u1 - u0), (double)(v1 - v0),
-					    (double)u0, (double)v0, (unsigned)program);
+				if ((half_used && said_half < 5) || (!half_used && said_float < 3)) {
+					if (half_used) {
+						said_half++;
+					} else {
+						said_float++;
+					}
+					printf("glwire: texmat0 derived from the vertices (%s): %.4f %.4f %.4f %.4f "
+					    "for programme %u\n", half_used ? "half-float" : "float",
+					    (double)(u1 - u0), (double)(v1 - v0), (double)u0, (double)v0,
+					    (unsigned)program);
 					fflush(stdout);
 				}
 			}
