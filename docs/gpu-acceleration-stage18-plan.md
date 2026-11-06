@@ -109,7 +109,23 @@ QEMU 配置是 `-accel tcg,tb-size=384`（无 `thread=`，即默认 **MTTCG**，
 | s18t2 | 同上 + `GLWIRE_FIX_TEXMAT=1` + `GLWIRE_LABEL_DUMP`，1500 s | **0 panic、7248 帧**；截图 250,620 B；红块不变；`texmat0` 仍为 NaN、修补**没有触发**（原因待查，见下） |
 | s18t3 | 同上 + `GLWIRE_TEXMAT_IDENTITY=1`（无条件把 texmat0 写成 (1,1,0,0)）+ dump 每 25 帧，1400 s | **0 panic、4661 帧**；**红色条块几乎全部消失**（只剩时钟图标下一小块）→ texmat0 确实决定标签的内容；但也没有变成文字 |
 | s18t4 | `GLWIRE_TEXMAT_FROM_ATTRIB=1`：**从本次 draw 的顶点属性推导** texmat0（非单位方块的那个 2D texcoord 数组的 u/v 包围盒 → `(u1-u0, v1-v0, u0, v0)`），1500 s | **推导值全是垃圾**（programme 13 得到 `10450433 1 -10450432 0`）——根因：`count` 是索引数（6），属性数组只有 4 个顶点，读到数组外了。修正为只读 3 个顶点（四边形的三个角足够定包围盒），见 s18t5 |
-| s18t5 | 同上，修正后，1200 s | 运行中/待填 |
+| s18t5 | 同上（只读 3 个顶点），1200 s | **仍是垃圾**（`9.9e28 4.7969 0 0`）——第二个根因：我用了 `struct attrib_state` 的 `size/type/stride`，而**正确做法是像 `host_attrib_state()` 那样从 GL 状态读**（`glGetVertexAttribiv` 的 SIZE/TYPE/STRIDE）；结构体里的 stride 与 GL 状态不是一回事 |
+| s18t6 | 按 GL 状态读属性（`glGetVertexAttribiv` + `memcpy`），1100 s | **推导值仍是垃圾**，但日志给出了真正的原因（见下） |
+| s18t7 | 顶点数组按**半浮点重解**（合理性判定：有限且落在 0..1 的解读优先），1100 s | 运行中/待填 |
+
+**第二个大发现（s18t6，实测）：坏的是一整块「UV 映射」数据，不只是 texmat0。**
+在 UI 的 label draw 上，`host_attrib_state` 打出的属性是：
+
+```
+attrib 2 size 2 type 0x1406 stride 48 v0: 0.0000 0.0000  v1: 1.0000 0.0000  v2: 1.0000 1.0000   ← 单位方块，好的
+attrib 3 size 2 type 0x1406 stride 48 v0: 0.0000 4.7969  v1: 0.0000 nan    v2: 6.1e28 0.0000   ← 图集子矩形，坏的
+```
+
+而同一块数组在启动早期是好的（`v0: 0.1250 0.1250 v1: 0.5000 0.1250 v2: 0.5000 0.5000`）。
+`4.7969 / nan / 6.1e28` 正是**把半浮点字节当浮点读**会出现的数；`texmat0 = nan nan nan 0` 很可能是同一类录制错误
+（同一批 UV 映射数据）。所以下一层的根因从「宿主怎么算」变成了**「客人机/线上的 texcoord 属性与 uniform 是怎么录的」**：
+- 若 s18t7 的半浮点解读给出 0.125..0.5 这种合理区间，并把文字画出来 → 录制侧把半浮点数组按浮点抄了；
+- 若半浮点也不合理 → 录制侧拿的是陈旧的指针/长度（`glVertexAttribPointer` 的 buffer 或 offset 变了）。
 
 **诊断的一个反直觉结果（s18t3）**：`GLWIRE_FIX_TEXMAT` 的诊断行在前三次 glyph draw 读到的是
 `1.0000 1.0000 0.0000 0.0000`（不是 NaN），而同一批 draw 的 `label state` 行在 UI 阶段仍是 `nan nan nan 0.0000`。
