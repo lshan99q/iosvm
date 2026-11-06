@@ -718,6 +718,63 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	if (last_draw_was_glyph && getenv("GLWIRE_FIX_TEXMAT") != NULL) {
 		host_fix_nan_texmat((GLuint)program);
 	}
+	if (last_draw_was_glyph && getenv("GLWIRE_TEXMAT_FROM_ATTRIB") != NULL) {
+		/*
+		 * The third form of the same experiment, and the only one that can be right: derive the
+		 * sampler matrix from the draw's own vertices.  A text quad carries two 2D texcoord arrays
+		 * -- one the unit square (0,0)-(1,1), one the atlas subrectangle the glyph lives in -- and
+		 * programme 13 maps the first into the second with texmat0 = (u1-u0, v1-v0, u0, v0).  If
+		 * the derivation puts the text on screen, the NaN in the stream is a recording fault and
+		 * this is the value the guest meant.
+		 */
+		GLfloat u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;
+		int found = 0, vertices = count > 0 && count < 4096 ? count : 6;
+
+		for (int i = 0; i < 16 && !found; i++) {
+			struct attrib_state *a = &g->attribs[i];
+			size_t stride;
+			int unit_square = 1;
+
+			if (a->data == NULL || a->size != 2 || a->type != GL_FLOAT) {
+				continue;
+			}
+			stride = a->stride > 0 ? (size_t)a->stride : sizeof(GLfloat) * 2;
+			u0 = v0 = 1e30f;
+			u1 = v1 = -1e30f;
+			for (int v = 0; v < vertices; v++) {
+				const GLfloat *p = (const GLfloat *)((const unsigned char *)a->data +
+				    (size_t)v * stride);
+				GLfloat u = p[0], t = p[1];
+
+				if (u < u0) u0 = u;
+				if (u > u1) u1 = u;
+				if (t < v0) v0 = t;
+				if (t > v1) v1 = t;
+				if (!((u == 0.0f || u == 1.0f) && (t == 0.0f || t == 1.0f))) {
+					unit_square = 0;
+				}
+			}
+			if (!unit_square && u1 > u0 && v1 > v0) {
+				found = 1;
+			}
+		}
+		if (found) {
+			GLint location = glGetUniformLocation((GLuint)program, "texmat0");
+
+			if (location >= 0) {
+				static unsigned said;
+
+				glUniform4f(location, u1 - u0, v1 - v0, u0, v0);
+				if (said < 5) {
+					said++;
+					printf("glwire: texmat0 derived from the vertices: %.4f %.4f %.4f %.4f "
+					    "for programme %u\n", (double)(u1 - u0), (double)(v1 - v0),
+					    (double)u0, (double)v0, (unsigned)program);
+					fflush(stdout);
+				}
+			}
+		}
+	}
 	if (last_draw_was_glyph && getenv("GLWIRE_TEXMAT_IDENTITY") != NULL) {
 		/* the stronger half of the same experiment: never mind what the stream set, force the
 		 * sampler matrix of the text draw to the identity and see whether the glyph changes */
