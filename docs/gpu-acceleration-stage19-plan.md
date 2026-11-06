@@ -47,11 +47,16 @@
 
 ## 三、实验计划（按顺序，每步停下来写结论）
 
-### P0：顶点数组的 VBO 语义（1–2 天）
+### P0：顶点数组的语义（1–2 天）
 
-1. **先证明**（已埋好诊断，等一发）：`userland/src/eagl_remote.c` 的 `remote_note_vertex_pointer()` 现在记下
-   `GL_ARRAY_BUFFER_BINDING`，`remote_emit_vertex_data()` 打印 `index / pointer / buffer / size / type / stride`
-   前 40 行。判据：UI 阶段的 attrib 3 的 `buffer` 非 0 → 「pointer 是偏移」成立。
+**第一发（s19a，00:24–00:44）已经把 VBO 假设否掉**：客人机在每次 `glVertexAttribPointer` 时记下
+`GL_ARRAY_BUFFER_BINDING`，日志里 **buffer 全是 0**，指针是稳定的客户端地址（四个属性同一次 draw 都在
+`0x16f41c870` 起的 48 字节步长里：attrib0 base+0、attrib2 base+16、attrib3 base+24、attrib1 base+32），
+**没有 VBO**。所以坏的不是「偏移当地址」，而是**这一块客户端内存在 draw 时刻的内容**，或者 CA 对这几笔
+label draw 本来就填了非 texcoord 的数据。
+
+1. **下一发要抓 UI 时刻**：诊断的 40 行上限在界面之前就用完了（24 行全是启动期），改成「每 1000 笔 draw 打一行」
+   或「第 500 笔之后每 50 笔一行」。判据：UI 阶段 attrib 3 的指针内容（前 8 字节）是 0..1 的 texcoord 还是垃圾。
 2. **修法（二选一，按 D1）**：
    - **VBO 影子**：拦 `glBindBuffer`/`glBufferData`/`glBufferSubData`（spec 加 3 个 opcode），客人机保留影子副本，
      draw 时按 `binding + offset` 取；
