@@ -41,6 +41,8 @@ vertices(GLuint index, GLint size, const GLfloat *data, GLsizei bytes)
 size_t
 map_records(uint8_t *buffer, size_t capacity)
 {
+	wire_set_record_version(2);
+	wire_set_record_context(0);
 	static const GLfloat positions[] = {
 		-1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f,
 	};

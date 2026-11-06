@@ -1247,6 +1247,7 @@ serve_frame(struct client *client)
 	char line[192];
 	int at = 0;
 	int width = 0, height = 0, segment_count = 0, row_bytes = 0;
+	int version = 0;                /* the record layout the guest speaks (stage fifteen: 2 = with context) */
 	/* P1'''': a frame may name a second panel-sized surface (the display presents two in turn). */
 	int segment_count2 = 0, row_bytes2 = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
@@ -1277,10 +1278,17 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
-	    &segment_count, &row_bytes, &segment_count2, &row_bytes2) < 4) {
+	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
+	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
+	}
+	/* (an older guest sends eight fields: its records keep the 8-byte header, context 0) */
+	wire_set_record_version(version);
+	if (version >= 2 && getenv("GLWIRE_CONTEXT_LOG") != NULL) {
+		printf("host_glwire: client %d speaks record version %d (context in every header)\n", client->fd,
+		    version);
+		fflush(stdout);
 	}
 	if (width <= 0 || height <= 0 || (size_t)width * (size_t)height * 4 != frame_bytes) {
 		reply(client, "R badsize\n");
@@ -1380,21 +1388,21 @@ serve_frame(struct client *client)
 		wire_buffer upload;
 		size_t offset = 0;
 
-		while (offset + 8 <= records_bytes) {
+		while (offset + wire_header_bytes(version) <= records_bytes) {
 			uint32_t opcode, length;
 
 			memcpy(&opcode, records + offset, 4);
 			memcpy(&length, records + offset + 4, 4);
-			if (offset + 8 + length > records_bytes) {
+			if (offset + wire_header_bytes(version) + length > records_bytes) {
 				break;
 			}
 			if (opcode == 201) {
-				upload.base = records + offset + 8;
+				upload.base = records + offset + wire_header_bytes(version);
 				upload.capacity = length;
 				upload.at = 0;
 				dispatch(&client->names, &upload, opcode);
 			}
-			offset += 8 + length;
+			offset += wire_header_bytes(version) + length;
 		}
 	}
 	{
@@ -1425,12 +1433,14 @@ serve_frame(struct client *client)
 		client->names.drawn_framebuffer = 0;
 		replay_used = 1;
 		replayed = 1;
-		while (offset + 8 <= records_bytes) {
-			uint32_t opcode, length;
+		while (offset + wire_header_bytes(version) <= records_bytes) {
+			uint32_t opcode, length, context;
+			static unsigned last_context;
+			static int context_known;
 
 			memcpy(&opcode, records + offset, 4);
 			memcpy(&length, records + offset + 4, 4);
-			if (offset + 8 + length > records_bytes) {
+			if (offset + wire_header_bytes(version) + length > records_bytes) {
 				fprintf(stderr, "host_glwire: a record runs past the frame\n");
 				break;
 			}
@@ -1439,11 +1449,19 @@ serve_frame(struct client *client)
 				break;
 			}
 			if (opcode == 201) {
-				offset += 8 + length;
+				offset += wire_header_bytes(version) + length;
 				continue;       /* already uploaded before the framebuffer was bound */
 			}
+			context = wire_header_context(records + offset, version);
+			if (getenv("GLWIRE_CONTEXT_LOG") != NULL && (!context_known || context != last_context)) {
+				printf("glwire: context %u first at opcode %u, record %zu of frame %llu\n", context,
+				    opcode, offset, (unsigned long long)frames_replayed + 1);
+				fflush(stdout);
+				context_known = 1;
+				last_context = context;
+			}
 			replay_ops[opcode]++;
-			r.base = records + offset + 8;
+			r.base = records + offset + wire_header_bytes(version);
 			r.capacity = length;
 			r.at = 0;
 			{
@@ -1454,7 +1472,7 @@ serve_frame(struct client *client)
 				if (error != GL_NO_ERROR && glerrors < 20) {
 					glerrors++;
 					printf("glwire: glerror %#x after opcode %u (%d records in)\n", error,
-					    opcode, (int)(offset + 8 + length));
+					    opcode, (int)(offset + wire_header_bytes(version) + length));
 					fflush(stdout);
 				}
 				if (failed != 0) {
@@ -1462,7 +1480,7 @@ serve_frame(struct client *client)
 					break;
 				}
 			}
-			offset += 8 + length;
+			offset += wire_header_bytes(version) + length;
 		}
 	}
 	glFinish();

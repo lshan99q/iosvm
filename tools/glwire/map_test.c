@@ -130,22 +130,22 @@ main(int argc, char **argv)
 		wire_buffer r;
 		size_t at = 0;
 
-		while (at + 8 <= bytes) {
+		while (at + wire_header_bytes(2) <= bytes) {
 			uint32_t opcode, length;
 
 			memcpy(&opcode, records + at, 4);
 			memcpy(&length, records + at + 4, 4);
-			if (at + 8 + length > bytes) {
+			if (at + wire_header_bytes(2) + length > bytes) {
 				fprintf(stderr, "map_test: a record runs past the stream\n");
 				return 1;
 			}
-			r.base = records + at + 8;
+			r.base = records + at + wire_header_bytes(2);
 			r.capacity = length;
 			r.at = 0;
 			if (dispatch(&names, &r, opcode) != 0) {
 				return 1;
 			}
-			at += 8 + length;
+			at += wire_header_bytes(2) + length;
 		}
 	}
 	glFinish();

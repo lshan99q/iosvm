@@ -24,7 +24,7 @@ host_glwire: host_glwire.c $(HOST_SRC)
 map_test: map_test.c map_stream.c $(HOST_SRC)
 	$(CC) $(CFLAGS) -o $@ map_test.c map_stream.c $(LDLIBS)
 
-test: map_test
+test: map_test host_glwire
 	./map_test
 	./e2e_test.py
 

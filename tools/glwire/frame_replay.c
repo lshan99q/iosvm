@@ -247,6 +247,8 @@ main(int argc, char **argv)
 	}
 
 	began = now_seconds();
+	wire_set_record_version(2);
+	wire_set_record_context(0);
 	records_bytes = frame_records(records, 32u << 20, texture, program, texture_uniform, position,
 	    texcoord, PANEL_WIDTH, PANEL_HEIGHT, layer);
 	recorded = now_seconds();
@@ -254,22 +256,22 @@ main(int argc, char **argv)
 		wire_buffer r;
 		size_t at = 0;
 
-		while (at + 8 <= records_bytes) {
+		while (at + wire_header_bytes(2) <= records_bytes) {
 			uint32_t opcode, length;
 
 			memcpy(&opcode, records + at, 4);
 			memcpy(&length, records + at + 4, 4);
-			if (at + 8 + length > records_bytes) {
+			if (at + wire_header_bytes(2) + length > records_bytes) {
 				fprintf(stderr, "frame_replay: a record runs past the frame at %zu\n", at);
 				return 1;
 			}
-			r.base = records + at + 8;
+			r.base = records + at + wire_header_bytes(2);
 			r.capacity = length;
 			r.at = 0;
 			if (dispatch(&names, &r, opcode) != 0) {
 				return 1;
 			}
-			at += 8 + length;
+			at += wire_header_bytes(2) + length;
 		}
 		(void)r;
 	}

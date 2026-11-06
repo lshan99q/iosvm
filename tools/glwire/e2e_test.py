@@ -12,6 +12,7 @@ Needs ./host_glwire and ./map_test built first (`make`).
 import argparse
 import os
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -29,48 +30,79 @@ def main():
                    stdout=subprocess.DEVNULL)
     records = open(records_path, "rb").read()
 
-    host = subprocess.Popen([os.path.join(HERE, "host_glwire"), str(args.port)],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    try:
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            line = host.stdout.readline()
-            if not line:
-                break
-            sys.stdout.write("  " + line)
-            if "listening" in line:
-                break
-        else:
-            raise SystemExit("e2e_test: host_glwire did not listen")
-
-        s = socket.create_connection(("127.0.0.1", args.port), timeout=20)
-        request = "R 4 4 %d 64\n" % len(records)
-        s.sendall(request.encode() + records)
-        reply = b""
-        while not reply.endswith(b"\n"):
-            chunk = s.recv(1)
-            if not chunk:
-                break
-            reply += chunk
-        if not reply.startswith(b"R 64"):
-            s.close()
-            raise SystemExit("e2e_test: the host did not draw the frame: %r" % reply)
-        picture = b""
-        while len(picture) < 64:
-            chunk = s.recv(64 - len(picture))
-            if not chunk:
-                break
-            picture += chunk
-        s.close()
-        print("e2e_test: reply %r, %d picture bytes" % (reply.decode().strip(), len(picture)))
-    finally:
-        host.terminate()
+    def replay(records, version):
+        """One connection: the request line, the records, the picture back."""
+        host = subprocess.Popen([os.path.join(HERE, "host_glwire"), str(args.port)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
-            host.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            host.kill()
-        for line in host.stdout:
-            sys.stdout.write("  " + line)
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                line = host.stdout.readline()
+                if not line:
+                    break
+                sys.stdout.write("  " + line)
+                if "listening" in line:
+                    break
+            else:
+                raise SystemExit("e2e_test: host_glwire did not listen")
+
+            s = socket.create_connection(("127.0.0.1", args.port), timeout=20)
+            if version >= 2:
+                request = "R 4 4 %d 64 0 0 0 0 2\n" % len(records)
+            else:
+                request = "R 4 4 %d 64 0 0 0 0\n" % len(records)
+            s.sendall(request.encode() + records)
+            reply = b""
+            while not reply.endswith(b"\n"):
+                chunk = s.recv(1)
+                if not chunk:
+                    break
+                reply += chunk
+            if not reply.startswith(b"R 64"):
+                s.close()
+                raise SystemExit("e2e_test: the host did not draw the frame: %r" % reply)
+            picture = b""
+            while len(picture) < 64:
+                chunk = s.recv(64 - len(picture))
+                if not chunk:
+                    break
+                picture += chunk
+            s.close()
+            print("e2e_test: reply %r, %d picture bytes (version %d)" % (reply.decode().strip(), len(picture),
+                                                                       version))
+            return picture
+        finally:
+            host.terminate()
+            try:
+                host.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                host.kill()
+            for line in host.stdout:
+                sys.stdout.write("  " + line)
+
+    def reproject(records, frm, to):
+        """Rewrite the record headers from one version to the other (the pixel payloads stay)."""
+        if frm == to:
+            return records
+        out = bytearray()
+        at = 0
+        while at + 8 <= len(records):
+            opcode, length = struct.unpack_from("<II", records, at)
+            if at + (8 if frm == 1 else 12) + length > len(records):
+                raise SystemExit("e2e_test: bad record at %d" % at)
+            out += struct.pack("<II", opcode, length)
+            if to >= 2:
+                out += struct.pack("<I", 0)
+            out += records[at + (8 if frm == 1 else 12):at + (8 if frm == 1 else 12) + length]
+            at += (8 if frm == 1 else 12) + length
+        return bytes(out)
+
+    picture_v2 = replay(records, 2)
+    # The stage-14 guest image sends eight-field requests and 8-byte headers: that path still works.
+    picture_v1 = replay(reproject(records, 2, 1), 1)
+    if picture_v1 != picture_v2:
+        raise SystemExit("e2e_test: FAIL: the old header layout drew a different picture")
+    picture = picture_v2
 
     at = (2 * 4 + 2) * 4
     b, g, r, a = picture[at:at + 4]

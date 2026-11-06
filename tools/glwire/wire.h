@@ -44,6 +44,45 @@ typedef struct {
 	uint32_t reserved;      /* keeps the wire layout the same on both sides */
 } wire_segment;
 
+/*
+ * Stage fifteen: a record can name the EAGL context that made the call.  The header is then
+ * u32 opcode | u32 length | u32 context (12 bytes); the default stays the 8-byte header, so a
+ * frame recorded by an older guest still replays and both layouts are exercised by the tests.
+ * The host takes the version from the request line; the recorder here takes it from this flag.
+ */
+static int wire_record_version = 1;
+static uint32_t wire_record_context;
+
+static inline void
+wire_set_record_version(int version)
+{
+	wire_record_version = version >= 2 ? 2 : 1;
+}
+
+static inline void
+wire_set_record_context(uint32_t context)
+{
+	wire_record_context = context;
+}
+
+/* Readers pass the version they were told (the request line); the recorder above uses its own. */
+static inline size_t
+wire_header_bytes(int version)
+{
+	return version >= 2 ? 12 : 8;
+}
+
+static inline uint32_t
+wire_header_context(const uint8_t *record, int version)
+{
+	uint32_t context = 0;
+
+	if (version >= 2) {
+		memcpy(&context, record + 8, 4);
+	}
+	return context;
+}
+
 #ifdef GLWIRE_GUEST
 
 /* ---- recording ---- */
@@ -244,12 +283,15 @@ wire_open(wire_buffer *w, uint32_t opcode)
 	w->record = w->at;
 	wire_u32(w, opcode);
 	wire_u32(w, 0);                 /* the payload length, filled in by wire_close */
+	if (wire_record_version >= 2) {
+		wire_u32(w, wire_record_context);       /* stage fifteen: whose call this is */
+	}
 }
 
 static inline void
 wire_close(wire_buffer *w)
 {
-	uint32_t length = (uint32_t)(w->at - (w->record + 8));
+	uint32_t length = (uint32_t)(w->at - (w->record + wire_header_bytes(wire_record_version)));
 
 	memcpy(w->base + w->record + 4, &length, 4);
 }
