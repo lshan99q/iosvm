@@ -182,3 +182,31 @@ tile 的 **guest 名字**在 0–3 帧内被后续 draw 采样，采样点是 u0
 **下一步（继续第十六阶段 P1）**：在 `host_fbo_draw` 里对程序 5/7 的合成 draw 记录「源 tile 的 alpha 与目标 fbo 的
 内容哈希」，看合成后目标面是否真的变亮；同时把 backdrop 的 blit 改成**保留 alpha**（我们用整屏 blit，alpha 被写成 1，
 这会让合成变成不透明贴片）。
+
+---
+
+## 十六、合成顺序（从 s16tile 日志直读，2026-11-06 18:05）
+
+取 UI 阶段的一帧（draw#3759 起），顺序是：
+
+```
+draw#3760 program 3  fbo 2
+draw#3761 program 13 fbo 7     ← label 画进 tile（64x19，1216 像素）
+draw#3762 program 7  fbo 2     ← tile 立刻被合成回面板
+draw#3763 program 5  fbo 2
+draw#3764..67 program 17 fbo 2
+draw#3768 program 5  fbo 2
+draw#3769 program 0  fbo 2
+draw#3770 program 3  fbo 3
+draw#3772 program 13 fbo 7     ← 下一个 label
+draw#3773 program 7  fbo 3
+...
+```
+
+**读法**：每个 label 都是「先画进 tile（fbo 7）→ 立刻被 program 7 合成进面板（fbo 2/3）」，**同一帧内、顺序正确**。
+所以合成不是缺失，是**每个 label 之后整个面板又被重画一遍**（program 3/5/17/0 把 fbo 2/3 重建），
+上一笔的合成结果被覆盖——最后一帧的面板里最多只剩最后一个 label。
+
+这正是「一次性 pass 被 flush 切成很多小步」的另一种表现：CA 的 pass 里每一步都重画整块面板，我们收到的每一帧
+只保留最后一步的合成。**下一步**（第十六阶段 P1 的收尾，也是第十七阶段 P0）是验证「面板重画是否真的覆盖了合成」——
+在 program 3/5 的 draw 前后对 fbo 2 做区域哈希，能直接看到标签区域的像素被抹掉。
