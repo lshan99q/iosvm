@@ -61,6 +61,16 @@
 | 四发对照 | `QEMU_SMP=4`，宿主另有 400% CPU 的 Windows 虚拟机 | 6 发 5 崩，2–9 分钟不等 |
 | 减 vCPU | `QEMU_SMP=2`（s17fix1） | **仍然崩**（3 帧后，20:02）→ 少 vCPU 不是解 |
 | 关输入设备 | `virtio_input=0`（s17noinput） | **仍然崩**，但栈换了（wifid / kqueue / workq） |
+| 提优先级 | `sudo renice -n -10` 给 qemu + host_glwire（s18prio） | **仍然崩**（5 分钟，2 帧后） |
+| 单线程 TCG | `QEMU_ACCEL=tcg,thread=single`，700 s（s18single） | **0 panic、12 分钟**，但**没到界面**（2 帧、全黑截图） |
+| 单 vCPU | `QEMU_SMP=1`（cpus=1），1200 s（s18smp1） | **0 panic、20 分钟、3762 帧、到界面**（截图 243,309 B）；代价是慢约 3 倍（UI 到 ~600 s） |
+
+**结论：`QEMU_SMP=1` 是今晚唯一稳定到界面的配方。** 三发验证：s18smp1（1200 s，3762 帧，UI 到，0 panic）、
+s18label1（1500 s，6080 帧，0 panic）、s18t2（1500 s，7248 帧，0 panic）。**`QEMU_SMP=1` 定为后续实验的标准配方**；
+4 vCPU 只在需要跑分时再试（并记录是否崩）。宿主侧的 Windows 虚拟机按主人要求**没有关闭**，改成
+`systemctl set-property machine-qemu\x2d1\x2dwin2022\x2dgpu.scope CPUQuota=200%`（实测从 4.0 核降到 1.4 核，
+虚拟机保持运行、可继续上网）。 它把 vCPU 之间的抢占整个去掉了（一个 vCPU，不存在
+「另一个 vCPU 在自旋等这把锁」），代价是慢约 3 倍。后续的功能实验先都跑这个配方，速度结论另记。
 
 **根因（两发对照后修正）**：**不是 `input_poll` 专属**。第一次的栈是 `timer_call_enqueue_deadline_unlocked`
 （input_poll 的 8 ms 自排期正好撞上），关掉输入设备后仍崩、改成 `__psynch_mutexwait -> kqueue_scan ->
@@ -90,6 +100,25 @@ QEMU 配置是 `-accel tcg,tb-size=384`（无 `thread=`，即默认 **MTTCG**，
 4. **判据**：连续 3 发到 UI 且 0 panic；记录每发的 `QEMU_SMP`、宿主负载、`ui at`、结束原因。
 
 ### P0：标签（1–2 天）
+
+**已做完的两步（21:05–21:45，都是 `QEMU_SMP=1` 的稳定配方）**：
+
+| 发 | 配置 | 结果 |
+|---|---|---|
+| s18label1 | 1500 s；`GLWIRE_DRAW_LOG=1 GLWIRE_PANEL_SHADOW=1 GLWIRE_SHADOW_APPLY=1 GLWIRE_SHADOW_MODE=1`，dump 每 25 帧 | **0 panic、6080 帧**；截图 **252,970 B**（比不放影子的 243,309 B 大）；**每个 App 图标下方出现红色条块**——标签层第一次在屏幕上占到了位置 |
+| s18t2 | 同上 + `GLWIRE_FIX_TEXMAT=1` + `GLWIRE_LABEL_DUMP`，1500 s | **0 panic、7248 帧**；截图 250,620 B；红块不变；`texmat0` 仍为 NaN、修补**没有触发**（原因待查，见下） |
+| s18t3 | 同上 + `GLWIRE_TEXMAT_IDENTITY=1`（无条件把 texmat0 写成 (1,1,0,0)）+ dump 每 25 帧 | 运行中/待填 |
+
+**红色条块是什么（实测 + 推断）**：影子 dump（`/tmp/s18label1/s-shadow-*.bgra`）里，红块的主色是
+**(191,52,43)**、块内有白色竖条；同尺寸的层落在 App 标签的位置（图标正下方）。对着着色器读：
+`programme 13 = color * vec4(texture2D(texture0, texcoord0_0).a)`，再 `darkenSover(S, D)`，其中
+`D = texture2DProj(texture1, texcoordD)` 是 64x19 的 backdrop，而**每条 label draw 的 `texmat0` 都是
+`nan nan nan 0.0000`**（s16tile 与 s18label1 的 `label state` 行都能看到）——顶点着色器里
+`texcoord0_0 = vertex_texcoord0 * texmat0.xy + texmat0.zw`，于是**每一次字形采样都是 NaN**。
+
+**第一个实验（s18t2）**：宿主在 glyph draw 前把 NaN 的 `texmat0/1/2` 改成 `(1,1,0,0)`（`GLWIRE_FIX_TEXMAT=1`）。
+判据：影子/截图里红块的**形状**从「实心条」变成「字形轮廓」→ NaN 就是文字画不出来的原因；仍是实心条 →
+NaN 只是症状，原因在客人机录制/CA 的 uniform。
 
 1. **先把「画面里到底有没有那 4,887 个白像素」钉死**：UI 帧同时 dump **shadow（合成后第一笔）**与 **picture（帧末）**，
    两张图做像素差；若 shadow 有、picture 没有 → 是「后续 draw 覆盖」；若两张都没有 → 是「合成没画进去」。
