@@ -604,6 +604,47 @@ tile_note_check(const char *where, GLuint unit, unsigned long long guest, GLint 
 	}
 }
 
+/*
+ * Stage eighteen, P0's next layer: a text draw whose sampler matrix is NaN.  Measured (s16tile):
+ * every label draw of programme 13 has `texmat0 nan nan nan 0.0000`, and the vertex shader computes
+ * texcoord0_0 = vertex_texcoord0 * texmat0.xy + texmat0.zw -- so every glyph sample of every label is
+ * undefined.  This is the experiment: replace a NaN texmat with the identity (1,1,0,0) so the sample
+ * lands somewhere defined; if the labels then draw, the NaN is what held them back and the recording
+ * of glUniform4fv is where the real fix goes.
+ */
+static void
+host_fix_nan_texmat(GLuint program)
+{
+	static const char *names[3] = { "texmat0", "texmat1", "texmat2" };
+	static unsigned said;
+
+	for (unsigned i = 0; i < 3; i++) {
+		GLint location = glGetUniformLocation(program, names[i]);
+		GLfloat value[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		int nan = 0;
+
+		if (location < 0) {
+			continue;
+		}
+		glGetUniformfv(program, location, value);
+		for (int c = 0; c < 4; c++) {
+			if (value[c] != value[c]) {
+				nan = 1;
+			}
+		}
+		if (!nan) {
+			continue;
+		}
+		glUniform4f(location, 1.0f, 1.0f, 0.0f, 0.0f);
+		if (said < 20) {
+			said++;
+			printf("glwire: %s was NaN for programme %u, set to (1,1,0,0)\n", names[i],
+			    (unsigned)program);
+			fflush(stdout);
+		}
+	}
+}
+
 static void
 host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 {
@@ -668,6 +709,9 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	glActiveTexture((GLenum) active);
 	/* (stage thirteen: a draw that binds a glyph tile is a text draw -- say what its programme holds) */
 	last_draw_was_glyph = glyph_height != 0;
+	if (last_draw_was_glyph && getenv("GLWIRE_FIX_TEXMAT") != NULL) {
+		host_fix_nan_texmat((GLuint)program);
+	}
 	if (last_draw_was_glyph) {
 		host_backdrop_fill(g);
 	}
