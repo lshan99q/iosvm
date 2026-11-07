@@ -827,6 +827,19 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				static unsigned said_float, said_half;
 
 				glUniform4f(location, u1 - u0, v1 - v0, u0, v0);
+				if (said_float < 3) {
+					GLint bound = 0;
+					GLfloat back[4] = { 0, 0, 0, 0 };
+
+					glGetIntegerv(GL_CURRENT_PROGRAM, &bound);
+					glGetUniformfv((GLuint)program, location, back);
+					printf("glwire: texmat0 write programme %d location %d bound %d -> %.4f %.4f "
+					    "%.4f %.4f (wrote %.4f %.4f %.4f %.4f)\n", (int)program,
+					    (int)location, (int)bound, (double)back[0], (double)back[1],
+					    (double)back[2], (double)back[3], (double)(u1 - u0), (double)(v1 - v0),
+					    (double)u0, (double)v0);
+					fflush(stdout);
+				}
 				if ((half_used && said_half < 5) || (!half_used && said_float < 3)) {
 					if (half_used) {
 						said_half++;
