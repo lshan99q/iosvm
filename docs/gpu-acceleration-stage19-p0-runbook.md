@@ -3,7 +3,8 @@
 # IOSVM 第十九阶段 P0 运行手册 —— 把「两个字母」变成「五个 App 名称」
 
 > 建立时间：2026-11-07 14:20
-> 基线提交：`cecbd2e`（`docs(stage 19): the first real glyphs on the screen`）
+> 执行基线：`f2035c6`（`tools(glwire): let boot-measure.sh be pointed at a checkout`）
+> 内容基线：`cecbd2e`（`docs(stage 19): the first real glyphs on the screen`，已被 `f2035c6` 包含）
 > 适用：离线准备、实验执行、结果复核。**本手册不要求改代码，只要求按同一配方取样并留下证据。**
 > 本文只回答四件事：现在到哪了、怎么复现、每条判据怎么取数、结果往哪填。
 
@@ -24,7 +25,7 @@
 
 ---
 
-## 一、现状一页纸（以 `cecbd2e` 为准）
+## 一、现状一页纸（内容基线 `cecbd2e`）
 
 ### 1.1 已经成立的三件事
 
@@ -71,45 +72,49 @@
 
 这一阶段有**两棵树**，别把它们当成一棵：
 
-| 变量 | 路径 | 里面有什么 |
+| 变量 | 容器里的路径 | 里面有什么 |
 |---|---|---|
-| `REPO` | `/home/lshan/DSH-desktop/iosvm` | 对外仓库：`docs/`、`tools/glwire/`（`host_glwire`、`boot-measure.sh`） |
-| `KERNEL` | `/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel` | 虚拟机工程：`qemu/`、`userland/`、`root.apfs`、`system.apfs` |
+| `REPO` | `/host/iosvm` | 对外仓库：`docs/`、`tools/glwire/`（`host_glwire`、`boot-measure.sh`） |
+| `KERNEL` | `/host/iosvm-work/hakios-xnu-kernel` | 虚拟机工程：`qemu/`、`userland/`、`root.apfs`、`system.apfs` |
 
-`tools/glwire/harness/boot-measure.sh` 内部把这两条路径写死了：
+`tools/glwire/harness/boot-measure.sh` 的两行是**默认值**，不是写死（`f2035c6` 起可覆盖）：
 
 ```sh
-IOSVM=/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel   # 内核/qemu 树（KERNEL）
-GLWIRE=/home/lshan/DSH-desktop/iosvm/tools/glwire            # 本仓库的宿主 half（REPO）
+IOSVM=${IOSVM:-/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel}   # KERNEL 的默认值
+GLWIRE=${GLWIRE:-/home/lshan/DSH-desktop/iosvm/tools/glwire}            # REPO/tools/glwire 的默认值
 ```
 
-脚本会 `cd "$IOSVM"` 再跑 `qemu/run-darwin.sh`，所以 **`root.apfs` 参数请传绝对路径**，不要依赖当前目录。
-若你的容器里对外仓库挂在 `/host/iosvm`，它只是 `REPO` 的另一个挂载点；**不要只改 `cd` 的目录**，
-否则脚本启动的是另一份 `host_glwire`，证据就对不上提交了。
+默认值在宿主机上有效；容器里用 `IOSVM=` / `GLWIRE=` 覆盖。**两者必须指向同一份树，别混用**：
+`IOSVM` 是 KERNEL，`GLWIRE` 是 `$REPO/tools/glwire`。脚本会 `cd "$IOSVM"` 再跑 `qemu/run-darwin.sh`，
+所以 `root.apfs` 参数请传绝对路径，不要依赖当前目录。
 
 ```sh
-# 每开一个新 shell 先跑这一块
-export REPO=/home/lshan/DSH-desktop/iosvm
-export KERNEL=/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel
+# 每开一个新 shell 先跑这一块（容器配方）
+export REPO=/host/iosvm
+export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+export GLWIRE=$REPO/tools/glwire
 export ROOT=$KERNEL/userland/root.apfs
 
 cd "$REPO"
-git rev-parse --short HEAD                     # 期望 cecbd2e
+git rev-parse --short HEAD                     # 期望 f2035c6（含 cecbd2e）
 git -C "$KERNEL" rev-parse --short HEAD        # 内核/用户态的提交，一并记进证据表
 grep -n '^IOSVM=\|^GLWIRE=' tools/glwire/harness/boot-measure.sh
+test -d "$KERNEL/qemu" && test -d "$GLWIRE" && echo paths-ok
 ls -l "$ROOT" "$KERNEL/userland/system.apfs"
 ```
 
 期望：
 
-- `REPO` 的 `git rev-parse --short HEAD` → `cecbd2e`（或包含它的后续提交，并在证据表里写明实际提交）；
-- `grep` 输出的两行必须分别等于上面的 `KERNEL` 与 `$REPO/tools/glwire`；不等就先停下统一路径；
+- `REPO` 的 `git rev-parse --short HEAD` → `f2035c6`（或包含它的后续提交，并在证据表里写明实际提交）；
+- `grep` 输出的两行是 `${IOSVM:-...}` / `${GLWIRE:-...}` 默认值；实际启动时由上面的环境变量覆盖；
+- `paths-ok`，且 `$KERNEL/qemu`、`$GLWIRE` 都存在；
 - `$ROOT` 存在；**`root.apfs` 不在 git 里**（GB 级镜像，`.gitignore` 已排除），每台机器各自构建；
 - `$KERNEL/userland/system.apfs` 存在（启动镜像，同样不入库）。
 
 ### 2.2 宿主前置检查（每次 boot 前都做）
 
 ```sh
+cd "$REPO"
 # 1) 没有残留的 qemu / host_glwire（脚本也会杀，但先看一眼，别让旧进程吃掉 9110）
 ps -eo pid,comm | grep -E 'qemu-system|host_glwire' || echo "clean"
 
@@ -136,7 +141,8 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 cd "$REPO"
 
 ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 \
-HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1" \
+HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-1/label GLWIRE_DRAW_LOG=1" \
+IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
 tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 ```
 
@@ -150,7 +156,10 @@ tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 | `MINFRAMES=99999` | 关掉「200 帧即验收」的提前收工 | 到不了 UI 就 `acceptance` 结束 |
 | `MAXSECS=1500` | 记下本发的时间预算 | **注意：脚本真正的上限是第三个位置参数 `1500`；环境变量会被 `${3:-1800}` 覆盖**，写在这里只是让整行自解释 |
 | `UI_GRACE=300` | 界面出现后再活 300 s，`end=ui` 才算 PASS | 没有宽限期，界面刚出就收工，看不到稳定性 |
-| `HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1"` | 在 label/文字 draw 前把 NaN 的 `texmat0` 换成 `(1,1,0,0)` | `texmat0` 仍是 NaN，采样未定义，字形不出现 |
+| `HOST_ENV` 里的 `GLWIRE_TEXMAT_NAN_TO_IDENTITY=1` | 在 label/文字 draw 前把 NaN 的 `texmat0` 换成 `(1,1,0,0)` | `texmat0` 仍是 NaN，采样未定义，字形不出现 |
+| `HOST_ENV` 里的 `GLWIRE_LABEL_DUMP=<prefix>` | 开启 label draw 的像素读回；**只有它存在时才会打印 `label draw #N ... nonzero pixels`**（C5 依赖这一行） | C5 拿不到数据；前 4 笔还会写 `<prefix>-label-*.bgra` |
+| `HOST_ENV` 里的 `GLWIRE_DRAW_LOG=1` | 打印每笔 `draw#N ... viewport/scissor`，是下一发 landed-vs-zero 对照的原始数据 | 只有 label 汇总，没有逐笔几何 |
+| `IOSVM="$KERNEL" GLWIRE="$GLWIRE"` | 把 harness 指到容器里的两棵树 | 会回落到宿主默认路径，容器里通常直接失败 |
 | 第三个位置参数 `1500` | 本发硬上限（秒） | 见 `MAXSECS` |
 
 **运行时长预期**：界面在 10–15 分钟到；`UI_GRACE=300` 后结束，通常落在 900–1300 s。
@@ -165,10 +174,13 @@ P0 的第三条判据（`diffdump --tolerance 8`）要求同一发的 panel 与 
 cd "$REPO"
 mkdir -p /tmp/s19p0-1
 ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 \
-HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_DUMP=/tmp/s19p0-1/f GLWIRE_DUMP_AT=180" \
+HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-1/label GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=/tmp/s19p0-1/f GLWIRE_DUMP_AT=180" \
+IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
 tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 ```
 
+- 四个探针**可以共存**：同一条 `HOST_ENV` 里用空格分隔即可，上面的命令已经这样写。
+  `GLWIRE_LABEL_DUMP` 负责 `label draw` 行，`GLWIRE_DRAW_LOG` 负责逐笔 `draw#`，`GLWIRE_DUMP` 负责同帧 pair。
 - `GLWIRE_DUMP=<prefix>`：写一次 `<prefix>-panel-WxH.rgba` 与 `<prefix>-picture-WxH.bgra`；
   前缀目录必须先存在（`host_glwire` 只 `fopen`，不建目录），所以上面先 `mkdir -p`；
 - `GLWIRE_DUMP_AT=180`：**第一帧之后 180 s** 取这一对。这样通常已经过了「Se 刚出现」的时刻，
@@ -184,6 +196,24 @@ tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 
   若 `wrote` 的行号更小，说明 dump 早于字形，这一发的 diff 不算数。
 
+**`GLWIRE_DRAW_LOG` 的 20000 笔上限（重要）**
+
+`host_glwire` 只记录前 **20000 笔** draw（`logged >= 20000` 就停），这个上限按**笔数**算，不按 dump 字节算。
+界面阶段的 draw 量很大（programme 17 一项就 7316 笔），所以：
+
+- 到界面时 `draw#` 很可能已经刷满；**刷满之后不再有 `draw#` 行，但 `label draw` 行仍在**（两条打印路径独立）。
+- 大 dump 本身不“挤占”上限，但 dump 取得越晚，越可能已经超过 20000 笔。若要在同一发做 landed-vs-zero 的逐笔对照，
+  必须在 `draw#` 仍有输出时取样；否则该发的逐笔对照记为“不可用”，不要硬凑。
+- 检查是否刷满：
+
+  ```sh
+  grep -c '^glwire: draw#' /tmp/s19p0-1-host.log    # 20000 表示已到上限
+  grep -n 'wrote .*f-picture' /tmp/s19p0-1-host.log
+  ```
+
+  若 `draw#` 在 dump 之前就停了，在 §4.2 备注里写明「draw# capped at 20000 before dump」，
+  C5 的 label 计数不受影响，但下一发的几何对照要换取样窗口。
+
 ### 2.5 三发怎么排（可直接执行的循环）
 
 ```sh
@@ -193,7 +223,8 @@ for n in 1 2 3; do
   ps -eo pid,comm | grep -E 'qemu-system|host_glwire' && { echo "leftover; stop"; break; }
   mkdir -p /tmp/s19p0-${n}
   ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 \
-  HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_DUMP=/tmp/s19p0-${n}/f GLWIRE_DUMP_AT=180" \
+  HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-${n}/label GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=/tmp/s19p0-${n}/f GLWIRE_DUMP_AT=180" \
+  IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
   tools/glwire/harness/boot-measure.sh s19p0-${n} "$ROOT" 1500
   grep -E "^xb: s19p0-${n} end=" /tmp/s19p0-${n}.log
   sleep 60   # 让宿主的 I/O 落一落；确认没有残留 qemu 再开下一发
@@ -215,6 +246,7 @@ done
 | `/tmp/<label>-last.png` | 最后一次轮询的截图 |
 | `/tmp/<label>-final.png` | 收工前最后一张截图（读 App 名称优先用它） |
 | `/tmp/<label>-crash.png` | 仅崩溃时存在 |
+| `/tmp/<label>/label-*.bgra` | `GLWIRE_LABEL_DUMP` 写的前 4 笔 label draw 像素 |
 | `/tmp/<label>/f-panel-*.rgba`、`f-picture-*.bgra` | 仅验收发，`diffdump` 的输入 |
 
 ---
@@ -340,6 +372,8 @@ echo "sum: $(awk '{s+=$1} END{print s+0}' "$nz")"
 ```
 
 **看哪一行**：`glwire: label draw #<N> framebuffer 4 attachment texture 8 750x1624: <nonzero> nonzero pixels, <alpha> with alpha, glerror 0x0`。
+这一行**只在 `HOST_ENV` 含 `GLWIRE_LABEL_DUMP` 时打印**（`host_glwire.c` 的 `if (getenv("GLWIRE_LABEL_DUMP") ...)`），
+所以计数为 0 时先回去确认这个变量，而不是先怀疑没有 label draw。
 
 **通过标准**：
 
@@ -404,12 +438,13 @@ xb: s19p0-1 end=ui ui=...s ui_bytes=... guestframes=... hostframes=... MATCH=...
 
 ```text
 label:            s19p0-1
-git HEAD:         cecbd2e
+git HEAD:         REPO f2035c6 / KERNEL <hash>
 host_glwire:      <mtime> <size>  build marker: uniform-ring-v2
 root.apfs:        <size> <mtime>   （sha256 可选，GB 级会慢）
 QEMU_SMP:         1
 配方:             ZERO_RAM=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300
-HOST_ENV:         GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_DUMP=... GLWIRE_DUMP_AT=...
+HOST_ENV:         GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=... GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=... GLWIRE_DUMP_AT=...
+draw# 行数:       __（20000 表示已封顶；是否在 dump 之前封顶：是/否）
 ui at:            <秒> / ui_bytes: <字节>
 截图:             -shot.png <字节>；-final.png <字节>；判读用 <哪一个>
 label draws:      total=__ nonzero=__ max=__ sum=__
@@ -430,6 +465,7 @@ diffdump:         within 8 = __% -> SAME/NOT；dump 行号 __ vs 首个非零 la
 | `label draw` 全 0 | 同一发 `texmat0 was a NaN` 是否为 0 | 若 0，检查 `HOST_ENV` 是否传进；若非 0，记录，交给几何修复那一轮 |
 | diffdump 报 `NOT the same frame` | 行号对比（§2.4）；panel/picture 是否同帧 | dump 太早就调大 `GLWIRE_DUMP_AT` 重跑；不要用不同发的图拼 |
 | `make` 报 `Text file busy` | `ps` 里的 qemu | 先杀 qemu 再 `make`；否则跑的是旧二进制（`s19j` 教训） |
+| `draw#` 只有 20000 条 / dump 后没有 `draw#` | `grep -c '^glwire: draw#'`、`wrote` 的行号 | 该发逐笔对照记「不可用」；label 计数仍有效，下一发换更早的取样窗口 |
 
 ---
 
@@ -464,7 +500,7 @@ ls -l docs/demo/s19p0-1-home-20261107.png
 - **Commit**: <本发实际 HEAD>
 - **Guest firmware**: <Darwin 版本 / IPSW / 设备标识>
 - **Host**: <发行版、CPU、GPU、驱动、QEMU TCG>
-- **Command**: `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_DUMP=... GLWIRE_DUMP_AT=..." tools/glwire/harness/boot-measure.sh s19p0-1 <ROOT 的绝对路径> 1500`
+- **Command**: `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=... GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=... GLWIRE_DUMP_AT=..." IOSVM="$KERNEL" GLWIRE="$GLWIRE" tools/glwire/harness/boot-measure.sh s19p0-1 <ROOT 的绝对路径> 1500`
 - **What it shows**: <读出哪几个 App 名称；标签是不是文字>
 - **What it does not show**: <例如「只有 3 个名称可读，其余仍是 0 像素 draw」>
 - **Reproduced**: <这一配置跑了几发，几发相同>
@@ -522,6 +558,9 @@ P0: <2/3 或 3/3> PASS；阻塞：<几何/scissor 的哪一处>；下一发：<�
 | `NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300` 的理由 | 计划 §三「运行经验」、§八「恢复时要接的位置」 |
 | `ZERO_RAM=1` 的必要性（ram.img 残留） | `tools/glwire/harness/README.md` §七 |
 | `end=ui` / `ui_bytes` / `biggest` 的定义 | `tools/glwire/harness/boot-measure.sh` 末尾汇总行 |
+| `IOSVM=` / `GLWIRE=` 可在容器里覆盖 | `f2035c6`（`boot-measure.sh` 第 31/32 行） |
+| `GLWIRE_DRAW_LOG` 的前 20000 笔上限 | `tools/glwire/host_glwire.c` 的 `logged >= 20000` |
+| `label draw` 行依赖 `GLWIRE_LABEL_DUMP` | `tools/glwire/host_glwire.c` 的 `if (getenv("GLWIRE_LABEL_DUMP") != NULL && last_draw_was_glyph)` |
 | `diffdump --tolerance 8` 的 95% 线 | `tools/glwire/harness/diffdump.py` 的 `SAME FRAME` 分支；计划 §二 P0 |
 | 证据图规则（只许 PNG/GIF、每张配 NOTES） | `docs/demo/README.md`、`docs/demo/NOTES.template.md`、`PROVENANCE.md` |
 
