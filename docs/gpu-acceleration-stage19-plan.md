@@ -87,7 +87,31 @@ label draw 本来就填了非 texcoord 的数据。
 3. **显卡被占用时的退路**：宿主加了 `GLWIRE_SOFTWARE_GL=1`（跳过 EGL 设备枚举、用默认 display，配
    `LIBGL_ALWAYS_SOFTWARE=1` 走 Mesa llvmpipe）。实测这台机器仍解析到 NVIDIA 驱动，所以这个开关暂时只是留了接口。
 
-### 运行经验（2026-11-07 上午）
+### 2026-11-07 下午的实验结果（s19h/s19i）
+
+**s19h（四顶点 + 客人机 NaN 诊断，跑到界面）**：
+- 客人机 **一次都没有** 发送 NaN 的 `glUniform4fv`/`glUniform4f`（0 行）→ **NaN 不是客人机算的**。
+- 四顶点推导出的 texmat0 = `0.7500 0.0000 0.1250 0.1250`——**v 跨度仍是 0**（第四个顶点的 v 也是 0.125），
+  说明被选中的那条属性数组本来就只有一行 v；图集子矩形并不在它里面。
+- 宿主日志里 `label state program 13 texmat0 nan nan nan` 依旧——**而这一发里我们自己也会往 texmat0 写值**
+  （推导），所以「NaN 是谁写的」必须排除我们自己的写入。
+
+**s19i（关掉所有 texmat 试验，只留 `GLWIRE_UNIFORM_LOG`，1835 帧到界面）**：
+- **texmat0 仍然是 NaN**（`label state program 13 texmat0 nan nan nan 0.0000`）→ **NaN 不是我们的推导写进去的**，
+  它在流里。
+- 但客人机的 4fv/4f 一次都没发过 NaN（s19h 0 行）→ 说明写 NaN 的不是这两种调用。
+- `GLWIRE_UNIFORM_LOG` 的头几行暴露了**位置映射的碰撞**：
+  `uniform 1f programme 11 location guest 4 host 0`、`uniform 1f programme 9 location guest 3 host 0`、
+  `uniform 1f programme 35 location guest 5 host 1`——多个客人机位置被映射到同一个宿主位置。
+  如果 texmat0 的宿主位置正好是某一个被别的 uniform 写到的位置，NaN 就有来源了（或至少是「写错位置」）。
+- 结论：下一步必须**看见「谁写了 texmat0 的宿主位置」**——已给宿主加环形记录（每笔 uniform 写记
+  programme/guest location/host location/四个值），标签状态读到 NaN 时把命中该宿主位置的最近若干笔打印出来。
+  这一发就是 s19j。
+
+**tile 的脾气（s19h 的 88x19 dump）**：左半是红/橙/黄竖条（面板缩略图被拉满），右半是黑底 + 白色横条 + 一点蓝——
+这是**单行切片**被垂直拉伸的样子，和「v 跨度 0、只采样图集一行」完全一致。也就是说：标签的 UV 映射退化成了一维。
+
+
 
 - **启动到第一次 draw 的时间在变长**：08:57 那一发 11 分钟、09:21 那一发 15 分钟还没到界面，`boot-measure.sh` 的
   `NOUI_BY=780`（13 分钟没有界面就停）会把慢启动直接掐掉（s19f `end=noui`）。
@@ -105,6 +129,46 @@ label draw 本来就填了非 texcoord 的数据。
 | 推导出的 texmat0 | `0.3750 0.0000 0.1250 0.1250` | **v 跨度是 0**（三个角 v 相同）→ 采样只落在图集的一行上，这正是 alpha 恒定的原因 |
 
 **一句话**：现在的瓶颈不是暗化、不是顶点颜色，而是 **UI 时刻 attrib 3（图集子矩形）的数据**——它决定 texmat 的 v 跨度。
+
+### 下午四发的账（s19h–s19k）
+
+| 发 | 内容 | 结果 |
+|---|---|---|
+| s19h | 四顶点推导 + 客人机 NaN 诊断 | 客人机 **0** 次发送 NaN；推导值 `0.75 0 0.125 0.125`（v 跨度仍 0）；标签状态仍 NaN |
+| s19i | 关掉全部 texmat 试验 + `UNIFORM_LOG` | **texmat0 仍 NaN** → NaN 在流里；日志暴露位置映射碰撞（guest 3/4/5 → host 0/0/1） |
+| s19j | 宿主加 uniform 环形记录 | **环形记录没打印**（NaN 读到 1574 次）——怀疑跑的是旧二进制 |
+| s19k | 加「启动标记 + NaN 显式打印」后重跑 | 启动标记确认新二进制；等界面阶段看环形是否触发 |
+
+**教训**：宿主二进制在 `qemu` 还跑着的时候被 `make` 覆盖会 `ETXTBSY` 失败，而 grep 只筛 `error` 会漏掉它——
+**以后每次 boot 前先看 `host_glwire` 的 mtime 和日志里的 `build marker`**（s19k 起宿主启动就打印这一行）。
+
+### 运行经验
+
+- 启动到第一次 draw 要 **11–15 分钟**，`boot-measure.sh` 的 `NOUI_BY=780` 会把慢启动掐掉；功能实验用
+  `NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500`。
+- 每次 boot 前确认没有残留 qemu/host_glwire（`ps -eo pid,comm | grep -E "qemu-system|host_glwire"`）。
+- 显卡被别的任务占满时（如 hashcat），宿主渲染会跟着变慢、客人机更容易卡；这种时段只做离线分析和编译。
+
+### 2026-11-07 15:16 的关键数据（s19l）：texmat0 其实是单位阵！
+
+```
+glwire: texmat0 bits 3f800000 3f800000 00000000 00000000 location 0 programme 13 error 0
+glwire: uniform writes to host location 0, newest first:
+glwire:   programme 13 guest location 1 (4fv): 1.0000 1.0000 0.0000 0.0000
+...
+glwire: label state program 13 texmat0 nan nan nan 0.0000 ...
+```
+
+- **按位读出来的是 `1.0 1.0 0 0`（单位阵）**，环形记录也显示 CA 用 `glUniform4fv` 往 program 13 的
+  location 1 写了 `(1,1,0,0)`——所以「NaN」根本不是 texmat0 的值，**是同一段代码里那行老 printf 的显示问题**
+  （按位打印和它的值对不上，说明那行 printf 的取值路径有蹊跷，已加「状态行前再打一次位」来钉死）。
+- 也就是说：**标签的纹理坐标映射是恒等映射**——`texcoord0_0 = vertex_texcoord0`（单位正方形），
+  于是采样覆盖整张「图集」纹理，而不是一个字形子矩形。这解释了标签 tile 里为什么是整片拉伸的颜色：
+  **采样的不是字形，是整张纹理被压到标签位置**。
+- `label sample texture 13 189x90 internal 0x1906: 16748 nonzero, 37 with alpha`——被采样的纹理几乎完全不透明
+  （alpha 只有 37 个像素），而暗化项要的是 alpha 覆盖率。**纹理本身就不是字形掩码。**
+
+**下一步（s19m，运行中）**：`GLWIRE_ATLAS_DUMP` 把这张纹理原样写出来看看到底是什么（图标？面板？文字层？）。
 
 ### P1：backdrop 与文字可见性（1 天）
 
