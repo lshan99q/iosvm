@@ -221,6 +221,26 @@ label draw #2 ... 750x200: 0 nonzero pixels
 （`GLWIRE_TEXMAT_NAN_TO_IDENTITY=1`）。若 `label draw #N` 的 nonzero 从 0 变成上千、截图里出现 App 名称，
 标签链就通了。
 
+### 16:24 里程碑：**屏幕上第一次出现真正的字形**
+
+`s19n`（`GLWIRE_TEXMAT_NAN_TO_IDENTITY=1`：在 label/文字 draw 之前，把 NaN 的 texmat0 换成单位阵）：
+
+```
+glwire: texmat0 was a NaN (programme 15), set to (1,1,0,0)        x5
+glwire: label draw #70 framebuffer 4 attachment texture 8 750x1624: 1799 nonzero pixels, 1799 with alpha
+glwire: label draw #72 ... 1693 nonzero pixels
+glwire: label draw #74 ...  866 nonzero pixels
+```
+
+截图里出现了 **「Se」两个灰色抗锯齿字母**（见 `docs/demo/s19-label-glyphs-20261107.png` 与其放大图）——
+这是整个十七/十八/十九阶段第一次让**真正的字形**落到屏幕上。
+
+**为什么只有两个字母**：多数 label draw 仍然落在 0 像素（它们的 scissor 是 `0,0 178x90`，而顶点是面板坐标
+`(406,647)` 这类），只有少数 draw 的几何正好落在自己的 scissor 里。**所以下一步不是 texmat，而是「谁在裁剪谁」**：
+把「落了像素的 draw」和「落 0 像素的 draw」的 scissor / viewport / 顶点矩阵逐字段对比，找出那一处不一致。
+
+**当前判据状态**：标签链已经「打通到字形」，剩下的是**几何/裁剪的一致性问题**，不再是格式或采样问题。
+
 ### P1：backdrop 与文字可见性（1 天）
 
 1. **绕开 darken**：给宿主加一个 `GLWIRE_PROGRAM_SKIP=<program>`（跳过该 program 的 draw）或
