@@ -937,7 +937,15 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 			if (texmat_location >= 0) {
 				glGetUniformfv((GLuint)program, texmat_location, texmat);
 				if (!(texmat[0] == texmat[0])) {
-					host_dump_uniform_ring(texmat_location);
+					static unsigned nan_said;
+
+					if (nan_said < 3) {
+						nan_said++;
+						printf("glwire: texmat0 reads as NaN for programme %d location %d\n",
+						    (int)program, (int)texmat_location);
+						fflush(stdout);
+						host_dump_uniform_ring(texmat_location);
+					}
 				}
 			}
 			if (matrix_location >= 0) {
@@ -3234,6 +3242,8 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
+	printf("host_glwire: build marker uniform-ring-v2\n");
+	fflush(stdout);
 	printf("host_glwire: listening on %d%s%s\n", port,
 	    no_in_place ? " (GLWIRE_NO_INPLACE: the picture travels back instead)" : "",
 	    no_panel ? " (no panel: the recorded calls are replayed instead)" : "");
