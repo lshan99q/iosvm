@@ -188,6 +188,39 @@ glwire: atlas dump /tmp/s19m/atlas-187x90.bgra 187x90
 **下一步**：在宿主里按 `program` + 绑定的纹理尺寸/内容分类 label 相关的 draw（模糊 pass vs 文字 pass），
 先确认「文字 pass 是否真的存在」，再谈修哪一段。
 
+### 16:00 的新认识：**文字 draw 找到了（programme 15），但它一像素都不落**
+
+从 s19m 的宿主日志按 program 分类：
+
+| program | 界面阶段 draw 次数 | 是什么 |
+|---|---|---|
+| 17 | 7316 | 面板/图标合成 |
+| 5 / 3 | 3951 / 3749 | 其它合成 |
+| 0 | 1839 | 清屏 |
+| 7 | 1367 | 面板缩放到窗口 |
+| **13** | **1333** | 暗化（标签背板/阴影） |
+| **15** | **256** | **文字（遮罩）** |
+
+programme 15 的 draw 关键字段（实测一条）：
+
+```
+draw#27 ... program 15 ... viewport 0,0 750x1624 scissor on,0,0 161x90
+label sample texture 15 113x42 internal 0x1906: 1158 nonzero, 476 with alpha
+attrib 0: (406,647) (519,647) (519,689)   <- 标签位置，113x42 的四边形
+attrib 1: (1,1,1,1)                        <- 白色
+attrib 2: (0,0) (1,0) (1,1)                <- 单位正方形
+texmat0 bits: 3f800000 3f800000 0 0        <- 前几笔是单位阵
+label draw #2 ... 750x200: 0 nonzero pixels
+```
+
+**这就是文字绘制**：小尺寸 GL_ALPHA 纹理（113x42 / 98x42 / 64x42，alpha 覆盖正常：1158 里 476 个有 alpha）、
+位置正确、颜色白色、texcoord 是单位正方形——**但落到目标上 0 个像素**。
+之后的 draw 里 texmat0 变成 `0x7fffff80`（NaN），采样未定义 → 什么都写不出来。
+
+**因此这一发的判据（s19n，运行中）**：在绘制前把 NaN 的 texmat0 换成单位阵
+（`GLWIRE_TEXMAT_NAN_TO_IDENTITY=1`）。若 `label draw #N` 的 nonzero 从 0 变成上千、截图里出现 App 名称，
+标签链就通了。
+
 ### P1：backdrop 与文字可见性（1 天）
 
 1. **绕开 darken**：给宿主加一个 `GLWIRE_PROGRAM_SKIP=<program>`（跳过该 program 的 draw）或
