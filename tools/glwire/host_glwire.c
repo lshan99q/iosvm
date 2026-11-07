@@ -472,6 +472,58 @@ static void host_dump_uniforms(struct glstate *g, const char *tag);
  * so this asks the host which textures are bound to the first eight units at the moment of a draw, and
  * which guest name each one is.  GLWIRE_DRAW_LOG=1 writes the first 300 of them.
  */
+/* ---- stage nineteen: the last uniform writes, to say what put a NaN in texmat0 ---- */
+#define GLRING 64
+struct uniform_write {
+	uint32_t program;
+	GLint guest_location;
+	GLint host_location;
+	const char *kind;
+	GLfloat values[4];
+};
+
+static struct uniform_write uniform_ring[GLRING];
+static unsigned uniform_ring_at;
+
+static void
+host_note_uniform(struct glstate *g, const char *kind, GLint guest_location, GLint host_location,
+    const GLfloat *values)
+{
+	struct uniform_write *slot = &uniform_ring[uniform_ring_at++ % GLRING];
+
+	slot->program = (uint32_t)g->current_program;
+	slot->guest_location = guest_location;
+	slot->host_location = host_location;
+	slot->kind = kind;
+	for (int i = 0; i < 4; i++) {
+		slot->values[i] = values != NULL ? values[i] : 0.0f;
+	}
+}
+
+static int uniform_ring_dumped;
+
+static void
+host_dump_uniform_ring(GLint host_location)
+{
+	if (uniform_ring_dumped >= 3) {
+		return;
+	}
+	uniform_ring_dumped++;
+	printf("glwire: uniform writes to host location %d, newest first:\n", (int)host_location);
+	for (unsigned i = 0; i < GLRING; i++) {
+		struct uniform_write *slot = &uniform_ring[(uniform_ring_at + GLRING - 1 - i) % GLRING];
+
+		if (slot->kind == NULL || slot->host_location != host_location) {
+			continue;
+		}
+		printf("glwire:   programme %u guest location %d (%s): %.4f %.4f %.4f %.4f\n",
+		    (unsigned)slot->program, (int)slot->guest_location, slot->kind,
+		    (double)slot->values[0], (double)slot->values[1], (double)slot->values[2],
+		    (double)slot->values[3]);
+	}
+	fflush(stdout);
+}
+
 static int last_draw_was_glyph;
 
 /* (stage sixteen: programme 13's 64x19 backdrop is created empty here -- the wire records no fill for
@@ -884,6 +936,9 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 			host_label_sample(g);
 			if (texmat_location >= 0) {
 				glGetUniformfv((GLuint)program, texmat_location, texmat);
+				if (!(texmat[0] == texmat[0])) {
+					host_dump_uniform_ring(texmat_location);
+				}
 			}
 			if (matrix_location >= 0) {
 				glGetUniformfv((GLuint)program, matrix_location, matrix);

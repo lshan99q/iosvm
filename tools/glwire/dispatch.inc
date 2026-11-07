@@ -475,6 +475,7 @@ switch (opcode) {
 
 			host_log_uniform(g, "1f", a0, names_uniform(g, a0), uniform_values, 1);
 		}
+		{ GLfloat v[4] = { a1, 0, 0, 0 }; host_note_uniform(g, "1f", a0, names_uniform(g, a0), v); }
 		glUniform1f(names_uniform(g, a0), a1);
 		break;
 	}
@@ -490,6 +491,7 @@ switch (opcode) {
 
 			host_log_uniform(g, "4f", a0, names_uniform(g, a0), uniform_values, 4);
 		}
+		{ GLfloat v[4] = { a1, a2, a3, a4 }; host_note_uniform(g, "4f", a0, names_uniform(g, a0), v); }
 		glUniform4f(names_uniform(g, a0), a1, a2, a3, a4);
 		break;
 	}
@@ -497,6 +499,7 @@ switch (opcode) {
 		/* glUniform1i */
 		GLint a0 = wire_get_i32(r);
 		GLint a1 = wire_get_i32(r);
+		{ GLfloat v[4] = { (GLfloat)a1, 0, 0, 0 }; host_note_uniform(g, "1i", a0, names_uniform(g, a0), v); }
 		glUniform1i(names_uniform(g, a0), a1);
 		break;
 	}
@@ -506,6 +509,11 @@ switch (opcode) {
 		GLsizei a1 = wire_get_i32(r);
 		GLsizei n2 = 0;
 		void *p2 = wire_take(r, &n2);
+		if (getenv("GLWIRE_UNIFORM_LOG") != NULL) {
+			host_log_uniform(g, "3fv", a0, names_uniform(g, a0), (const GLfloat *)p2,
+			    3 * (a1 > 3 ? 3 : (int)a1));
+		}
+		host_note_uniform(g, "3fv", a0, names_uniform(g, a0), (const GLfloat *)p2);
 		glUniform3fv(names_uniform(g, a0), a1, p2);
 		free(p2);
 		break;
@@ -516,6 +524,11 @@ switch (opcode) {
 		GLsizei a1 = wire_get_i32(r);
 		GLsizei n2 = 0;
 		void *p2 = wire_take(r, &n2);
+		if (getenv("GLWIRE_UNIFORM_LOG") != NULL) {
+			host_log_uniform(g, "4fv", a0, names_uniform(g, a0), (const GLfloat *)p2,
+			    4 * (a1 > 2 ? 2 : (int)a1));
+		}
+		host_note_uniform(g, "4fv", a0, names_uniform(g, a0), (const GLfloat *)p2);
 		glUniform4fv(names_uniform(g, a0), a1, p2);
 		free(p2);
 		break;
@@ -527,6 +540,7 @@ switch (opcode) {
 		GLboolean a2 = wire_get_u8(r);
 		GLsizei n3 = 0;
 		void *p3 = wire_take(r, &n3);
+		host_note_uniform(g, "matrix3", a0, names_uniform(g, a0), (const GLfloat *)p3);
 		glUniformMatrix3fv(names_uniform(g, a0), a1, a2, p3);
 		free(p3);
 		break;
@@ -538,6 +552,7 @@ switch (opcode) {
 		GLboolean a2 = wire_get_u8(r);
 		GLsizei n3 = 0;
 		void *p3 = wire_take(r, &n3);
+		host_note_uniform(g, "matrix4", a0, names_uniform(g, a0), (const GLfloat *)p3);
 		glUniformMatrix4fv(names_uniform(g, a0), a1, a2, p3);
 		free(p3);
 		break;
