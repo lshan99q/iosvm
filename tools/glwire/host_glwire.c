@@ -593,6 +593,21 @@ host_label_sample(struct glstate *g)
 			}
 		}
 		error = glGetError();
+		if (getenv("GLWIRE_ATLAS_DUMP") != NULL && pixels != NULL && nonzero > 0) {
+			/* stage nineteen: the texture the text draw samples -- if the glyphs are in it, this
+			 * is the picture that should land on the screen */
+			char path[512];
+			FILE *file;
+
+			snprintf(path, sizeof(path), "%s-%dx%d.bgra", getenv("GLWIRE_ATLAS_DUMP"),
+			    (int)width, (int)height);
+			file = fopen(path, "wb");
+			if (file != NULL) {
+				fwrite(pixels, 1, (size_t)width * (size_t)height * 4, file);
+				fclose(file);
+				printf("glwire: atlas dump %s %dx%d\n", path, (int)width, (int)height);
+			}
+		}
 		printf("glwire: label sample texture %d %dx%d internal %#x: %u nonzero pixels, %u with alpha, "
 		    "glerror %#x\n", (int)texture, (int)width, (int)height, internal, nonzero, opaque, error);
 		fflush(stdout);
@@ -995,6 +1010,13 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				printf("glwire: label state texmatD %.4f %.4f %.4f %.4f backdrop texture %d %dx%d\n",
 				    (double)dmat[0], (double)dmat[1], (double)dmat[2], (double)dmat[3], (int)u1,
 				    (int)u1w, (int)u1h);
+			}
+			{
+				uint32_t here[4];
+
+				memcpy(here, texmat, sizeof(here));
+				printf("glwire: texmat0 bits at the state line %08x %08x %08x %08x\n",
+				    here[0], here[1], here[2], here[3]);
 			}
 			printf("glwire: label state program %d texmat0 %.4f %.4f %.4f %.4f matrix %.4f %.4f %.4f %.4f / "
 			    "%.4f %.4f %.4f %.4f / "
