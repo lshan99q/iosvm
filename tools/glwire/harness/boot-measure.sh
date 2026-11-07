@@ -28,8 +28,8 @@
 #                   2026-11-03: two boots in a row reported "ui at 30s" with 448,195 B while launchd
 #                   was still at UEFI).  The interface counts only once the host has frames too.
 set -u
-IOSVM=/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel
-GLWIRE=/home/lshan/DSH-desktop/iosvm/tools/glwire
+IOSVM=${IOSVM:-/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel}
+GLWIRE=${GLWIRE:-/home/lshan/DSH-desktop/iosvm/tools/glwire}
 LABEL=$1
 ROOT=$2
 MAXSECS=${3:-1800}
