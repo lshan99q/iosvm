@@ -885,6 +885,31 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				    glIsEnabled(GL_BLEND) ? "on" : "off", blend_src, blend_dst, (int)mask[0],
 				    (int)mask[1], (int)mask[2], (int)mask[3]);
 			}
+			{
+				GLint d_location = glGetUniformLocation((GLuint)program, "texmatD");
+				GLfloat dmat[4] = { 0, 0, 0, 0 };
+				GLint u1 = 0, u1w = 0, u1h = 0, previous_unit = 0;
+
+				if (d_location >= 0) {
+					glGetUniformfv((GLuint)program, d_location, dmat);
+				}
+				glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit);
+				glActiveTexture(GL_TEXTURE1);
+				glGetIntegerv(GL_TEXTURE_BINDING_2D, &u1);
+				if (u1 != 0) {
+					GLint previous_texture = 0;
+
+					glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+					glBindTexture(GL_TEXTURE_2D, (GLuint)u1);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &u1w);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &u1h);
+					glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture);
+				}
+				glActiveTexture((GLenum)previous_unit);
+				printf("glwire: label state texmatD %.4f %.4f %.4f %.4f backdrop texture %d %dx%d\n",
+				    (double)dmat[0], (double)dmat[1], (double)dmat[2], (double)dmat[3], (int)u1,
+				    (int)u1w, (int)u1h);
+			}
 			printf("glwire: label state program %d texmat0 %.4f %.4f %.4f %.4f matrix %.4f %.4f %.4f %.4f / "
 			    "%.4f %.4f %.4f %.4f / "
 			    "%.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f\n", (int)program, (double)texmat[0],
@@ -1955,6 +1980,81 @@ host_after_draw(struct glstate *g)
 		host_program_source(g, (GLuint)program);
 	}
 
+	/*
+	 * Stage nineteen: what does the text draw actually leave in its tile?  The counters from stage
+	 * fourteen cannot say -- the backdrop fill makes every pixel of a 64x19 tile non-zero -- but the
+	 * pixels themselves can: a glyph strip has dark and light columns, a wipe has one colour.  Each
+	 * dumped tile is written as its own small file, and the minimum and maximum say at a glance
+	 * whether the draw wrote anything at all.
+	 */
+	if (getenv("GLWIRE_TILE_DUMP") != NULL && last_draw_was_glyph) {
+		static unsigned dumped;
+		GLint tile_fbo = 0;
+		int from = getenv("GLWIRE_TILE_DUMP_FROM") != NULL ? atoi(getenv("GLWIRE_TILE_DUMP_FROM")) : 0;
+
+		if ((int)frames_replayed + 1 >= from && dumped < 200 && (int)frames_replayed % 10 == 0) {
+			GLint kind = -1, name = 0, previous = 0, width = 0, height = 0;
+
+			glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &tile_fbo);
+			if (tile_fbo != 0) {
+				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)tile_fbo);
+				glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+				glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+				if (kind == GL_TEXTURE && name != 0) {
+					glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+					glBindTexture(GL_TEXTURE_2D, (GLuint)name);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+					glBindTexture(GL_TEXTURE_2D, (GLuint)previous);
+					if (width > 0 && height > 0 && width <= 512 && height <= 512) {
+						size_t bytes = (size_t)width * (size_t)height * 4;
+						unsigned char *pixels = malloc(bytes);
+						unsigned char lo = 255, hi = 0;
+						unsigned nonzero = 0;
+
+						if (pixels != NULL) {
+							GLint pack = 4;
+
+							glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+							glPixelStorei(GL_PACK_ALIGNMENT, 1);
+							glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+							glPixelStorei(GL_PACK_ALIGNMENT, pack);
+							for (size_t i = 0; i + 3 < bytes; i += 4) {
+								unsigned char v = (unsigned char)((pixels[i] + pixels[i + 1] +
+								    pixels[i + 2]) / 3);
+
+								if (v < lo) lo = v;
+								if (v > hi) hi = v;
+								if (pixels[i] | pixels[i + 1] | pixels[i + 2] | pixels[i + 3]) nonzero++;
+							}
+							{
+								char path[512];
+								FILE *file;
+
+								snprintf(path, sizeof(path), "%s-f%llu-t%u-%dx%d.bgra",
+								    getenv("GLWIRE_TILE_DUMP"), frames_replayed + 1,
+								    (unsigned)name, (int)width, (int)height);
+								file = fopen(path, "wb");
+								if (file != NULL) {
+									fwrite(pixels, 1, bytes, file);
+									fclose(file);
+									dumped++;
+									printf("glwire: label tile dump %s %dx%d nonzero %u "
+									    "grey %u..%u\n", path, (int)width, (int)height,
+									    nonzero, lo, hi);
+									fflush(stdout);
+								}
+							}
+							free(pixels);
+						}
+					}
+				}
+				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)tile_fbo);
+			}
+		}
+	}
 	/*
 	 * Stage fourteen: every label draw (the one that binds a glyph tile) into the framebuffer the
 	 * host stands in for FBO 0 -- how many pixels it actually covered, and to a file the first few

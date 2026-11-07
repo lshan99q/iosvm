@@ -376,6 +376,33 @@ switch (opcode) {
 				}
 			}
 		}
+		/*
+		 * Stage nineteen's darken experiment: the label's fragment shader ends with
+		 * `vec4 R = darkenSover(S, D);` and, with the backdrop the host has, that multiplies the
+		 * glyphs away.  GLWIRE_DARKEN_OFF=1 rewrites that line to `vec4 R = S;` -- the glyph mask
+		 * straight out -- so "the text is not there" is told from "the text is there and darkened".
+		 */
+		if (getenv("GLWIRE_DARKEN_OFF") != NULL && ss != NULL) {
+			for (GLsizei i = 0; i < a1; i++) {
+				char *found;
+
+				if (ss[i] == NULL) {
+					continue;
+				}
+				found = strstr(ss[i], "vec4 R = darkenSover(S, D);");
+				if (found != NULL) {
+					static const char replacement[] = "vec4 R = S;                ";
+					static unsigned said;
+
+					memcpy(found, replacement, sizeof(replacement) - 1);
+					if (said < 4) {
+						said++;
+						printf("glwire: darken pass disabled in a fragment shader\n");
+						fflush(stdout);
+					}
+				}
+			}
+		}
 		GLuint host_shader = names_shader(g, a0);
 		names_shader_source(host_shader, a1, (const GLchar *const *)ss, NULL);
 		if (ss != NULL) {
