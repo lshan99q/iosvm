@@ -1015,8 +1015,37 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				uint32_t here[4];
 
 				memcpy(here, texmat, sizeof(here));
-				printf("glwire: texmat0 bits at the state line %08x %08x %08x %08x\n",
-				    here[0], here[1], here[2], here[3]);
+				if (getenv("GLWIRE_TEXMAT_NAN_TO_IDENTITY") != NULL) {
+					/* stage nineteen: every label draw after the first few carries a NaN sampler
+					 * matrix (0x7fffff80); with it the glyph sample is undefined and nothing lands
+					 * in the target.  An identity is the only mapping these 1:1 alpha-texture draws
+					 * can want: texcoord0_0 is already the unit square. */
+					int nan = 0;
+
+					for (int i = 0; i < 4; i++) {
+						uint32_t exponent = (here[i] >> 23) & 0xff;
+
+						if (exponent == 0xff) {
+							nan = 1;
+						}
+					}
+					if (nan && texmat_location >= 0) {
+						static unsigned said_nan;
+
+						glUniform4f(texmat_location, 1.0f, 1.0f, 0.0f, 0.0f);
+						if (said_nan < 5) {
+							said_nan++;
+							printf("glwire: texmat0 was a NaN (programme %d), set to (1,1,0,0)\n",
+							    (int)program);
+							fflush(stdout);
+						}
+					}
+				}
+				if (uniform_ring_dumped < 4) {
+					uniform_ring_dumped++;
+					printf("glwire: texmat0 bits at the state line %08x %08x %08x %08x\n",
+					    here[0], here[1], here[2], here[3]);
+				}
 			}
 			printf("glwire: label state program %d texmat0 %.4f %.4f %.4f %.4f matrix %.4f %.4f %.4f %.4f / "
 			    "%.4f %.4f %.4f %.4f / "
