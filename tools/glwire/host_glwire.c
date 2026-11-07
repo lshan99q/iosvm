@@ -773,7 +773,9 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				continue;
 			}
 			base = (const unsigned char *)g->attribs[i].data;
-			for (int vertex = 0; vertex < 3; vertex++) {
+			/* (a quad is four vertices: this array's first three all sit on v = 0.125, and the
+			 * subrectangle's v span only appears at the fourth) */
+			for (int vertex = 0; vertex < 4; vertex++) {
 				const unsigned char *at = base + (size_t)vertex * (size_t)stride;
 				GLfloat u = 0.0f, t = 0.0f;
 				uint16_t hu = 0, ht = 0;
@@ -3029,6 +3031,18 @@ make_display(void)
 	EGLDeviceEXT devices[8];
 	EGLint count = 0, major = 0, minor = 0;
 
+	/*
+	 * Stage nineteen: the card is not always ours.  GLWIRE_SOFTWARE_GL=1 skips the device
+	 * enumeration and takes the default display, which with LIBGL_ALWAYS_SOFTWARE=1 is Mesa's
+	 * llvmpipe -- slower, but it leaves the GPU to whatever else is running on it.
+	 */
+	if (getenv("GLWIRE_SOFTWARE_GL") != NULL) {
+		EGLDisplay software = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+
+		if (software != EGL_NO_DISPLAY && eglInitialize(software, &major, &minor)) {
+			return software;
+		}
+	}
 	if (query != NULL && get_display != NULL && query(8, devices, &count) && count > 0) {
 		for (EGLint i = 0; i < count; i++) {
 			EGLDisplay candidate = get_display(EGL_PLATFORM_DEVICE_EXT, devices[i], NULL);
