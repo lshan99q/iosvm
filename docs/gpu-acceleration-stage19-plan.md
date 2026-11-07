@@ -76,6 +76,17 @@ label draw 本来就填了非 texcoord 的数据。
      抄一份留到后续 draw（同一 pointer 复用时不重抄）。
 3. **判据**：宿主日志里 attrib 3 在 UI 阶段的值回到 0.125..0.5；标签出现文字。
 
+### 2026-11-07 下午：三个动作
+
+1. **四顶点修正**：`s19g` 的宿主日志显示 label draw 的 attrib 3 三个角全是 `v = 0.125`，所以从三个顶点推出来的
+   texmat 的 v 跨度是 0（图集只采一行）——这就是 tile alpha 恒为 4/255 的直接原因。**四边形有四个顶点，v 跨度在第四个上**。
+   宿主已改成读四个顶点（`GLWIRE_TEXMAT_FROM_ATTRIB`）。
+2. **客人机侧问「NaN 是谁算的」**：`remote.inc` 的 `glUniform4fv`/`glUniform4f` 现在会在参数里出现 NaN 时打印
+   `uniform4fv location N count M sends nan: ...`（各 40 条上限）。判据：若界面阶段出现这些行 → NaN 是 CA 自己算的
+   （宿主侧替换成推导值即可）；若一条都没有 → NaN 是线上的（去查录制）。
+3. **显卡被占用时的退路**：宿主加了 `GLWIRE_SOFTWARE_GL=1`（跳过 EGL 设备枚举、用默认 display，配
+   `LIBGL_ALWAYS_SOFTWARE=1` 走 Mesa llvmpipe）。实测这台机器仍解析到 NVIDIA 驱动，所以这个开关暂时只是留了接口。
+
 ### 运行经验（2026-11-07 上午）
 
 - **启动到第一次 draw 的时间在变长**：08:57 那一发 11 分钟、09:21 那一发 15 分钟还没到界面，`boot-measure.sh` 的
