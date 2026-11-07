@@ -14,7 +14,7 @@
 1. **只在编排侧恢复挂载与设备。** 容器内 `CapEff=0000000000000000`，不能 `mount`、不能 `mknod`；在容器里尝试这些命令只会得到 `Operation not permitted`，不会修好环境。
 2. **本文只写文档，不跑 qemu、不提交日志/截图/镜像。** 检查命令里唯一会启动的进程是 `host_glwire` 的 5 秒冒烟（不连 qemu、不读客人机），见 §3.9。
 3. **不声称 P0 通过。** 环境恢复只证明「能开始实验」；A1/v3 的结论仍按 `docs/gpu-acceleration-stage19-p0-runbook.md` §三/§四 判。
-4. **不要把「容器起来了」当成「环境好了」。** 15:5x 的故障容器同时缺 `/host`、GPU 节点、EGL 库与头文件；本手册写作容器则有 `/host` 和 GPU、却缺 `libEGL.so.1`、PIL、ImageMagick——**必须逐项过清单，不能只看一项**。
+4. **不要把「容器起来了」当成「环境好了」。** 15:5x 的 exp/code 新容器是「全裸」：`/host`、GPU 节点、EGL 库/头文件全缺；lead 容器有 `/host`、GPU、PIL，但缺 ImageMagick/numpy；本手册写作容器有 `/host` 和 GPU，却缺 `libEGL.so.1`、PIL、ImageMagick、numpy。**必须逐项过清单，不能只看一项。**
 
 ---
 
@@ -32,10 +32,10 @@
 | 库 | `libEGL.so.1`、`libGL.so.1` | GLVND/NVIDIA；`ldconfig -p` 能查到 |
 | 库 | `libEGL_nvidia.so.0` | NVIDIA EGL vendor；`/usr/share/glvnd/egl_vendor.d/10_nvidia.json` 存在 |
 | 构建 | `/usr/include/EGL/egl.h`、`/usr/include/EGL/eglext.h`、`libEGL.so`、`libGL.so` | 没有头文件时 `make host_glwire` 会报 `EGL/egl.h: No such file` |
-| 工具 | `python3` + PIL | Python 3.x；PIL **11.1.0** |
-| 工具 | ImageMagick | `magick -version` → **7.1.1** |
+| 工具 | `python3` + PIL | Python 3.x；PIL **11.1.0**（lead 容器已临时装 `python3-pil`，未进仓库） |
+| 工具 | ImageMagick | `magick -version` → **7.1.1**；**便利工具，不是 P0 硬依赖**（lead 当前未装） |
 | 工具 | `make`、`cc` | 能编译 `tools/glwire`（≥C99） |
-| 可选 | numpy | **不保证**；`diffdump.py`/`bgra2png.py`/`frame_match.py`/`panel_probe.py` 需要，见 §1.5 |
+| **P0 C4 硬依赖** | numpy | `diffdump.py`/`bgra2png.py`/`frame_match.py`/`panel_probe.py` 都 import；**没有 numpy 时同帧 diff 只能记 `n/a`，P0 不能判通过** |
 | 容器能力 | `CapEff` | 通常为 `0000000000000000`；**不能靠容器内 mount/mknod 恢复** |
 
 ### 1.2 三个挂载分别装什么
@@ -100,13 +100,28 @@ GLVND 只解决**运行**。要 `make host_glwire` 仍然需要 `EGL/egl.h`、`E
 
 ### 1.5 工具：PIL、ImageMagick、numpy
 
-| 工具 | 检查 | 期望 | 用途 |
+| 工具 | 检查 | 期望 | 用途 / 失败后果 |
 |---|---|---|---|
-| Python + PIL | `python3 -c 'import PIL; print(PIL.__version__)'` | `11.1.0` | 截图/像素脚本 |
-| ImageMagick | `magick -version \| head -1` | `ImageMagick 7.1.1-...` | 截图裁剪/转换 |
-| numpy | `python3 -c 'import numpy; print(numpy.__version__)'` | **不保证** | `diffdump.py`、`bgra2png.py`、`frame_match.py`、`panel_probe.py` 都需要 |
+| Python + PIL | `python3 -c 'import PIL; print(PIL.__version__)'` | `11.1.0` | 截图/像素脚本；lead 容器已临时装 `python3-pil`（未进仓库） |
+| ImageMagick | `magick -version \| head -1` | `ImageMagick 7.1.1-...` | 截图裁剪/转换；**便利工具，不是 P0 硬依赖**；lead 当前未装 |
+| numpy | `python3 -c 'import numpy; print(numpy.__version__)'` | **不保证，但 P0 C4 必须有** | `diffdump.py`、`bgra2png.py`、`frame_match.py`、`panel_probe.py` 都需要；缺失时同帧 diff 记 `n/a`，P0 不能判通过 |
 
-**numpy 的例外要说清**：本文的检查脚本不依赖 numpy；但既有 harness 里 `diffdump.py`、`bgra2png.py`、`frame_match.py`、`panel_probe.py` 都 `import numpy`。P0 的 C4（同帧 `diffdump --tolerance 8`）直接依赖 `diffdump.py`。如果容器没有 numpy，**C4 不能跑**，不能把「没装 numpy」写成「diff 通过」。恢复时要么装 numpy（记录版本），要么换带 numpy 的镜像；不要改脚本去绕过。
+**numpy 是 P0 C4 的硬依赖，不是「可选优化」**：本文的检查脚本不依赖 numpy；但既有 harness 里 `diffdump.py`、`bgra2png.py`、`frame_match.py`、`panel_probe.py` 都 `import numpy`。P0 的 C4（同帧 `diffdump --tolerance 8`）直接依赖 `diffdump.py`。如果容器没有 numpy，**C4 不能执行、P0 不能判通过**；证据表只能记 `n/a`，不能把「没装 numpy」写成「diff 通过」。恢复时要么装 numpy（记录版本），要么换带 numpy 的镜像；不要改脚本去绕过。
+
+### 1.6 两种 diff 不要混：截图回归 vs P0 同帧
+
+环境手册只记录口径，不改变 P0 的判据。两个“diff”回答的是不同问题（两张输入图分别在 `logs/s19n-repro/` 与 `logs/s19o-v2/`，都不进 git）：
+
+| 名称 | 比较对象 | 用途 | 实测 / 期望 |
+|---|---|---|---|
+| `imgdiff`（**截图回归**，lead 提供） | `s19n-repro-shot.png` vs `s19o-v2-shot.png` 的整张截图 | 判断改动前后界面是否稳定、有没有明显回归 | 全图 tolerance 8：**99.73% within、0.27% different**，差异 bbox **(88,80,769,2056)**；Search crop `(250,2000,650,300)`：**99.88% within** |
+| `diffdump --tolerance 8`（**P0 同帧**） | 同一发的 panel 与 picture | P0 的 C4 判据：`within 8` **≥95%** | 本轮未跑；缺 numpy/环境未恢复时只能记 `n/a` |
+
+三点必须写清：
+
+1. 上面的 99.73% / 0.27% 是 **s19n-repro vs s19o-v2 的截图回归**，说明两张界面截图很接近；**它不是 P0 的同帧 diff**，不能拿来充当 C4。
+2. `imgdiff` 的差异 bbox 是截图坐标（按工具的 `(x0,y0,x1,y1)` 输出）；0.27% 的差异集中在那个框里，读图时先看框内。
+3. P0 的 C4 必须在**同一发**里同时有 `panel` 与 `picture`，由 `diffdump.py` 算 `within 8`；没有 numpy 就没有 C4，没有 C4 就没有 P0 通过。
 
 ---
 
@@ -148,7 +163,7 @@ mknod /dev/nvidia0 c 195 0               # Operation not permitted
 | `host_glwire` 报 `libEGL.so.1: not found` | `ldd tools/glwire/host_glwire \| grep 'not found'` | 运行库缺失 | 同 GLVND 注入；或换镜像 |
 | PIL 缺失 | `python3 -c 'import PIL'` | 镜像缺 Python 图像库 | 编排侧修镜像/装包；不要用假数据绕过截图检查 |
 | ImageMagick 缺失 | `magick -version` | 镜像缺工具 | 同上；没有它仍可读 PNG，但裁剪/转换步骤要改口径并记录 |
-| numpy 缺失 | `python3 -c 'import numpy'` | 镜像未装 | 装 numpy，或明确记录 C4 不可跑；不能写成通过 |
+| numpy 缺失 | `python3 -c 'import numpy'` | 镜像未装 | 装 numpy（§3.10），或明确记录 **C4 不可执行、P0 不能判通过**；不能写成通过 |
 | `boot-measure.sh` 用了宿主默认路径 | `grep -n '^IOSVM=\|^GLWIRE='` | 没传 `IOSVM`/`GLWIRE` | 按 §3.10 用 env 覆盖到 `/host` 两棵树 |
 
 ---
@@ -338,15 +353,27 @@ strings tools/glwire/host_glwire | grep -c GLWIRE_TEXMAT_NAN_TO_IDENTITY
 ```text
 Python 3.x              # 本机 3.13.5
 PIL 11.1.0
-ImageMagick 7.1.1-...
-numpy <版本>            # 可选；缺失时看 §1.5
+ImageMagick 7.1.1-...  # 便利工具；缺失可跳过
+numpy <版本>            # C4 硬依赖；缺失时必须记 n/a
 f2035c6                 # 或其后
 31:IOSVM=${IOSVM:-/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel}
 32:GLWIRE=${GLWIRE:-/home/lshan/DSH-desktop/iosvm/tools/glwire}
 1
 ```
 
-`numpy` 缺失不阻塞启动，但阻塞 C4 的 `diffdump.py`（以及 `bgra2png.py` 等像素脚本）；必须在证据表里记 `n/a`，不能写通过。
+**numpy 是 P0 C4 的硬依赖。** 缺失时启动仍可继续，但 `diffdump.py` 会 `ModuleNotFoundError`；此时 C4 只能记 `n/a`，**P0 不能判通过**。恢复候选（容器内临时装，不进仓库）：
+
+```sh
+# 若镜像源可用（有 sudo 用 sudo；容器 root 可去掉 sudo）
+sudo apt-get update && sudo apt-get install -y python3-numpy
+# 或者镜像已有 pip 且允许联网
+python3 -m pip install --user numpy
+# 装完必须复验
+python3 -c 'import numpy; print("numpy", numpy.__version__)'
+```
+
+若 apt/pip 源不可用，**不要硬试**；在证据表里写「numpy missing → C4 n/a → P0 不能判通过」，不要用截图回归或别的发的 diff 顶替。
+
 `strings` 结果为 0 表示跑的是旧二进制（没有本阶段开关），先 `make` 或换二进制。
 
 ---
@@ -409,10 +436,10 @@ export QEMU_VARS="$KERNEL/qemu/vars.fd"
 ## 五、不要误判 / 不要做
 
 1. **不要把 `CapEff=0` 当成唯一故障**：正常容器也可能是 0；它说明的是「容器不能自救」，不是「挂载一定丢了」。
-2. **不要用 `/host` 是否存在来判断整个环境**：写作容器 `/host` 在、GPU 在，但 `libEGL.so.1`、PIL、ImageMagick 都缺。
+2. **不要用 `/host` 是否存在来判断整个环境**：写作容器 `/host` 在、GPU 在，但 `libEGL.so.1`、PIL、ImageMagick、numpy 都缺。
 3. **不要在容器里 `mount --bind` 或 `mknod`**：没有 `CapEff`，只会失败；恢复动作在编排侧。
 4. **不要把「有截图」当成「环境对了」**：截图 245 KB 也可能只是旧 `ram.img` 的残留；`ZERO_RAM=1` 与无残留 qemu 是前提。
-5. **不要在没有 numpy 时声称 C4 通过**：`diffdump.py` 会直接 ImportError；证据表必须写 `n/a`。
+5. **不要在没有 numpy 时声称 C4 通过**：numpy 是 P0 C4 的硬依赖，`diffdump.py` 会直接 ImportError；证据表必须写 `n/a`，P0 不能判通过。
 6. **不要把本手册当成 P0 结论**：环境恢复只回答「能不能开始实验」，P0 的判据在 runbook §三。
 7. **不要提交** `/host/iosvm/logs/`、`/host/ipsw`、`root.apfs`、`system.apfs`、`ram.img` 或任何截图；仓库只允许 `docs/demo/*.png|gif` 证据图。
 
@@ -420,19 +447,20 @@ export QEMU_VARS="$KERNEL/qemu/vars.fd"
 
 ## 附录 A：本次实测快照（2026-11-07 15:5x）
 
-| 项 | lead 正常容器 | 15:5x 故障容器 | 本手册写作容器 |
+| 项 | lead 容器（有部分工具） | 15:5x exp/code 新容器（全裸） | 本手册写作容器 |
 |---|---|---|---|
 | `/host` 三挂载 | 有，rw/rw/ro | **无** | 有，rw/rw/ro |
 | `/dev/nvidia*` | nvidia0/ctl/uvm + 额外 | **空** | nvidia1/ctl/uvm/modeset/uvm-tools + renderD129 |
 | `nvidia-smi` | V100，0 MiB | 不可用 | V100，0 MiB |
 | `libEGL.so.1` | 有 | **无** | **无**（只有 `libEGL_nvidia.so.0`） |
 | EGL/GL 头文件 | 有 | 无 | **无** |
-| PIL / ImageMagick | 11.1.0 / 7.1.1 | 无 | **无** |
-| numpy | 不保证 | 无 | **无** |
+| PIL | **有 11.1.0**（临时装 `python3-pil`，未进仓库） | 无 | **无** |
+| ImageMagick | **无** | 无 | **无** |
+| numpy | **无** | 无 | **无** |
 | `CapEff` | 0（容器常态） | **0** | **0**（本手册实测） |
-| 能否做实验 | 能 | 不能 | 不能（缺库/工具） |
+| 能否做实验 | 能启动；**C4 因缺 numpy 不可判** | 不能 | 不能（缺库/工具） |
 
-**结论**：15:5x 的故障是「挂载 + 设备 + 镜像库」三类同时缺失；写作容器是「挂载/设备在、镜像库缺失」的半残状态。两种情况都必须走 §3 全清单，不能只看一项。
+**结论**：15:5x 的 exp/code 新容器是「挂载 + 设备 + 镜像库 + 工具」全缺；lead 容器是「有挂载/GPU/PIL，但缺 ImageMagick/numpy」；写作容器是「有挂载/GPU，缺 EGL 库与 PIL/ImageMagick/numpy」。三者都必须走 §3 全清单，不能只看一项；尤其不要把 lead 容器能启动误当成 C4 能判。
 
 ## 附录 B：相关文件
 
