@@ -936,16 +936,24 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 			host_label_sample(g);
 			if (texmat_location >= 0) {
 				glGetUniformfv((GLuint)program, texmat_location, texmat);
-				if (!(texmat[0] == texmat[0])) {
-					static unsigned nan_said;
+			}
+			/*
+			 * Stage nineteen: the comparison form (x != x) never fired while the print showed nan,
+			 * so this reads the bits themselves -- a float that is a NaN has to look like one here.
+			 */
+			{
+				static unsigned bits_said;
 
-					if (nan_said < 3) {
-						nan_said++;
-						printf("glwire: texmat0 reads as NaN for programme %d location %d\n",
-						    (int)program, (int)texmat_location);
-						fflush(stdout);
-						host_dump_uniform_ring(texmat_location);
-					}
+				if (bits_said < 3) {
+					uint32_t bits[4];
+
+					bits_said++;
+					memcpy(bits, texmat, sizeof(bits));
+					printf("glwire: texmat0 bits %08x %08x %08x %08x location %d programme %d "
+					    "error %#x\n", bits[0], bits[1], bits[2], bits[3],
+					    (int)texmat_location, (int)program, glGetError());
+					fflush(stdout);
+					host_dump_uniform_ring(texmat_location);
 				}
 			}
 			if (matrix_location >= 0) {
