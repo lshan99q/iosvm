@@ -170,6 +170,24 @@ glwire: label state program 13 texmat0 nan nan nan 0.0000 ...
 
 **下一步（s19m，运行中）**：`GLWIRE_ATLAS_DUMP` 把这张纹理原样写出来看看到底是什么（图标？面板？文字层？）。
 
+### 15:48 的 s19m 收尾数据：NaN 是真的，图集也不是字形
+
+```
+glwire: texmat0 bits at the state line 7fffff80 7fffff80 7fffff80 00000000   (1090 次，全部)
+glwire: label state program 13 texmat0 nan nan nan 0.0000                    (同一批 draw)
+glwire: legacy texture 161x90 internal 0x1906 format 0x1906: taken natively
+glwire: atlas dump /tmp/s19m/atlas-187x90.bgra 187x90
+```
+
+- `0x7fffff80` 的指数位全 1、尾数非零，**它确实是一个 NaN**——所以状态行的 `nan` 不是打印错误，
+  早先那 3 次 `3f800000`（=1.0）是极早期的 draw，之后全部是 NaN。
+- **被采样纹理的 alpha 通道**（渲染出来看）是一团**模糊的圆角矩形**加底部一排小点——不是字形掩码。
+  也就是说，这些 tag 位置的 draw 采样的是「模糊背板/阴影」那类纹理，**不是文字图集**。
+- 结合「v 跨度 0、只看一行」：这些 pass 更像 CA 的**阴影/模糊 pass**，文字本身的 pass 还没被我们认出来。
+
+**下一步**：在宿主里按 `program` + 绑定的纹理尺寸/内容分类 label 相关的 draw（模糊 pass vs 文字 pass），
+先确认「文字 pass 是否真的存在」，再谈修哪一段。
+
 ### P1：backdrop 与文字可见性（1 天）
 
 1. **绕开 darken**：给宿主加一个 `GLWIRE_PROGRAM_SKIP=<program>`（跳过该 program 的 draw）或
