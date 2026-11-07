@@ -427,7 +427,7 @@ xb: s19p0-1 end=ui ui=...s ui_bytes=... guestframes=... hostframes=... MATCH=...
 
 | label | 时间（起–止） | end= | 截图字节 | label draw 非零（笔/最大/合计） | NaN→单位阵（日志条数，≤5） | 肉眼读出 App 名称数 | diffdump ≥95% | 结论 |
 |---|---|---:|---:|---|---:|---:|---|---|
-| **A1** `s19n-repro` | 2026-11-07 14:26:12–14:52:02Z | qemu-exited | 245,842 | 56 行（4 批×2 类=8 项；文字层 0）/ 1,218,000 / 63,406,544 | 5（prog13×3、prog15×2） | 0 | n/a（无 dump） | **FAIL（P0 未过；视觉里程碑复现）** |
+| **A1** `s19n-repro` | 2026-11-07 14:26:12–14:52:02Z | qemu-exited | 245,842 | 56 / 1,218,000 / 63,406,544（文字层 0） | 5（prog13×3、prog15×2） | 0 | n/a（无 dump） | **FAIL（P0 未过；视觉里程碑复现）** |
 | s19p0-1 | 2026-11-07 __:__–__:__ | ui |  | __ / __ / __ |  |  | __% (SAME/NOT) | PASS/FAIL |
 | s19p0-2 |  |  |  |  |  |  |  |  |
 | s19p0-3 |  |  |  |  |  |  |  |  |
@@ -435,6 +435,8 @@ xb: s19p0-1 end=ui ui=...s ui_bytes=... guestframes=... hostframes=... MATCH=...
 **结论写法**：`PASS`（该发 C1–C4 全过）/ `FAIL: <哪一条>`；不要写「基本通过」。
 **P0 总结**：三发里 ≥2 发 `PASS` → P0 通过；否则写清「差在哪一条、下一发改什么」。
 **A1 行**：`s19n-repro` 是基线复现，**不参与** P0 的「连续 3 发」计数；它的判读见 §4.4。
+**A1 非零口径**：表里保留**逐行 56 行**；exp 的「8 条」是按 **4 个 138x138 批次 × 2 类**归并的说法，不是另一组日志。
+另有 8 行 `label sample texture` 读数（221 / 636 / 912 / 1108 / 8526 / 12700 / 14466 / 15717），它们**不是 label draw**，不并入 56。
 
 ### 4.2 每发附带的元数据（贴在主表下面或单独一段）
 
@@ -471,7 +473,8 @@ diffdump:         within 8 = __% -> SAME/NOT；dump 行号 __ vs 首个非零 la
 
 ### 4.4 A1 实测与判读：`s19n-repro`（归档 `logs/s19n-repro/`）
 
-> 口径：本节所有数字只从 `/host/iosvm/logs/s19n-repro/` 的一组归档读出（`s19n-repro-guest.log`、`s19n-repro-host.log`、`s19n-repro-meta.txt`、`s19n-repro-shot.png`、`s19n-repro-last.png`、`s19n-repro-boot-measure.sh` 快照、`label/`）。**这些日志与截图都不进 git**；证据图若最终要放 `docs/demo/`，先只登记路径（建议 `docs/demo/s19n-repro-home-20261107.png`）与说明，等 lead 确认后再提交。
+> 口径：本节所有数字只从 `/host/iosvm/logs/s19n-repro/` 的一组归档读出（`s19n-repro-guest.log`、`s19n-repro-host.log`、`s19n-repro-meta.txt`、`s19n-repro-shot.png`、`s19n-repro-last.png`、`s19n-repro-boot-measure.sh` 快照、`label/`）。**这些日志与截图都不进 git**。
+> 证据图**不提交**：s19n 的「Se」图已经随 `cecbd2e` 入库，这张重复且不是 P0 通过证据；`docs/demo/s19n-repro-home-20261107.png` 只作为归档路径记录。
 
 **跑的是什么**
 
@@ -505,7 +508,8 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 | panic / SIGSEGV / usertrap | **0 / 0 / 0** | `xb` 收尾行 |
 | `texmat0 was a NaN` | **5 条**：programme 13 ×3、programme 15 ×2 | `s19n-repro-host.log` |
 | 文字层 label draw | 750x200 **435 条**、64x19 **585 条**、64x9 **445 条**，**全部 0 非零像素** | 同上 |
-| 非零 label draw | **56 行**（4 个 138x138 批次 × 2 类 = **8 项**），合计 63,406,544 像素：138x138 整块 4 行（每行 19,044），750x1624 全屏合成 52 行（最大 1,218,000） | 逐行统计；**都不是字形** |
+| 非零 label draw | **56 行**，合计 63,406,544 像素：4 行 138x138（每行 19,044）、4 行 750x1624（每行 1,216,592）、48 行 750x1624（每行 1,218,000） | 逐行统计；按 4 个 138x138 批次 × 2 类归并则为 exp 的「8 项」；**都不是字形** |
+| `label sample texture` | 8 行读数：221 / 636 / 912 / 1108 / 8526 / 12700 / 14466 / 15717 | **不是 label draw**，不并入上面的 56 |
 | `diffdump` | `n/a` | 本发 `HOST_ENV` 没有 `GLWIRE_DUMP`，没有同帧 panel/picture pair |
 | 肉眼 App 名称 | **0 个** | 只有底部「Se」两个灰色字母，见下 |
 
@@ -520,9 +524,9 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 4. **机械判据与主线一致**：文字层三类 label draw 全 0；56 条非零全部是 138x138 整块与 750x1624 全屏合成，
    不是字形。也就是说，字形能出现（`texmat0` 置单位阵后），但**绝大多数文字 draw 仍然被几何/裁剪挡掉**。
 5. **宿主 `attrib 3` 的 20 行是早期 draw，不是 UI 时刻。** `host_attrib_state()` 只打印前 20 次调用；
-   归档里这 20 行落在 frame 8–17（前 12 行是 `4.7969 / nan / 1.19e29` 一类垃圾值，后 8 行已是
-   `0.1250..0.5000`）。**它们不能代表 UI 时刻的 tc0**；UI 时刻的 tc0 由 s19o 的 `GLWIRE_TEXT_DRAW_LINE`
-   回答，本文不预设结论。
+   归档里这 20 行落在 frame 8–17，**前 12 行是 `4.7969 / nan / 1.19e29` 一类垃圾值，后 8 行已是
+   `0.1250..0.5000`，均早于 UI**。**它们不能代表 UI 时刻的 tc0**；UI 时刻的 tc0 由 s19o 的
+   `GLWIRE_TEXT_DRAW_LINE` 回答，本文不预设结论。
 
 ---
 
