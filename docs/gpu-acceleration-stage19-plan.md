@@ -190,3 +190,25 @@ label draw 本来就填了非 texcoord 的数据。
 
 **恢复顺序建议**：先确认 GPU 空闲 → `tools/glwire` 重新 `make host_glwire`（当前二进制已是最新）→
 `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 ... boot-measure.sh s19h .../root.apfs 1500`。
+
+### 八点一、补充：s19g 其实跑到了界面（10:03 取出数据）
+
+停掉之前那一发（s19g）已经到过界面：**1555 帧、31 条 emit、30 个 tile dump、截图 235,791 B**。控制台里最有用的几条：
+
+```
+hakios-remote: emit 500  attrib 3 buffer 0 stride 48 raw a0ffff3d 5f00003e float 0.1250 0.1250
+hakios-remote: emit 1000 attrib 3 buffer 0 stride 48 raw d900003e defeff3d float 0.1250 0.1250
+hakios-remote: emit 1500 attrib 3 buffer 0 stride 48 raw 00000000 00005840 float 0.0000 3.3750
+hakios-remote: emit 2000 attrib 3 buffer 0 ... float 0.1250 0.1250
+```
+
+**读法**：
+1. **`buffer` 在界面阶段也全是 0** —— VBO 假设彻底否掉（不是偏移当地址）。
+2. 很多 draw 的 attrib 3 第一个顶点是**合法的 `0.1250 0.1250`**（原始字节 `a0ffff3d` 就是 0.125 的 float）。
+   也就是说客人机这一侧的数组内容**不总是垃圾**；宿主看到的 `0/4.7969`、`0/nan`、`6.1e28/0` 至少有一部分是
+   **别的 draw**（宿主的属性打印只在 glyph draw 上、上限 20 行；两条线不一定对的是同一笔）。
+3. 仍有 `0.0000 3.3750` 这类异常组合（多出现在 `(0.0, 3.375)`），下一发要**把宿主与客人机的打印按同一笔 draw 对齐**
+   （例如都带 `emit_count` / draw 序号），才能说「同一笔的属性到底是不是垃圾」。
+
+**下一发（恢复后第一件事）**：把 `GLWIRE_TILE_DUMP` 的 dump 与 guest 的 emit 行用同一个计数器关联，判据：
+同一笔 label draw 上，客人机读到的 attrib 3 与宿主收到的 attrib 3 是否一致。
