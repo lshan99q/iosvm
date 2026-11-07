@@ -427,12 +427,14 @@ xb: s19p0-1 end=ui ui=...s ui_bytes=... guestframes=... hostframes=... MATCH=...
 
 | label | 时间（起–止） | end= | 截图字节 | label draw 非零（笔/最大/合计） | NaN→单位阵（日志条数，≤5） | 肉眼读出 App 名称数 | diffdump ≥95% | 结论 |
 |---|---|---:|---:|---|---:|---:|---|---|
+| **A1** `s19n-repro` | 2026-11-07 14:26:12–14:52:02Z | qemu-exited | 245,842 | 56 行（4 批×2 类=8 项；文字层 0）/ 1,218,000 / 63,406,544 | 5（prog13×3、prog15×2） | 0 | n/a（无 dump） | **FAIL（P0 未过；视觉里程碑复现）** |
 | s19p0-1 | 2026-11-07 __:__–__:__ | ui |  | __ / __ / __ |  |  | __% (SAME/NOT) | PASS/FAIL |
 | s19p0-2 |  |  |  |  |  |  |  |  |
 | s19p0-3 |  |  |  |  |  |  |  |  |
 
 **结论写法**：`PASS`（该发 C1–C4 全过）/ `FAIL: <哪一条>`；不要写「基本通过」。
 **P0 总结**：三发里 ≥2 发 `PASS` → P0 通过；否则写清「差在哪一条、下一发改什么」。
+**A1 行**：`s19n-repro` 是基线复现，**不参与** P0 的「连续 3 发」计数；它的判读见 §4.4。
 
 ### 4.2 每发附带的元数据（贴在主表下面或单独一段）
 
@@ -466,6 +468,61 @@ diffdump:         within 8 = __% -> SAME/NOT；dump 行号 __ vs 首个非零 la
 | diffdump 报 `NOT the same frame` | 行号对比（§2.4）；panel/picture 是否同帧 | dump 太早就调大 `GLWIRE_DUMP_AT` 重跑；不要用不同发的图拼 |
 | `make` 报 `Text file busy` | `ps` 里的 qemu | 先杀 qemu 再 `make`；否则跑的是旧二进制（`s19j` 教训） |
 | `draw#` 只有 20000 条 / dump 后没有 `draw#` | `grep -c '^glwire: draw#'`、`wrote` 的行号 | 该发逐笔对照记「不可用」；label 计数仍有效，下一发换更早的取样窗口 |
+
+### 4.4 A1 实测与判读：`s19n-repro`（归档 `logs/s19n-repro/`）
+
+> 口径：本节所有数字只从 `/host/iosvm/logs/s19n-repro/` 的一组归档读出（`s19n-repro-guest.log`、`s19n-repro-host.log`、`s19n-repro-meta.txt`、`s19n-repro-shot.png`、`s19n-repro-last.png`、`s19n-repro-boot-measure.sh` 快照、`label/`）。**这些日志与截图都不进 git**；证据图若最终要放 `docs/demo/`，先只登记路径（建议 `docs/demo/s19n-repro-home-20261107.png`）与说明，等 lead 确认后再提交。
+
+**跑的是什么**
+
+- label：`s19n-repro`；时间：**2026-11-07 14:26:12Z–14:52:02Z**（`xb` 收尾行）。
+- 镜像：`root.apfs` 2026-11-07 05:18:12Z，5,902,336 B。
+- 宿主二进制：`host_glwire` 2026-11-07 07:59:05Z，105,112 B，`build marker uniform-ring-v2`。
+- 容器特例（**都不在仓库里**）：
+  - `LD_LIBRARY_PATH=/tmp/glvnd/usr/lib/x86_64-linux-gnu`（GLVND 从 `/tmp` 取，仓库不带）；
+  - UEFI 用 `$KERNEL/qemu/efi64.fd`（md5 `d105af9c…`）与 `$KERNEL/qemu/vars.fd`（本次 md5 `d90bea1f…`）；
+    第一次没给固件时直接失败：`run.sh: no UEFI firmware found ...; set QEMU_EFI and QEMU_VARS`。
+- 归档快照脚本 md5：`dfb778bbf30749e6020f030381573f7c`；它已支持 `IOSVM`/`GLWIRE` 覆盖。复原命令：
+
+```sh
+export LD_LIBRARY_PATH=/tmp/glvnd/usr/lib/x86_64-linux-gnu
+export QEMU_EFI="$KERNEL/qemu/efi64.fd" QEMU_VARS="$KERNEL/qemu/vars.fd"
+cd "$REPO"
+ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 \
+HOST_ENV="LD_LIBRARY_PATH=/tmp/glvnd/usr/lib/x86_64-linux-gnu GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19n/label GLWIRE_DRAW_LOG=1" \
+IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
+tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
+```
+
+**归档数字**
+
+| 项 | 值 | 出处 / 读法 |
+|---|---|---|
+| `end=` | `qemu-exited` | `xb: s19n-repro end=qemu-exited ...` |
+| `ui=` / `ui_bytes=` | `0s` / `0` | 截图 245,842 B < `MINSHOT=300000`，所以没被计为界面 |
+| 最大截图 | **245,842 B**，1125x2436 | `s19n-repro-shot.png` |
+| 宿主帧 | **7,913** | `hostframes=7913` |
+| panic / SIGSEGV / usertrap | **0 / 0 / 0** | `xb` 收尾行 |
+| `texmat0 was a NaN` | **5 条**：programme 13 ×3、programme 15 ×2 | `s19n-repro-host.log` |
+| 文字层 label draw | 750x200 **435 条**、64x19 **585 条**、64x9 **445 条**，**全部 0 非零像素** | 同上 |
+| 非零 label draw | **56 行**（4 个 138x138 批次 × 2 类 = **8 项**），合计 63,406,544 像素：138x138 整块 4 行（每行 19,044），750x1624 全屏合成 52 行（最大 1,218,000） | 逐行统计；**都不是字形** |
+| `diffdump` | `n/a` | 本发 `HOST_ENV` 没有 `GLWIRE_DUMP`，没有同帧 panel/picture pair |
+| 肉眼 App 名称 | **0 个** | 只有底部「Se」两个灰色字母，见下 |
+
+**判读（必须照这个口径写）**
+
+1. **`end=qemu-exited` 不是崩溃，是 1500 s 到点。** 日志里紧挨着的是
+   `qemu-system-aarch64: terminating on signal 15 from pid 3247 (timeout)`；`panic=0`、`SIGSEGV=0`、`usertrap=0`。
+2. **`ui=0` 不是没到界面，是最大截图 245,842 B 小于 300 KB 的门槛**，所以 `ui_at` 没被置位、`ui_bytes=0`。
+   截图本身有内容：顶部红条的白字完整可读（`rdar:…`），底部「Search」位置能辨出灰色「Se」。
+3. **P0 不通过，A1 只算「视觉里程碑复现」。** 没有 ≥5 个可读 App 名称、截图 <300 KB、没有同帧 diff；
+   这三条都不满足，不能因为「有 Se」就写成 P0 通过。
+4. **机械判据与主线一致**：文字层三类 label draw 全 0；56 条非零全部是 138x138 整块与 750x1624 全屏合成，
+   不是字形。也就是说，字形能出现（`texmat0` 置单位阵后），但**绝大多数文字 draw 仍然被几何/裁剪挡掉**。
+5. **宿主 `attrib 3` 的 20 行是早期 draw，不是 UI 时刻。** `host_attrib_state()` 只打印前 20 次调用；
+   归档里这 20 行落在 frame 8–17（前 12 行是 `4.7969 / nan / 1.19e29` 一类垃圾值，后 8 行已是
+   `0.1250..0.5000`）。**它们不能代表 UI 时刻的 tc0**；UI 时刻的 tc0 由 s19o 的 `GLWIRE_TEXT_DRAW_LINE`
+   回答，本文不预设结论。
 
 ---
 
