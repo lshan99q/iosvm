@@ -165,3 +165,28 @@ label draw 本来就填了非 texcoord 的数据。
 - **P1 的「绕开 darken」大概率立刻见文字**（红条已经证明标签层在画），风险是文字颜色/alpha 与背景相同。
 - **P2 要重建 system.apfs**，可能顺带改变启动时间与内存布局，四格表的口径要记清楚。
 - **P3 跨进程**，时间盒到期就收结论，不硬做。
+
+---
+
+## 八、暂停记录（2026-11-07 09:57）
+
+**主人要求暂停：其他任务要用显卡。** 已经做的收尾：
+
+- `qemu-system-aarch64` 与 `host_glwire` 全部结束；`nvidia-smi` 显示 **0% / 0 MiB**，GPU 已空出。
+- 为实验把 Windows 虚拟机限到的 `CPUQuota=200%` **已清除**（`cpu.max` 回到 `max 100000`），虚拟机仍在运行。
+- 代码与文档全部提交并推到 GitHub main（最后一个提交 `e15e96f`）。
+
+**恢复时要接的位置**：
+
+| 项 | 状态 / 位置 |
+|---|---|
+| 启动配方 | `QEMU_SMP=1` + `NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500`（今天的启动要 11–15 分钟才到第一次 draw） |
+| 客人机镜像 | `userland/root.apfs` = 带**安全版**周期诊断（`remote_emit_count % 500` 打 attrib 3 的 buffer/stride/前 8 字节；只读客户端数组） |
+| 备用镜像 | `/tmp/root.apfs.s19a`（已知可跑、无指针读取）、`/tmp/root.apfs.stage18-good` |
+| 宿主探针 | `GLWIRE_TILE_DUMP[_FROM]`、`GLWIRE_DARKEN_OFF`、`GLWIRE_TEXMAT_FROM_ATTRIB`、`GLWIRE_LABEL_DUMP`（现在会打 `texmatD` 与 unit1 纹理） |
+| 已确认的结论 | 红条 = 暗化项铺的背板；字形采样是常数（alpha 恒 4/255）；texmat 的 v 跨度是 0；顶点颜色正常 |
+| 下一步 | 跑一发 `s19g` 的替代：确认 UI 时刻 attrib 3 的 `buffer` 是否为 0——若是 0 且字节仍是半浮点样的垃圾，就在客人机侧查 `glVertexAttribPointer` 的录制；若不为 0，则 wire 需要 VBO 影子 |
+| 未完成的实验 | s19f/s19g 都在界面之前被脚本或手动停掉，没有拿到 UI 时刻的 emit 行 |
+
+**恢复顺序建议**：先确认 GPU 空闲 → `tools/glwire` 重新 `make host_glwire`（当前二进制已是最新）→
+`ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 ... boot-measure.sh s19h .../root.apfs 1500`。
