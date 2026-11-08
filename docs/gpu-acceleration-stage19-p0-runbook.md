@@ -1099,22 +1099,81 @@ P1c 已做（见 §4.13）：**点带确实烘在 glyph tile 的 alpha 里**（4
 
 code 加 **`GLWIRE_GLYPH_TRIM=<n>`**（默认关闭，只对 GL_ALPHA 42/90 高纹理的**末尾 n 行清零**）。**P1d** 用 `TRIM=6` 验证：点带消失，且 descender（如 `p` 的降部）不被削。P1d 结果出来前，P1 保持「进行中」。
 
-**P1d 预留结论节（`GLWIRE_GLYPH_TRIM=6`，待填）**
+**P1d 结果（`GLWIRE_GLYPH_TRIM=6`，已跑）**
 
-> P1d 尚未运行；本节只留口径与表，不预填结论。
+P1d 已运行，trim 执行但**清错端**，band 3499→6246；完整数据与判读见 §4.14。P1d **不计入 P1 修复**。
 
-| 项 | 待填值 |
+### 4.14 s19o-p1d 实测：`GLYPH_TRIM=6` 清错端，P1 仍未修复
+
+> 归档：`/host/iosvm/logs/s19o-p1d/`（`report.md`、`bands.txt`、`report/cmp_*.png`、`report/desc_*.png`、四张 dump、日志、截图）。**这些文件都不进 git**。
+> 这是 **P1 诊断发**；P1 仍未修复。
+
+**口径**
+
+| 项 | 值 |
 |---|---|
-| label / 时间 | `s19o-p1d` / __:__–__:__ |
-| 口径 | `XCMD=glwire_local=1` + `GLWIRE_NO_PANEL=1` + `GLWIRE_ATLAS_DUMP=<prefix>` + **`GLWIRE_GLYPH_TRIM=6`** |
-| atlas 数 | __ / 8（101x42、104x42、139x42、155x42、149x90、152x90、187x90、203x90） |
-| 42 高 tile 底部 1/2/6 行 nonblack | __ / __ / __（对照 P1c 101x42：30/60/180） |
-| 90 高 tile 背板下缘外点线 | 有 / 无 |
-| 点带是否消失 | 是 / 否 |
-| descender（p/g/y）是否被削 | 否 / 是 |
-| imgdiff vs P1c | __% within / __% different |
-| 判读 | __ |
-| 是否计入 P1 | 待定；P1 当前**未修复**（只有点带消失且 descender 完好才可作候选） |
+| label / 时间 | `s19o-p1d` / 2026-11-08 10:52:40Z–11:09:31Z |
+| 口径 | `XCMD=glwire_local=1`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_GLYPH_TRIM=6 GLWIRE_DUMP=/tmp/s19o-p1d/f GLWIRE_DUMP_AT=900 GLWIRE_DUMP_PAIR=1"`（不 skip、不 sanitize、无 ATLAS/TEXT） |
+| `end=` | `end=ui`：`ui=690s`，`ui_bytes=313488`；最大截图 **331,028 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **1,160** 帧 |
+
+**trim 日志**
+
+`grep -c 'glyph trim'` = **8**（打印上限），全部 `rows 6`：
+
+```text
+161x90  113x42  184x90  136x42  144x90  96x42  149x90  101x42
+```
+
+尺寸与 P1c 的 glyph tile 同族（42/90 高）；说明 trim 确实执行，但执行位置不对。
+
+**14 标签 band（quad 底部 10 px，ref=v9）**
+
+| 标签 | v9 (nb/32/64) | P1d | 变化 |
+|---|---|---|---|
+| Weather | 719/371/233 | 745/470/374 | +3.6%（更高的竖条） |
+| FaceTime | 282/125/60 | 242/83/37 | -14% |
+| Calendar | 494/279/142 | 306/195/116 | -38% |
+| Photos | 539/247/147 | 294/128/76 | -45% |
+| Mail | 424/253/135 | 460/289/219 | +8.5% |
+| Notes | 361/216/111 | **993/644/438** | **+175%** |
+| Reminders | 163/90/45 | 62/20/4 | -62% |
+| TV | 0/0/0 | 0/0/0 | — |
+| Podcasts | 131/72/37 | 95/25/5 | -27% |
+| Health | 343/245/144 | **1498/1421/922** | **+337%** |
+| Wallet | 43/2/0 | **1551/461/0** | 大幅增加（竖条拉长） |
+| App Store / Maps / Settings | 0/0/0（此刻未显示） | 0/0/0 | — |
+| **合计** | **3499/1900/1054** | **6246/3736/2191** | **178.5% / 196.6% / 207.9%** |
+
+- 目标「显著低于 3499」未达成，反而升到 **6246（178.5%）**。
+- 视觉：v9 的断续碎点 → P1d 变成**更高的规则竖条**（Weather/FaceTime/Photos 以及 Notes/Health/Wallet 都出现更规则的竖条；其中 Notes/Health/Wallet 数值增幅最大，见 `report/cmp_*.png`）。
+- 部分标签（FaceTime/Calendar/Photos/Reminders/Podcasts）确实下降，说明 trim 清掉了一些行，但整体被 Notes/Health/Wallet 的竖条拉高——**不是全局清理**。
+
+**descender 专项（没有被削）**
+
+| 标签 | v9 ink (nb/>32/>64) | P1d ink | 结论 |
+|---|---|---|---|
+| Photos | 1968/1514/1329 | 1968/1514/1329 | 完全不变 |
+| Podcasts | 2628/2082/1783 | 2628/2082/1783 | 完全不变 |
+
+→ `g/p/y` 的降部没有被削，文字本体完整；App Store/Maps/Settings 此刻未上屏，无法比。
+
+**dump / panel（非 P1 判据，顺带记录）**
+
+- `f`/`f-n1` 四件齐全；`diffdump f-n1 --tolerance 8` = **99.98% SAME**（missing 0、extra 0、differing 191/0.02%）。
+- panel 真实：11,769 色、pure green 0、f 与 f-n1 md5 不同；cross 100.00%。
+
+**判读（重要）**
+
+- **`GLWIRE_GLYPH_TRIM=6` 按现状不是修复**：合计 band 反而 +78%，点带变成更高的竖条；文字/descender 完好。
+- 当前实现清的是**上传缓冲的「最后 n 行」**（`names_glyph_trim` 对 `y=h-n..h-1` 置零）。但 P1c 的 `glReadPixels` dump 证明 **raw 文件序 = 屏幕正立，点带在文件末尾**；如果上传缓冲行序与 glReadPixels 相反（GL 自底向上 vs guest 自顶向下），「最后 6 行」清到的就是**视觉顶部**（42 高 tile 顶部本来空白；90 高 tile 清到背板顶边）——既没清掉点带，又改变了背板合成，解释了「竖条变大」。
+- 因此**大概率是清错端**，不是「trim 无效」；P1 仍未修复，不要把本条写成修复。
+
+**下一步**
+
+1. code 复核上传缓冲行序与 P1c dump 的对应关系（建议 trim 前后各做一次 ATLAS_DUMP，或打印被清第一/最后一行的指纹）。
+2. 增加 **`GLWIRE_GLYPH_TRIM_FROM=start|end`**（或等价参数），明确清「视觉底部 6–8 行」而不是固定「缓冲最后 n 行」；注意 90 高背板 tile 的点线在背板下缘之外，行数可能不同。
+3. **P1e** 用 `TRIM_FROM=end`（或修正后的 TRIM）验证点带消失且 descender 不被削；P1e 数据前 P1 保持「进行中」。
 
 ---
 
@@ -1192,6 +1251,8 @@ NaN->I=<条> diff=<百分比/SAME|NOT> names=<个数: ...> => <PASS|FAIL: 原因
 ```text
 P0: <2/3 或 3/3> PASS；阻塞：<几何/scissor 的哪一处>；下一发：<具体改动或实验>
 ```
+
+**P4 四格表**：`tools/glwire/harness/four-cell.sh` 是 **dry-run 骨架**，镜像由外部构建，未跑 QEMU；不要把它 `--dry-run` 读旧日志算出的表格当成一次实测四格表。
 
 ## 七、P2 壁纸重建配方（预置，未执行）
 

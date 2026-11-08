@@ -8,6 +8,14 @@
 backboardd。两天内最稳的第一步不是跨进程管道，而是 **boot-arg 指定 surface ID + backboardd
 轮询拉面**；XPC/共享内存是第二步。
 
+## 0. 与阶段计划 P3 的一致性（审阅）
+
+- **时间盒**：阶段计划 P3 是 2 天；本设计的 D1-1/D1-2/D2-1/D2-2 也是 2 天。一致。
+- **判据**：阶段计划要求 `312x202`/`184x124` 以纹理进宿主，否则交付「拉面」最小实现；本设计 D1-2 的 host 日志判据与 §7 的结论口径与此一致。
+- **三种结论**：阶段计划要求时间盒到期只允许「可行 / 不可行 / 需要更多信息」；本设计 §5 的三种结论与判据逐条对应。一致。
+- **分工**：SpringBoard 负责 CALayer 树与 `{id,w,h,bpr,format,rect}` 采集；backboardd 负责 `IOSurfaceLookup` + `eagl_remote_upload`。阶段计划没有把这条写明，本设计按 stage 17 的实测把它固定下来。
+- **方法差异（有意为之，不是矛盾）**：阶段计划 P3 最初把 `CAImageQueueRegisterIOSurfaceBuffer` 的 C 钩子 / XPC 当第一步；stage 11/12 已实测 C 钩子 0 条 create/register、GOT 版本到不了 UI。本设计因此改为 **boot-arg 固定 ID + backboardd 轮询先行**，共享内存 + Darwin notification 次之，XPC 不推荐；**判据与时间盒不变**。若有人想按旧计划重试 C 钩子，先读 §1.2 的负结果。
+
 ## 1. 已知事实与已被否掉的路径
 
 ### 1.1 像素从哪来
