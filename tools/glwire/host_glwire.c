@@ -158,7 +158,8 @@ dump_once(struct client *client, const unsigned char *picture, int width, int he
 	/* The frame after the one dumped: the guest's panel of it beside the host's picture of it. */
 	if (dumped && !paired && prefix != NULL && pair != NULL && strtoul(pair, NULL, 10) != 0) {
 		paired = 1;
-		if (client->names.panel != NULL) {
+		if (client->names.panel != NULL && client->names.panel_width == width &&
+	    client->names.panel_height == height) {
 			snprintf(path, sizeof(path), "%s-n1-panel-%dx%d.rgba", prefix, width, height);
 			write_pixels(path, client->names.panel, (size_t)width * height * 4);
 		}
@@ -176,7 +177,8 @@ dump_once(struct client *client, const unsigned char *picture, int width, int he
 		return;
 	}
 	dumped = 1;
-	if (client->names.panel != NULL) {
+	if (client->names.panel != NULL && client->names.panel_width == width &&
+	    client->names.panel_height == height) {
 		snprintf(path, sizeof(path), "%s-panel-%dx%d.rgba", prefix, width, height);
 		write_pixels(path, client->names.panel, (size_t)width * height * 4);
 	}

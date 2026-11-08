@@ -49,7 +49,7 @@ struct glstate {
 	uint32_t current_program;       /* the guest's, for the uniform-location key */
 	GLuint current_host_program;
 	struct attrib_state attribs[16];
-	unsigned char *panel;           /* the last 1125x2436 BGRA upload, packed to 4500 */
+	unsigned char *panel;           /* the last full-panel BGRA upload (1125x2436 or 750x1624), packed */
 	int panel_width, panel_height;
 	/* The framebuffer the stream bound last, and the one it last drew into: the guest reads its
 	 * picture back from the texture that was drawn into, and after the stream has ended this side
@@ -330,9 +330,12 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 				memcpy(packed + (size_t)y * row, (const unsigned char *)data + (size_t)y * row_bytes, row);
 			}
 			/* eagl.c's composed panel is texture 0xFFFF0001; any full-panel upload is one too.
-			 * Keeping it at its real size is what lets the host draw the panel the guest made,
-			 * and what the acceptance check compares against. */
-			if (guest == 0xFFFF0001u || (width == 1125 && height == 2436)) {
+			 * Both panel sizes have been measured: 1125x2436 on the older boot and 750x1624 on
+			 * the current one (textures 1/4/7/10), and with only the first the host never had a
+			 * panel to draw or to compare against.  Keeping it at its real size is what lets
+			 * the host draw the panel the guest made and the acceptance check compare them. */
+			if (guest == 0xFFFF0001u || (width == 1125 && height == 2436) ||
+			    (width == 750 && height == 1624)) {
 				free(g->panel);
 				g->panel = malloc((size_t)row * (size_t)height);
 				if (g->panel != NULL) {
