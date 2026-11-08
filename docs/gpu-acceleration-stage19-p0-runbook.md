@@ -165,27 +165,38 @@ tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 **运行时长预期**：界面在 10–15 分钟到；`UI_GRACE=300` 后结束，通常落在 900–1300 s。
 每发之间留冷却，确认没有残留 qemu 再开下一发；连续跑时宿主 I/O 会拖慢客人机。
 
-### 2.4 验收发：再加同帧 dump
+### 2.4 C4 验收发：local composition + no-panel replay + 同帧 dump
 
-P0 的第三条判据（`diffdump --tolerance 8`）要求同一发的 panel 与 picture。在基线命令的 `HOST_ENV`
-里加上 dump 前缀和取样时刻：
+> **⚠ C4 的配方前提（2026-11-08 v6 教训）**：`diffdump` 只有在 **guest 本地合成**（`XCMD="glwire_local=1"`）且 host **`GLWIRE_NO_PANEL=1` replay** 时才有意义。缺任一条，panel 可能不是每帧呈现面：
+> - 没有 `glwire_local=1`：guest 不发 `0xFFFF0001` panel，host 抓到的 750x1624 上传可能是 boot 期 mask（v6 就是黑+纯绿 1/4 块），diff 是假 NOT；
+> - 没有 `GLWIRE_NO_PANEL=1`：host 直接把 guest 上传的 panel 贴回去，`picture == panel`，diff 自证，等于没测 replay。
+
+在 C4 验收命令里同时加 `XCMD="glwire_local=1"` 与 `HOST_ENV` 里的 `GLWIRE_NO_PANEL=1`、`GLWIRE_DUMP_PAIR=1`：
 
 ```sh
 cd "$REPO"
 mkdir -p /tmp/s19p0-1
+XCMD="glwire_local=1" \
 ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 \
-HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-1/label GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=/tmp/s19p0-1/f GLWIRE_DUMP_AT=180" \
+HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-1/label GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=/tmp/s19p0-1/f GLWIRE_DUMP_AT=800 GLWIRE_DUMP_PAIR=1" \
 IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
 tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 ```
 
-- 四个探针**可以共存**：同一条 `HOST_ENV` 里用空格分隔即可，上面的命令已经这样写。
+- **`XCMD="glwire_local=1"`**：guest 本地也合成。guest log 应出现
+  `drawn here as well (glwire_local)`；host 每帧应出现 `upload texture 4294901761 ... 750x1624`
+  （`0xFFFF0001` = guest 的合成面板）。没有这两条 → 不是 local composition，C4 配方无效。
+- **`GLWIRE_NO_PANEL=1`**：host 不贴 guest panel，改为 replay 录制流；host 启动横幅应含
+  `(no panel: the recorded calls are replayed instead)`。不设它，`picture` 与 `panel` 是同一份，diff 没有意义。
+- **`GLWIRE_DUMP_PAIR=1`**：除 `f-panel`/`f-picture` 外再写 `f-n1-panel`/`f-n1-picture`；
+  `diffdump` **用 `f-n1`**（panel/picture 差一帧的既有口径）。
+- 四个探针**可以共存**：同一条 `HOST_ENV` 里空格分隔即可，上面的命令已经这样写。
   `GLWIRE_LABEL_DUMP` 负责 `label draw` 行，`GLWIRE_DRAW_LOG` 负责逐笔 `draw#`，`GLWIRE_DUMP` 负责同帧 pair。
-- `GLWIRE_DUMP=<prefix>`：写一次 `<prefix>-panel-WxH.rgba` 与 `<prefix>-picture-WxH.bgra`；
-  前缀目录必须先存在（`host_glwire` 只 `fopen`，不建目录），所以上面先 `mkdir -p`；
-- `GLWIRE_DUMP_AT=180`：**第一帧之后 180 s** 取这一对。这样通常已经过了「Se 刚出现」的时刻，
-  又不会拖到 1500 s 上限之外；界面很快时也不会取到纯黑的首帧。
-- 如果这一对是黑的/明显不到界面：把 `GLWIRE_DUMP_AT` 加大（例如 `480`）重跑一发，并在证据表里记下实际值。
+- `GLWIRE_DUMP=<prefix>`：写 `<prefix>-panel-WxH.rgba` 与 `<prefix>-picture-WxH.bgra`；
+  前缀目录必须先存在（`host_glwire` 只 `fopen`，不建目录），所以上面先 `mkdir -p`。
+- `GLWIRE_DUMP_AT=800`：**第一帧之后 800 s** 取这一对（v6 实测 UI 在 600 s，800 s 已在 UI 之后）。
+  若本发 UI 晚于 800 s，按上一发 `xb: ui at` 调大，并保证在 `UI_GRACE` 结束前完成 dump。
+- 如果这一对是黑的/明显不到界面：先检查 `glwire_local`/`NO_PANEL` 是否真的生效，不要急着调大 AT。
 - 判定 dump 是否发生在字形之后：看宿主日志里 `wrote ...-picture` 的行号是否大于第一条
   `nonzero pixels`（非零 label draw）的行号：
 
@@ -222,8 +233,9 @@ for n in 1 2 3; do
   echo "== s19p0-$n $(date -Is)"
   ps -eo pid,comm | grep -E 'qemu-system|host_glwire' && { echo "leftover; stop"; break; }
   mkdir -p /tmp/s19p0-${n}
+  XCMD="glwire_local=1" \
   ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1300 MINFRAMES=99999 MAXSECS=1500 UI_GRACE=300 \
-  HOST_ENV="GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-${n}/label GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=/tmp/s19p0-${n}/f GLWIRE_DUMP_AT=180" \
+  HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_TEXMAT_NAN_TO_IDENTITY=1 GLWIRE_LABEL_DUMP=/tmp/s19p0-${n}/label GLWIRE_DRAW_LOG=1 GLWIRE_DUMP=/tmp/s19p0-${n}/f GLWIRE_DUMP_AT=800 GLWIRE_DUMP_PAIR=1" \
   IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
   tools/glwire/harness/boot-measure.sh s19p0-${n} "$ROOT" 1500
   grep -E "^xb: s19p0-${n} end=" /tmp/s19p0-${n}.log
@@ -334,13 +346,39 @@ for n in 1 2 3; do stat -c '%s %n' /tmp/s19p0-$n-shot.png; done
 
 ### C4 同帧 `diffdump --tolerance 8` ≥95%
 
+> **⚠ 先看配方，再看百分比。** C4 必须是 **local composition + no-panel replay**：
+> `XCMD="glwire_local=1"` + `HOST_ENV` 里 `GLWIRE_NO_PANEL=1` + `GLWIRE_DUMP_PAIR=1`，用 `f-n1` 比较。
+> 没有 `glwire_local=1` 时 guest 不发 `0xFFFF0001` panel，host 可能把 boot 期的 750x1624 mask 当 panel；
+> 没有 `GLWIRE_NO_PANEL=1` 时 host 直接贴 guest panel，`picture == panel`，diff 自证。
+
 **怎么取数**
 
 ```sh
 cd "$REPO"
 n=1   # 依次改成 2、3
-ls -l /tmp/s19p0-${n}/f-panel-*.rgba /tmp/s19p0-${n}/f-picture-*.bgra
-python3 tools/glwire/harness/diffdump.py /tmp/s19p0-${n}/f \
+
+# 1) 四件必须齐；C4 用 f-n1
+ls -l /tmp/s19p0-${n}/f-n1-panel-*.rgba /tmp/s19p0-${n}/f-n1-picture-*.bgra
+
+# 2) panel 合理性：两帧 md5 应不同；相同先怀疑抓的是静态 mask
+md5sum /tmp/s19p0-${n}/f-panel-*.rgba /tmp/s19p0-${n}/f-n1-panel-*.rgba
+
+# 3) panel 不能是单一色，也不能是黑 + 纯绿 mask（v6 的假 NOT 就是这种）
+python3 - "$n" <<'PY'
+import collections, glob, sys
+n = sys.argv[1]
+path = glob.glob(f"/tmp/s19p0-{n}/f-n1-panel-*.rgba")[0]
+blob = open(path, "rb").read()
+pixels = collections.Counter(blob[i:i + 4] for i in range(0, len(blob), 4))
+print("distinct RGBA:", len(pixels))
+for pixel, count in pixels.most_common(3):
+    print(pixel.hex(), count)
+if len(pixels) <= 2:
+    print("SUSPECT: <=2 colours -- likely a mask, not a panel")
+PY
+
+# 4) 同帧比较（必须用 f-n1）
+python3 tools/glwire/harness/diffdump.py /tmp/s19p0-${n}/f-n1 \
   -o /tmp/s19p0-${n}/diff --tolerance 8
 ```
 
@@ -352,10 +390,19 @@ within 8 in every channel: <N>/<total> (<share>%) -> SAME FRAME / NOT the same f
 
 **通过标准**：
 
+- 配方前提成立：guest log 有 `drawn here as well (glwire_local)`；host 每帧有
+  `upload texture 4294901761 ... 750x1624`；启动横幅有 `(no panel: the recorded calls are replayed instead)`。
+- panel 合理：`f-panel` 与 `f-n1-panel` 的 md5 不同（静态画面除外，需另证）；不同时只有 2 种颜色、
+  或主色是黑 + 纯绿 `(0,255,0)` → 这是 mask，C4 直接记 `n/a`，**不报百分比**。
 - `share >= 95.00%` 且结论是 `SAME FRAME`；
-- dump 确实发生在界面/字形之后（§2.4 的行号检查）；
-- 3 发各算一次；**计入 P0 的那 2 发必须都 ≥95%**。缺 dump 的发记为 `n/a`，
+- 3 发各算一次；**计入 P0 的那 2 发必须都 ≥95%**。缺 dump / panel 不合理的发记 `n/a`，
   不能让另一发的 diff 顶替；若 3 发只有 1 发有有效 dump，P0 不通过。
+
+**v6 的教训（不要重复）**：2026-11-08 的 v6 在 **remote_only** 下只加了 `GLWIRE_NO_PANEL=1`，
+`f-panel`/`f-n1-panel` md5 完全相同、只有黑与纯绿两色（绿块正好 1/4 屏），`diffdump` 得到
+**49.12% NOT**——这是 **panel 源错导致的假 NOT**，不是 replay 画面问题：同一发的 `f-n1-picture`
+与 `s19o-v6-last.png` 在 tol 8 下 **95.89%**，说明 host replay 本身是可信的。
+v7 正在用上面的正确配方验证；**在 v7 结果出来前，不声称 C4 已过。**
 
 ### C5 辅助证据：label draw 非零计数
 
@@ -701,7 +748,7 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 - `GLWIRE_DUMP_PAIR=1` 只写出了 `f-picture-750x1624.bgra` 与 `f-n1-picture-750x1624.bgra`，**没有 `f-panel` / `f-n1-panel`**；`diffdump.py` 报 `need both ...-panel-*.rgba and ...-picture-*.bgra`，所以 C4 **n/a**。
 - 根因在宿主侧 `names.h:332`：只有 `guest == 0xFFFF0001` 或 **1125x2436** 时才把上传存进 `g->panel`；本发面板是 **750x1624**、纹理名 1/4/7/10，全日志 `1125x2436` 出现 0 次，`client->names.panel` 全程 NULL。**这是分辨率从 1125x2436 切到 750x1624 后 panel 落盘条件没跟着更新，不是 dump 太早。**
 - dump 行号本身合格：首个非零 draw 在日志第 54 行（frame 9 #28），PAIR 写在 9836 行（frame 2082），晚于字形且晚于 UI。**缺的只是 panel 文件。**
-- code 正在修 panel 条件；修好后重跑 **v6** 才能拿到 P0 C4。**不要把 n/a 写成 NOT，也不要写成 SAME。**
+- v6 已按 panel 条件重跑：四个文件都生成了，但 **remote_only 下 panel 抓到 boot 期黑+绿 mask**，`diffdump` 49.12% 是假 NOT（见 §二 C4 的 v6 教训）。正确配方是 **local composition + no-panel**，等 **v7** 验证；**不要把 n/a/假 NOT 写成 SAME。**
 
 **imgdiff：v5 vs A1（截图回归，不是 C4）**
 
@@ -723,8 +770,8 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 | 同帧 `diffdump --tolerance 8` ≥95% | ❌ **n/a** | panel 未落盘（`names.h` 条件过时），不是 SAME/NOT |
 | `end=ui` / 无 panic | ✅ | |
 
-- **v5 暂不能计入 P0 发次**：面板条件修好后重跑 v6，一次拿齐 panel/picture 才有 C4；P0 仍要按 §三 连跑 3 发、≥2 发过全部判据。
-- 下一步不是「验收」，是 **v6（panel 修复后的同帧 diffdump 验证）**。
+- **v5 暂不能计入 P0 发次**；v6 补了 panel 文件但 panel 源仍错，C4 仍是假 NOT。等 **v7（local composition + `GLWIRE_NO_PANEL=1`）** 按 §二 C4 的正确配方拿真 panel，再谈 P0 发次。
+- 下一步不是「验收」，是 **v7（正确 C4 配方下的同帧 diffdump 验证）**。
 
 ---
 
