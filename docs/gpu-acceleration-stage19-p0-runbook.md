@@ -994,9 +994,59 @@ P1b 已做（见 §4.11）：`TC0_SANITIZE=1` **没有消掉噪声带，反而�
 
 **下一步**
 
-1. exp 做**全标签 band 统计**：确认 skip 13 是全局有效，还是只有 Weather 这一条；再决定是修 prog13 的几何，还是另找来源。
+1. 全标签 band 统计已做（见 §4.12）：**skip13 不是全局修复，只是重分布**；第二来源疑在 prog15/glyph tile。下一步 P1c 用 `GLWIRE_ATLAS_DUMP` 查 glyph tile 底部残余行。
 2. widget 白像素判据按当前布局重锚（旧 875/1600 不能直接沿用；先确定新的框与基线）。
 3. P1 的 Search 完整性、标签颜色仍未收口；P1 继续保持「进行中」。
+
+### 4.12 P1 全标签 band 统计：skip13 只是重分布，第二来源疑在 glyph tile
+
+> 归档：`/host/iosvm/logs/s19o-p1-dots.md`（统计口径与结论）、`/host/iosvm/logs/s19o-p1-dots/`（`analysis*.txt`、`analyze_dots*.py`、`band_Weather.png`、`band_FaceTime.png`、`band_Photos.png` 等）。**这些文件都不进 git**。
+> 这是离线统计，不 boot、不改代码；**P1 仍未修复**。
+
+**口径**
+
+- 取 11 个可见标签的 prog15 `text draw` bbox（guest 750x1624 空间），截图坐标 = ×1.5。
+- **band = quad 底部 10 px**（文字下方、覆盖文字宽度）；每格记 `nonblack`、`bright>32`、`bright>64`（RGB 均值）。
+- 对比三张已归档截图：v9、P1a（skip13）、P1b（sanitize）。
+
+**合计（11 个标签）**
+
+| 发次 | nonblack | >32 | >64 | nonblack 相对 v9 |
+|---|---:|---:|---:|---:|
+| v9（基线） | **3499** | 1900 | 1054 | 100% |
+| P1a（skip13） | **3559** | 1679 | 886 | **101.7%** |
+| P1b（sanitize） | **1885** | 1091 | 713 | **53.9%** |
+
+**P1a 不是全局清理，而是重分布**：合计非黑像素反而 **+1.7%**，只有 >32/>64 降了约 12–16%。逐标签看：
+
+| 标签 | v9 | P1a (skip13) | P1b (sanitize) | P1a 相对 v9 |
+|---|---:|---:|---:|---:|
+| Weather | 719 | **24** | 741 | **-97%** |
+| FaceTime | 282 | **916** | 645 | **+225%** |
+| Calendar | 494 | **684** | 14 | **+38%** |
+| Photos | 539 | 590 | 143 | +9% |
+| Mail | 424 | **44** | 23 | **-90%** |
+| Notes | 361 | 354 | 0 | -2% |
+| Reminders | 163 | 181 | 116 | +11% |
+| TV | 0 | 0 | 0 | — |
+| Podcasts | 131 | **697** | 131 | **+432%** |
+| Health | 343 | **46** | 48 | **-87%** |
+| Wallet | 43 | 23 | 24 | -47% |
+
+- `band_Weather.png`：v9 碎点 → P1a **几乎干净** → P1b 规则竖线。
+- `band_FaceTime.png`：v9 一排 → P1a **更密更长** → P1b 仍有一排。
+- `band_Photos.png`：v9 点带 → P1a **更宽更密** → P1b 明显减少。
+
+**判读**
+
+- **skip13 不是全局修复**：它把点带从 Weather/Mail/Health 挪到 FaceTime/Calendar/Podcasts；prog13 在部分标签上是点带来源，在另一些标签上反而**遮住**了残留，去掉后别处暴露出来。
+- **点带还有第二个来源**，最可能是 **prog15 / glyph texture 自带的残余行**；prog13 的 backdrop/darken 只是调制可见度。
+- **P1b（tc0 sanitize）也不是修复**：合计压到 53.9%，但 Weather 719→741 且形态变成规则竖线；它改变的是 glyph 采样（tc0 归零→每列一个 texel），不是去掉残余行。
+- **P1 仍未修复**；不要把 skip13 或 sanitize 写成「已解决虚线」。
+
+**下一步：P1c 查 glyph tile**
+
+用 **`GLWIRE_ATLAS_DUMP`**（与 `GLWIRE_LABEL_DUMP` 解耦）dump **前 8 张 glyph tile**，检查 tile 底部是否有点状/残余行；若 tile 本身带残行，问题在 glyph texture 内容，不在 prog13 的几何。P1c 结果出来前，保持「P1 进行中」。
 
 ---
 
