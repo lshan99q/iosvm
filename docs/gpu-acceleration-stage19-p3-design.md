@@ -194,10 +194,16 @@ layer 树拿不到 contents 时才需要，且优先共享内存+Darwin notifica
   `{host texture, rect}`。
 - `GLWIRE_WIDGET=1` 时，replay 结束后、`glReadPixels` 前，`host_widgets_compose()` 把表里的
   每个 widget 以带 alpha 的纹理四边形画进即将读回的 panel/stand-in，并恢复 GL 状态。
-- 合成器是固定管线（`glPushAttrib` + 正交 NDC），MVP 假定无 transform；坐标按
-  `height - y - h` 做 y 翻转，纹理 `v=0` 对显示顶部。
-- 合成测试：用 map_test 的流插入一条合成 202（4×4 红 RGBA，rect 0,0,4,4），宿主中心像素
-  返回 `BGRA 0,0,255,255`；`e2e_test.py` 默认关闭仍 PASS。
+- 合成器是固定管线（`glPushAttrib`/`glPushClientAttrib` + 正交 NDC），MVP 假定无 transform；
+  坐标按 `height - y - h` 做 y 翻转，纹理 `v=0` 对显示顶部。合成前 `glUseProgram(0)`、关掉
+  client arrays，否则 replay 留下的 shader/vertex array 会让固定管线四边形画不出来。
+- 默认按 **premultiplied alpha**（CALayer/IOSurface 的约定）混合；`GLWIRE_WIDGET_BLEND=straight`
+  切回 `SRC_ALPHA`。矩形先裁到目标尺寸，纹理坐标按裁剪后的比例算；完全在目标外的 widget 跳过。
+- `rect.w/h <= 0` 表示 guest 把 widget 从屏上拿走：`host_widget_rect()` 从表里删掉它，日志
+  `widget texture %u removed`，不再用旧内容跨帧。
+- 表满（8 个）只打一次日志；合成日志带第一个 rect 和 alpha 模式。
+- 合成测试 `tools/glwire/widget_test.py`（需要 `map_test`，可 `--map-test PATH`）：full rect、
+  越界裁剪、zero-rect 删除三例都 PASS；`e2e_test.py` 默认关闭仍 PASS。
 
 **guest 侧是补丁草稿，未改树、未编译**：`/host/iosvm/logs/s19o-p3-guest-draft.patch`
 （`git apply --check` 通过；本容器没有 `xnu-clang`/iPhoneOS SDK，不能构建）。
@@ -214,7 +220,7 @@ layer 树拿不到 contents 时才需要，且优先共享内存+Darwin notifica
 
 **风险**：guest 补丁未编译/未 boot；ID 每 boot 可能变；`widget_rect` 手工；1 Hz 轮询会漏中间
 帧；LA08 的 2 字节/像素与 bpr padding 必须按 API；合成器只处理无 transform 的矩形；
-`widget_count` 跨帧保留，widget 消失时会留旧内容（MVP 已知）。exp 的最小验证是：重建
+`widget_count` 跨帧保留（guest 必须用 zero rect 显式删除，否则会留旧内容）。exp 的最小验证是：重建
 root.apfs → `XCMD="glwire_local=1 widget_surface=3,4 widget_rect=..."`、host
 `GLWIRE_WIDGET=1` → host log 出现 `widget upload`/`widget compose`，截图 widget 区域不再是
 白色占位；若 ID 变了，先用 P1c 的内核 `created surface` 行对表。

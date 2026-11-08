@@ -545,6 +545,7 @@ struct widget_rect {
 
 static struct widget_rect widgets[8];
 static unsigned widget_count;
+static unsigned widget_full_said;
 
 static void
 host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h)
@@ -552,7 +553,23 @@ host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, G
 	GLuint texture = names_texture(g, guest);
 	unsigned i;
 
-	if (texture == 0 || w <= 0 || h <= 0) {
+	if (texture == 0) {
+		return;
+	}
+	/* A zero or negative rectangle is the guest taking the widget off the screen.  Without it the
+	 * table would keep drawing the last surface after the layer went away. */
+	if (w <= 0 || h <= 0) {
+		for (i = 0; i < widget_count; i++) {
+			if (widgets[i].texture == texture) {
+				printf("glwire: widget texture %u removed (rect %dx%d)\n", (unsigned)texture,
+				    (int)w, (int)h);
+				fflush(stdout);
+				memmove(&widgets[i], &widgets[i + 1],
+				    (widget_count - i - 1) * sizeof(widgets[0]));
+				widget_count--;
+				return;
+			}
+		}
 		return;
 	}
 	for (i = 0; i < widget_count; i++) {
@@ -571,6 +588,10 @@ host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, G
 		widgets[widget_count].w = w;
 		widgets[widget_count].h = h;
 		widget_count++;
+	} else if (widget_full_said++ == 0) {
+		printf("glwire: widget table is full (%u), texture %u not composed\n",
+		    widget_count, (unsigned)texture);
+		fflush(stdout);
 	}
 }
 
@@ -580,7 +601,9 @@ static void
 host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 {
 	GLint previous_fbo = 0, previous_view[4] = { 0, 0, 0, 0 };
-	GLint previous_active = 0, previous_texture = 0;
+	GLint previous_active = 0, previous_texture = 0, previous_program = 0;
+	const char *blend = getenv("GLWIRE_WIDGET_BLEND");
+	int premultiplied = blend == NULL || strcmp(blend, "straight") != 0;
 	unsigned i;
 	static unsigned said;
 
@@ -592,8 +615,17 @@ host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 	glGetIntegerv(GL_VIEWPORT, previous_view);
 	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active);
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+	glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
 
 	glPushAttrib(GL_ALL_ATTRIB_BITS);
+	/* The replay may stop with a shader and client arrays current; fixed-function immediate mode
+	 * then draws nothing (or reads the arrays).  Put the fixed pipeline back for the quads. */
+	glUseProgram(0);
+	glPushClientAttrib(GL_CLIENT_ALL_ATTRIB_BITS);
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_NORMAL_ARRAY);
 	glMatrixMode(GL_PROJECTION);
 	glPushMatrix();
 	glLoadIdentity();
@@ -605,38 +637,64 @@ host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 	glDisable(GL_SCISSOR_TEST);
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);
+	glDisable(GL_STENCIL_TEST);
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_LIGHTING);
+	glDisable(GL_COLOR_MATERIAL);
+	glDepthMask(GL_FALSE);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	/* CALayer/IOSurface contents are premultiplied; straight alpha stays available for a surface
+	 * that is not (GLWIRE_WIDGET_BLEND=straight). */
+	glBlendFunc(premultiplied ? GL_ONE : GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_TEXTURE_2D);
 	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	for (i = 0; i < widget_count; i++) {
 		const struct widget_rect *widget = &widgets[i];
-		float x0 = 2.0f * (float)widget->x / (float)width - 1.0f;
-		float x1 = 2.0f * (float)(widget->x + widget->w) / (float)width - 1.0f;
-		float top = 2.0f * (float)(height - widget->y) / (float)height - 1.0f;
-		float bottom = 2.0f * (float)(height - widget->y - widget->h) / (float)height - 1.0f;
+		GLint left = widget->x, top = widget->y;
+		GLint right = widget->x + widget->w, bottom = widget->y + widget->h;
+		float x0, x1, y0, y1, u0, u1, v0, v1;
+
+		if (left < 0) left = 0;
+		if (top < 0) top = 0;
+		if (right > width) right = width;
+		if (bottom > height) bottom = height;
+		if (right <= left || bottom <= top) {
+			continue;
+		}
+		x0 = 2.0f * (float)left / (float)width - 1.0f;
+		x1 = 2.0f * (float)right / (float)width - 1.0f;
+		y1 = 2.0f * (float)(height - top) / (float)height - 1.0f;
+		y0 = 2.0f * (float)(height - bottom) / (float)height - 1.0f;
+		u0 = (float)(left - widget->x) / (float)widget->w;
+		u1 = (float)(right - widget->x) / (float)widget->w;
+		v0 = (float)(top - widget->y) / (float)widget->h;
+		v1 = (float)(bottom - widget->y) / (float)widget->h;
 
 		glBindTexture(GL_TEXTURE_2D, widget->texture);
 		glBegin(GL_QUADS);
-		glTexCoord2f(0.0f, 0.0f); glVertex2f(x0, top);
-		glTexCoord2f(1.0f, 0.0f); glVertex2f(x1, top);
-		glTexCoord2f(1.0f, 1.0f); glVertex2f(x1, bottom);
-		glTexCoord2f(0.0f, 1.0f); glVertex2f(x0, bottom);
+		glTexCoord2f(u0, v0); glVertex2f(x0, y1);
+		glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+		glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+		glTexCoord2f(u0, v1); glVertex2f(x0, y0);
 		glEnd();
 	}
 	if (said < 4) {
 		said++;
-		printf("glwire: widget compose %u texture(s) into fbo %u %dx%d\n", widget_count,
-		    (unsigned)fbo, width, height);
+		printf("glwire: widget compose %u texture(s) into fbo %u %dx%d, first %d,%d %dx%d, "
+		    "%s alpha\n", widget_count, (unsigned)fbo, width, height, widgets[0].x, widgets[0].y,
+		    widgets[0].w, widgets[0].h, premultiplied ? "premultiplied" : "straight");
 		fflush(stdout);
 	}
 	glMatrixMode(GL_PROJECTION);
 	glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);
 	glPopMatrix();
+	glPopClientAttrib();
 	glPopAttrib();
+	glUseProgram((GLuint)previous_program);
 	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous_fbo);
 	glViewport(previous_view[0], previous_view[1], previous_view[2], previous_view[3]);
 	glActiveTexture((GLenum)previous_active);
