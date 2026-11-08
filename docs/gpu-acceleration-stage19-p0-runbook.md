@@ -1221,7 +1221,7 @@ PosterBoard（pid 43）日志：
 **重要副作用：重建后 P1 基线变了**
 
 - 本发 **trim/sanitize 都没开**（host log `glyph trim`=0、`tc0 sanitized`=0），但 14 标签 band 合计 = **6989/3970/2652（v9 3499 的 199.7%）**，与 P1d（trim=6，6246）同量级。
-- 说明重建后的镜像或该次 UI 状态改变了标签渲染；**不能把变化归因于 trim**。
+- 说明重建后的镜像或该次 UI 状态改变了标签渲染；**不能把变化归因于 trim**。P1e 进一步把漂移指向 **host binary 版本（`ec129181`→`6584cdf`）或 UI 时刻**，而不是镜像/字体；P1 对比要固定 host binary。
 - **P1e 起用 `6989` 作新 baseline**；旧的 v9 `3499` 不再直接可比。若 P0/P1 要基于新镜像继续，先做一次「旧镜像 + 新 host」或「新镜像 + 旧 host」的对照，确认点带变化来源；旧镜像备份在 `/tmp`。
 
 **结论与下一步**
@@ -1229,7 +1229,78 @@ PosterBoard（pid 43）日志：
 - lookup 链修好、PosterBoard 启动并 running，但**壁纸未出现，P2 未达成**。
 - 不是 PosterBoard 崩溃，而是依赖/流程没走完：上述 lookup/XPC/persona 失败 + SpringBoard shim 是下一层入口。
 - 下一步：code 离线查 PosterBoard 依赖链（managedconfiguration/powerlog/MediaConversion/persona）；不要在没有新证据时重复重建镜像。
-- **P1e** 用 P2 的新 baseline `6989` 验证 `TRIM_FROM=start`；P1 仍未修复。
+- **P1e** 已用 P2 的新 baseline `6989` 验证 `TRIM_FROM=start`（结果见 §4.16）：trim 不是干净修复，trim 方向停止；P1 方向暂停，优先 P2 依赖/P3。
+
+### 4.16 s19o-p1e 实测：`TRIM_FROM=start` 清的是空白顶行，trim 方向停止
+
+> 归档：`/host/iosvm/logs/s19o-p1e/`（`report.md`、`bands.txt`、`fnv.txt`、`report/cmp_*.png`、`report/desc_*.png`、四张 dump、日志、截图）。**这些文件都不进 git**。
+> P1 诊断发；**P1 仍未修复，trim 方向到此停止**。
+
+**口径**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-p1e` / 2026-11-08 11:45 前后（host binary 11:45:43Z） |
+| host binary | `6584cdf`（`GLWIRE_GLYPH_TRIM_FROM`，默认关） |
+| 口径 | `XCMD=glwire_local=1`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_GLYPH_TRIM=6 GLWIRE_GLYPH_TRIM_FROM=start GLWIRE_DUMP=/tmp/s19o-p1e/f GLWIRE_DUMP_AT=900 GLWIRE_DUMP_PAIR=1"` |
+| 镜像 | P2 重建后的 `root.apfs` 5,902,336 B / `system.apfs` 2,476,748,800 B；baseline = P2 同镜像、trim 关的 **6989/3970/2652** |
+| `end=` | `end=ui`：`ui=660s`，`ui_bytes=312638`；最大截图 **331,781 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **980** 帧 |
+
+**trim 日志与 FNV 行序**
+
+8 行，均 `rows 6 from start`：
+
+```text
+152x90 first=6e46998a last=cbaa45e1   104x42 first=2d2af4e5 last=2d2af4e5
+187x90 first=f9bdc11b last=1535f4d6   139x42 first=f4fcb597 last=f4fcb597
+196x90 first=3e641207 last=a55e6bd7   148x42 first=9d899e55 last=9d899e55
+189x90 first=0619a9fb last=a234f521   141x42 first=bf5e70ef last=bf5e70ef
+```
+
+与 P1c atlas raw 行做 FNV-1a：
+
+| tile | trim first | P1c dump row 0 | 结论 |
+|---|---|---|---|
+| 152x90 | `6e46998a` | **`6e46998a` ✅** | upload row0 = atlas raw row0 |
+| 187x90 | `f9bdc11b` | **`f9bdc11b` ✅** | 同上 |
+| 104x42 | `2d2af4e5` | **`2d2af4e5` ✅** | rows 0–5 是**空白行**（= 104 零字节的 FNV） |
+| 139x42 | `f4fcb597` | **`f4fcb597` ✅** | rows 0–5 是**空白行**（139 零行） |
+
+→ **upload 缓冲 row 0 = P1c atlas raw row 0 = 视觉顶部**。`from=start` 清的是**顶部 6 行**（42 高 tile 本来就空白；90 高 tile 清到背板顶边），**点带在视觉底部，start 清不到**。P1d 的 `from=end` 才清视觉底部，但会把剩余点行拉成更高竖条。
+
+**band：P2 同镜像 baseline vs P1e（14 标签）**
+
+| 标签 | P2 baseline | P1e (start) | 变化 |
+|---|---|---|---|
+| Weather | 743/472/360 | 538/390/219 | **-28%** |
+| FaceTime | 1385/1031/663 | 967/480/297 | **-30%** |
+| Calendar | 1281/962/610 | 420/245/154 | **-67%** |
+| Photos | 79/37/27 | 143/69/43 | **+81%** |
+| Mail | 694/591/443 | 474/300/215 | **-32%** |
+| Notes | 753/457/277 | 626/181/101 | -17% |
+| Reminders | 218/135/98 | 186/109/67 | -15% |
+| TV | 0/0/0 | 0/0/0 | — |
+| Podcasts | 1302/111/69 | 565/223/110 | **-57%** |
+| Health | 507/174/105 | 864/630/459 | **+70%** |
+| Wallet | 27/0/0 | 363/222/126 | **+1244%** |
+| App Store/Maps/Settings | 0/0/0（此刻未显示） | 0/0/0 | — |
+| **合计** | **6989/3970/2652** | **5146/2849/1791** | **73.6% / 71.8% / 67.5%** |
+
+- 合计降了约 26%，但**分标签有升有降**：Calendar -67%、Podcasts -57%、Mail -32%、FaceTime -30%、Weather -28%；**Wallet +1244%、Health +70%、Photos +81%**。
+- 视觉：Weather/Calendar/Podcasts 变干净；Wallet/Health 从干净变成一排竖条。全图 P2 vs P1e：different 14,608（0.53%），within 8 = 99.47%，差异集中在标签带。
+- descender：Photos `1968/1514/1329`、Podcasts `2628/2082/1783` 与 P2 **完全一致** → g/p/y 未削。
+
+**判定**
+
+- **trim 不是干净修复**：start 清空白顶行、end 清视觉底部但产生更高竖条；点带可见性由 **90 高背板 / 复合层（prog13/17/19）**共同决定，不是「上传 tile 底部固定 6 行」这么简单。
+- **停止 trim 方向**：不再用 `GLYPH_TRIM=6`/固定行数重试。下一步转查 **90 高背板 tile / 复合层的点带来源**，或对 u0 纹理做「点带行位置」测量（按位置清，而不是固定 6 行）。
+- **P1 方向暂停**，优先 P2 依赖修复与 P3；P1 仍未修复。
+
+**旁注：baseline 漂移更像 host binary/UI 时刻**
+
+- P1c 的 tile 字节与 P1e 的 FNV 一致（同一 tile 内容），而 P2 baseline 6989 远高于 v9 3499 → 漂移更可能来自 **host binary 版本（`ec129181`→`6584cdf`）或 UI 时刻**，不是镜像/字体。
+- 后续 P1 对比要**固定 host binary**，并记录 UI 时刻；不要再拿 v9 的 3499 直接比新镜像。
 
 ---
 

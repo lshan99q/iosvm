@@ -39,7 +39,7 @@
 | # | 需求 | 判据（可测） | 阻塞谁 |
 |---|---|---|---|
 | P0 | 标签是文字（**已达成 2/3：v7+v9**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
-| P1 | 文字质量（**进行中：P1d `GLYPH_TRIM=6` 清错端；P2 重建后新基线 6989；下一步 `TRIM_FROM=start` + P1e；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
+| P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
 | P2 | 壁纸（**进行中：lookup 0 失败、PosterBoard spawned/running；壁纸未出，缺依赖**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
 | P3 | widget | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
 | P4 | 收尾 | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
@@ -297,7 +297,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 | 天 | 目标 | 产出 |
 |---|---|---|
 | D1 | P0 诊断 + VBO 影子/快照 | 宿主日志 attrib 3 回到 0.125..0.5 |
-| D2 | P1 绕开 darken → 修 backdrop | 能读出 App 名称的截图；**实际 P1a：`SKIP=13` Weather 562→44；全标签 101.7%（重分布）；P1b `TC0_SANITIZE` 53.9% 但 Weather 719→741；P1c 点带在 glyph tile alpha；P1d `GLYPH_TRIM=6` band 178.5%、清错端；未修复** |
+| D2 | P1 绕开 darken → 修 backdrop | 能读出 App 名称的截图；**实际 P1a：`SKIP=13` Weather 562→44；全标签 101.7%（重分布）；P1b `TC0_SANITIZE` 53.9% 但 Weather 719→741；P1c 点带在 glyph tile alpha；P1d end 清底部出竖条；P1e start 清空白顶行、band 73.6% 但分标签有升有降；trim 方向停止，P1 暂停** |
 | D3 | 三发验证 | ≥2/3 发标签为文字、截图 ≥300 KB、diff ≥95%；**实际 v7 99.85%、v9 99.98%（2/3）；v8 89.53% 因 dump 落在 UI 加载动画，不计入** |
 | D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard[43] running；无 1125x2436/全屏非 panel 纹理，背景纯黑；依赖缺（managedconfiguration/powerlog/MediaConversion/persona）；P2 未达成** |
 | D5–D6 | P3 widget（时间盒） | 可行/不可行结论 |
@@ -307,7 +307,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 
 P0 已达成 2/3（v7+v9），但只覆盖「名称上屏」。下一阶段按 P1 → P2 → P3：
 
-- **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1c：点带在 glyph tile alpha 底部 6–8 行。P1d `GLYPH_TRIM=6` 反而让 band 3499→6246（178.5%）、竖条更高，descender 未削——大概率清错端。P2 重建后 trim/sanitize 全关的新基线是 6989（199.7%），P1e 起用 6989 作新 baseline；下一步 `GLWIRE_GLYPH_TRIM_FROM=start` + P1e；P1 未修复。**
+- **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1e：FNV 证明 upload row0=视觉顶部，`TRIM_FROM=start` 清的是空白顶行；band 6989→5146（73.6%）但 Wallet +1244%、Health +70%、Photos +81%，trim 不是干净修复。停止 trim，转查 90 高背板/复合层；P1 方向暂停，优先 P2 依赖/P3。P1 未修复。**
 - **P2 壁纸**：P2 首次 boot 已修好 lookup、拉起 PosterBoard[43] 并 running；但无 1125x2436/全屏非 panel 纹理、背景纯黑，P2 未达成。缺 `managedconfiguration.profiled.public`（10×）、`powerlog.plxpclogger.xpc`（4×）、MediaConversionService XPC error 22、persona type 6（2×）；SpringBoard shim `poster switcher not offered`。下一步 code 离线查依赖链，不要重复重建镜像。
 - **P3 widget**：`312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天）。
 - **回归基线**：不要用 v8 的动画帧当基线（v8 的 panel 已完整、picture 还停在前一状态，89.53% 是采样时刻问题）；用 v7/v9 这类静态时刻，或给 dump 加「连续两帧 panel/picture 稳定」门槛。
