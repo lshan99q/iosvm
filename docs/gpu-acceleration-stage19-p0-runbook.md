@@ -934,7 +934,69 @@ within 8 in every channel: 1217808/1218000 (99.98%) -> SAME FRAME
 
 **下一步**
 
-code 计划加 **`GLWIRE_TC0_SANITIZE=1`**：把 prog13 的 NaN/Inf/越界 texcoord 洗成 0，exp 跑 **P1b** 与 P1a/v9 对比。若噪声带消失且阴影可接受，才作为 P1 修复候选；在 P1b 数据出来前，保持「P1 进行中」。
+P1b 已做（见 §4.11）：`TC0_SANITIZE=1` **没有消掉噪声带，反而让它更多**（562→758，+35%），所以 sanitize 不是 P1 修复项；**P1 仍未修复**。
+
+### 4.11 s19o-p1b 实测：`TC0_SANITIZE` 不是噪声带修复项（P1 仍未修复）
+
+> 归档：`/host/iosvm/logs/s19o-p1b/`（`report.md`、`measure.txt`、`imgdiff-crop.txt`、`diffdump.txt`、`crop_*`、四张 dump、日志、截图）。**这些文件都不进 git**。
+> 这是 **P1 诊断发**，不改变 P0 结论，也不代表 P1 已修好。
+
+**口径**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-p1b` / 2026-11-08 09:17:50Z–09:43:12Z |
+| 基础口径 | 同 v7：`XCMD=glwire_local=1`；`HOST_ENV` 含 `GLWIRE_NO_PANEL=1`、`GLWIRE_DUMP_PAIR=1`、`GLWIRE_DUMP_AT=800`、`GLWIRE_TEXT_DRAW_LINE=1` |
+| 本发新增 | **`GLWIRE_TC0_SANITIZE=1`**，**不 skip 13** |
+| `end=` | `end=ui`：`ui=630s`，`ui_bytes=307531`；最大截图 **324,505 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **1,202** 帧 |
+
+**sanitize 生效，但噪声带更明显**
+
+- `tc0 sanitized` = **5 行**，是源码的**打印上限**，样例为 `3 vertices` ×3、`2 vertices` ×2；不是总次数。
+- 例：`frame 7 #20 prog15 ... tc0 0.000,0.000 ...`，nz **1202** → sanitize 确实把垃圾 tc0 归零，prog15 仍能落像素。
+- text draw **711**：`prog13` **544**（nz>0 **0**，zero 507，skip 37）、`prog15` **114**（nz>0 **80**，skip 34）；prog5 18、prog17/19 各 4、prog3/7 全 skip。
+- 早期 frame<100 prog15：68 笔，34 笔 nz>0。
+
+**Weather 噪声带（crop `80,620 420x180`；绝对坐标 y 730–760 / x 200–500）**
+
+| 发次 | 非黑像素 | 亮像素（mean>150） | 相对 v9 |
+|---|---:|---:|---:|
+| v9（基线） | **562** | 47 | 100% |
+| P1a（skip 13） | **44** | 4 | **7.8%** |
+| **P1b（sanitize）** | **758** | **89** | **134.9%** |
+
+- 形态：v9 是断续碎点；P1b 变成更整齐的**竖线梳齿**（tc0 归零后每列采同一个 texel），带没有消失。
+- 文字「Weather」完整，无缺笔画。
+- imgdiff v9 vs P1b，同 crop tol 8：**98.30% within、1.70% different**，diff bbox `(205,736,401,749)` 仍是这条带。
+
+**panel / diffdump（非 P0，仅记录）**
+
+- `f-panel` md5 `f9e60dd5…` ≠ `f-n1-panel` `206b6883…`；check_panel **6,361 色、pure green 0、looks like a picture**。
+- `diffdump f-n1 --tolerance 8`：panel 25.4% / picture 26.5%，missing 0、extra **14,077（1.16%）** box `(54,902,173,1054)`，**98.85% SAME FRAME**；cross `f-n1-panel` vs `f-picture` = **100.00%**。这不是 P0 验收数据。
+
+**widget 40x40：875/1600 是旧布局基线，需要重锚**
+
+| 框 | white/1600 | 说明 |
+|---|---:|---|
+| `(64,210,40,40)` | **495** | 旧文档框；与 s17probe4 的 495 一致 |
+| `(69,213,40,40)` | 747 | widget bbox 内缩 0 px |
+| `(69,217,40,40)` | **886** | 实际圆角角点；在 875±2%（857.5–892.5）内，+1.26% |
+| `(73,213,40,40)` | 886 | 同上 |
+
+→ 当前几何下，旧框 `(64,210,40,40)` 读到 495，实际角点 `(69,217)/(73,213)` 读到 **886**。**875/1600 是旧布局基线，不能硬凑**；P1 的白像素判据需要按当前布局重锚。
+
+**判读**
+
+- **`TC0_SANITIZE` 生效，但不是噪声带的修复项**：非黑像素 562→758（+35%），亮像素 47→89；只是把碎点变成规则竖线。
+- 结合 P1a（skip 13 → 44）：**噪声带来源是 program 13 的 backdrop/几何带，不是 tc0 的 NaN**。sanitize 只把垃圾 tc0 归零，没有动 prog13 的这条带。
+- **P1 仍未修复**；不要写「sanitize 修好了虚线」或「P1 已通过」。
+
+**下一步**
+
+1. exp 做**全标签 band 统计**：确认 skip 13 是全局有效，还是只有 Weather 这一条；再决定是修 prog13 的几何，还是另找来源。
+2. widget 白像素判据按当前布局重锚（旧 875/1600 不能直接沿用；先确定新的框与基线）。
+3. P1 的 Search 完整性、标签颜色仍未收口；P1 继续保持「进行中」。
 
 ---
 
