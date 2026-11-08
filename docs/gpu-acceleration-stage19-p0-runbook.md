@@ -1099,6 +1099,23 @@ P1c 已做（见 §4.13）：**点带确实烘在 glyph tile 的 alpha 里**（4
 
 code 加 **`GLWIRE_GLYPH_TRIM=<n>`**（默认关闭，只对 GL_ALPHA 42/90 高纹理的**末尾 n 行清零**）。**P1d** 用 `TRIM=6` 验证：点带消失，且 descender（如 `p` 的降部）不被削。P1d 结果出来前，P1 保持「进行中」。
 
+**P1d 预留结论节（`GLWIRE_GLYPH_TRIM=6`，待填）**
+
+> P1d 尚未运行；本节只留口径与表，不预填结论。
+
+| 项 | 待填值 |
+|---|---|
+| label / 时间 | `s19o-p1d` / __:__–__:__ |
+| 口径 | `XCMD=glwire_local=1` + `GLWIRE_NO_PANEL=1` + `GLWIRE_ATLAS_DUMP=<prefix>` + **`GLWIRE_GLYPH_TRIM=6`** |
+| atlas 数 | __ / 8（101x42、104x42、139x42、155x42、149x90、152x90、187x90、203x90） |
+| 42 高 tile 底部 1/2/6 行 nonblack | __ / __ / __（对照 P1c 101x42：30/60/180） |
+| 90 高 tile 背板下缘外点线 | 有 / 无 |
+| 点带是否消失 | 是 / 否 |
+| descender（p/g/y）是否被削 | 否 / 是 |
+| imgdiff vs P1c | __% within / __% different |
+| 判读 | __ |
+| 是否计入 P1 | 待定；P1 当前**未修复**（只有点带消失且 descender 完好才可作候选） |
+
 ---
 
 ## 五、铁律与提交
@@ -1176,6 +1193,139 @@ NaN->I=<条> diff=<百分比/SAME|NOT> names=<个数: ...> => <PASS|FAIL: 原因
 P0: <2/3 或 3/3> PASS；阻塞：<几何/scissor 的哪一处>；下一发：<具体改动或实验>
 ```
 
+## 七、P2 壁纸重建配方（预置，未执行）
+
+> **这是 P2 的预置配方，尚未在本阶段执行。** 构建/重建 `system.apfs` 期间跑测量会触发 tick-spinlock panic；必须等 **P1d 与当前测量全部结束、无 qemu** 后再做（§2.2 的 `ps` 检查）。P2 不改变 P0 的 2/3 结论。
+> 任务文里写的 `com.apple.PostBoard.plist` 是简写/笔误；实际文件名是 **`com.apple.PosterBoard.plist`**，命令按实际名写。
+
+### 7.1 前置与备份
+
+```sh
+export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+cd "$KERNEL/userland"
+
+# 没有 qemu / host_glwire 才能重建
+ps -eo pid,comm | grep -E 'qemu-system|host_glwire' || echo clean
+
+# 上游 plist 必须在；仓库不带 Apple 文件
+test -f ../sysimage/rootfs/System/Library/LaunchAngels/com.apple.PosterBoard.plist && echo plist-ok
+
+# 备份当前镜像（GB 级；确认磁盘空间）
+cp -a root.apfs /tmp/root.apfs.pre-p2
+cp -a system.apfs /tmp/system.apfs.pre-p2
+```
+
+### 7.2 改 `userland/build.sh`（两处）
+
+**第一处**：`rm -rf root` 之后、`mkdir -p root/...` 之后，把作业 plist 放进去：
+
+```sh
+mkdir -p root/LaunchAngels
+cp "$DARWIN/rootfs/System/Library/LaunchAngels/com.apple.PosterBoard.plist" root/LaunchAngels/
+```
+
+**第二处**：`rm -rf sysroot/System/Library/LaunchAngels` 之后、`ln -s /redwood/LaunchDaemons ...` 之后，把系统路径指到 `/redwood`：
+
+```sh
+ln -s /redwood/LaunchAngels sysroot/System/Library/LaunchAngels
+```
+
+这两处的语义：
+
+- `root/` 就是 `/redwood` 卷；`root.apfs` 用 `mkapfs.py ... redwood=root` 生成。
+- `sysroot/` 是 `system.apfs` 的根；`/System/Library/LaunchAngels` 变成一个指向 `/redwood/LaunchAngels` 的符号链接。
+- plist 的 `Label` 是 `com.apple.PosterBoard`，MachService 是 `com.apple.posterboardservices.services`；它按需启动 `/Applications/PosterBoard.app/PosterBoard`，所以 `RunAtLoad=false` 是正常的。
+
+### 7.3 重建并核对镜像
+
+```sh
+cd "$KERNEL/userland"
+SYSTEM=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs
+```
+
+`SYSTEM=1` 强制重建 `system.apfs`（10–20 分钟）；`root.apfs` 每次都会重建。期望末尾有 `root.apfs: ...` 与 `system.apfs: ...` 两行，且没有 `error`/`FAILED`。
+
+```sh
+python3 ../tools/apfs/apfs.py ls root.apfs /LaunchAngels
+# 期望: com.apple.PosterBoard.plist
+
+python3 ../tools/apfs/apfs.py info system.apfs | head
+# 先确认卷名；若不是 System，用下一行的 -v 换成实际卷名
+python3 ../tools/apfs/apfs.py ls system.apfs /System/Library/LaunchAngels -v System
+# 期望: LaunchAngels -> /redwood/LaunchAngels（符号链接）
+```
+
+### 7.4 启动（local composition + no-panel replay）
+
+```sh
+cd /host/iosvm
+export REPO=/host/iosvm
+export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+export GLWIRE=$REPO/tools/glwire
+export ROOT=$KERNEL/userland/root.apfs
+LABEL=s19p2-1
+mkdir -p /tmp/$LABEL
+
+XCMD="glwire_local=1" \
+ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=2400 UI_GRACE=300 MINSHOT=300000 \
+HOST_ENV="GLWIRE_NO_PANEL=1" \
+IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
+tools/glwire/harness/boot-measure.sh "$LABEL" "$ROOT" 2400
+```
+
+### 7.5 判据（三条 + 失败要写崩在哪）
+
+**1) `posterboardservices` lookup 不再 `No such process`**
+
+```sh
+grep -a 'posterboardservices' /tmp/$LABEL.log || true
+grep -a -c 'posterboardservices.*No such process' /tmp/$LABEL.log
+```
+
+期望：第二条为 **0**；第一条不再出现 `error = 3: No such process`。若 0 行且没有成功 lookup 行，不能单凭这一条判成功，继续看 2/3。
+
+**2) 宿主出现 1125x2436 或全屏壁纸纹理**
+
+```sh
+grep -a -o 'upload texture [0-9]* .* [0-9]*x[0-9]*' /tmp/$LABEL-host.log | sort | uniq -c
+grep -a '1125x2436' /tmp/$LABEL-host.log
+```
+
+期望：出现 **1125x2436**，或至少一条非 `4294901761` 的全屏（750x1624）纹理。`4294901761 ... 750x1624` 是 guest 的合成 panel，不是壁纸，不能拿来充数。
+
+**3) 主屏背景非纯黑**
+
+```sh
+python3 - "$LABEL" <<'PY'
+import sys
+from PIL import Image
+label = sys.argv[1]
+im = Image.open(f"/tmp/{label}-shot.png").convert("RGB")
+w, h = im.size
+pts = [(x, y) for x in range(8, w, 16) for y in (int(h * .12), int(h * .40), int(h * .60), int(h * .88))]
+non = sum(1 for p in pts if max(im.getpixel(p)) > 12)
+print(f"{label}: {non}/{len(pts)} edge/background samples non-black")
+PY
+```
+
+期望：非黑采样明显大于 0，并**肉眼确认**主屏背景不是纯黑；把比例记进证据表，不要用单一阈值代替判据。
+
+**4) 失败要写 poster 进程崩在哪**
+
+```sh
+grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/$LABEL.log | tail -30
+```
+
+若壁纸仍未出现：记录 lookup 是否仍然失败、`PosterBoard.app/PosterBoard` 是否启动、崩在哪个调用（`exited due to SIGSEGV` / `usertrap:` / `panic(` 的具体行），不要只写「还是黑」。
+
+### 7.6 风险与边界
+
+- **构建时机**：任何测量期间都不要 `make`/`build.sh`；tick-spinlock panic 就是这样触发的。P2 重建排在 P1d 之后。
+- **启动变化**：`system.apfs` 重建可能改变启动时间与内存布局；P2 证据表要同时记 `ui at`，不要拿 P0 的 `630s` 当固定值。
+- **命名**：实际文件是 `com.apple.PosterBoard.plist`；不要按 `PostBoard` 新建一个错名文件。
+- **不提交**：`root.apfs`、`system.apfs`、`ram.img`、日志、截图都不进 git；P2 证据图按 §5.2 先登记路径，不擅自提交。
+- **不声称**：P2 配方写完不等于壁纸已出；只有三条判据都过才写「P2 达成」。
+
 ---
 
 ## 附录 A：本手册引用的数字出处
@@ -1198,8 +1348,11 @@ P0: <2/3 或 3/3> PASS；阻塞：<几何/scissor 的哪一处>；下一发：<�
 
 ## 附录 B：本次不做什么
 
-1. 不改 `docs/gpu-acceleration-stage19-plan.md`（避免和后续结论冲突）。
-2. 不新增探针、不改 `host_glwire.c`、不重建 `root.apfs`（几何修复是另一条工作流）。
+1. 不重写 `docs/gpu-acceleration-stage19-plan.md`；只按 lead/owner 指定处更新 P0/P1 状态，不改历史结论。
+2. 不在文档任务里新增探针/改 `host_glwire.c`；P2 的 `root.apfs`/`system.apfs` 重建按 §七 单独执行，不在文档任务里跑。
 3. 不在文档任务里跑 qemu；本手册的所有命令都交给 `iosvm-exp` 执行。
 4. 不提交 `root.apfs` / `system.apfs` / `ram.img` / 任何日志或 `.bgra` dump。
 5. 不把「有字形」当「P0 通过」：通过线是 **≥2 发读出 ≥5 个 App 名称 + 截图 ≥300 KB + 同帧 diff ≥95%**。
+6. **不再用 `GLWIRE_PROGRAM_SKIP=13` 当 P1 全局修复**：全标签 nonblack **101.7%**（Weather -97%，但 FaceTime +225%、Podcasts +432%），只是重分布。
+7. **不再用 `GLWIRE_TC0_SANITIZE=1` 当 P1 修复**：Weather 带 nonblack **562→758（+35%）**，形态从碎点变规则竖线；tc0 不是主因。
+8. **不再在合成/prog13 侧找点带**：P1c 已证明点带烘在 glyph tile 的 alpha 底部 6–8 行；修复在纹理生成/裁剪（P1d `GLYPH_TRIM`），在 P1d 数据前不要写「P1 已修复」。
