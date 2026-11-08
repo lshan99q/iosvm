@@ -184,3 +184,37 @@ P3 要补的只有「矩形」与「不依赖 replay 的合成」：
 `inject_ciq_probe.c` 的两个 C 钩子保持诊断；XPC/backboardd 的完整元数据管道只在
 layer 树拿不到 contents 时才需要，且优先共享内存+Darwin notification，不选 XPC。
 两天内如果第 1 步就拿不到 `contents==IOSurface`，直接记「需要更多信息」，不要硬做。
+
+## 8. MVP 实现状态（2026-11-08，未 boot）
+
+**宿主侧已实现并编译通过**（`tools/glwire`，默认关闭）：
+
+- `dispatch.inc` case 202：`{texture,target,internal,w,h,format,type,row_bytes,pixel_bytes,
+  x,y,w,h}` + `wire_image()`；调 `names_texture_upload()` 建纹理，`host_widget_rect()` 记下
+  `{host texture, rect}`。
+- `GLWIRE_WIDGET=1` 时，replay 结束后、`glReadPixels` 前，`host_widgets_compose()` 把表里的
+  每个 widget 以带 alpha 的纹理四边形画进即将读回的 panel/stand-in，并恢复 GL 状态。
+- 合成器是固定管线（`glPushAttrib` + 正交 NDC），MVP 假定无 transform；坐标按
+  `height - y - h` 做 y 翻转，纹理 `v=0` 对显示顶部。
+- 合成测试：用 map_test 的流插入一条合成 202（4×4 红 RGBA，rect 0,0,4,4），宿主中心像素
+  返回 `BGRA 0,0,255,255`；`e2e_test.py` 默认关闭仍 PASS。
+
+**guest 侧是补丁草稿，未改树、未编译**：`/host/iosvm/logs/s19o-p3-guest-draft.patch`
+（`git apply --check` 通过；本容器没有 `xnu-clang`/iPhoneOS SDK，不能构建）。
+
+- `inject.c`（backboardd）：boot-arg `widget_surface=3,4` 把 surface ID 列表交给一个 1 Hz 线程；
+  `widget_rect=x,y,w,h` 给矩形；`IOSurfaceLookup` + `IOSurfaceGetBaseAddress/BytesPerRow/
+  PixelFormat`，按 `'BGRA'`（4 字节）或 `'LA08'`（2 字节）映射到 GL 枚举，内容 hash 变化时
+  dlsym 到的 `eagl_remote_widget_upload` 上传。
+- `eagl_remote.c`：新增 `eagl_remote_widget_upload()`，发 opcode 202；复用 `wire_image()`/
+  `remote_vtop()`，所以大 surface 走段表、碎片化时退回 inline。
+- `build.sh`：`libhakios.dylib` 增加 `-framework IOSurface`。
+- **还没有** SpringBoard CALayer 采集（design 的 D1-1）：MVP 用 boot-arg 固定 ID/矩形，
+  先把「面能作为纹理进宿主并贴回」验证掉；layer 树采集与 ID/rect 自动传递是下一步。
+
+**风险**：guest 补丁未编译/未 boot；ID 每 boot 可能变；`widget_rect` 手工；1 Hz 轮询会漏中间
+帧；LA08 的 2 字节/像素与 bpr padding 必须按 API；合成器只处理无 transform 的矩形；
+`widget_count` 跨帧保留，widget 消失时会留旧内容（MVP 已知）。exp 的最小验证是：重建
+root.apfs → `XCMD="glwire_local=1 widget_surface=3,4 widget_rect=..."`、host
+`GLWIRE_WIDGET=1` → host log 出现 `widget upload`/`widget compose`，截图 widget 区域不再是
+白色占位；若 ID 变了，先用 P1c 的内核 `created surface` 行对表。

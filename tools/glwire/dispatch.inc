@@ -701,6 +701,33 @@ switch (opcode) {
 		    row_bytes, pixel_bytes, data);
 		break;
 	}
+	case 202: {
+		/* a widget surface: the opcode-201 upload plus the rectangle it occupies on screen */
+		GLuint texture = wire_get_u32(r);
+		GLenum target = wire_get_u32(r);
+		GLint internal = wire_get_i32(r);
+		GLsizei width = wire_get_i32(r);
+		GLsizei height = wire_get_i32(r);
+		GLenum format = wire_get_u32(r);
+		GLenum type = wire_get_u32(r);
+		GLsizei row_bytes = wire_get_i32(r);
+		GLsizei pixel_bytes = wire_get_i32(r);
+		GLint x = wire_get_i32(r);
+		GLint y = wire_get_i32(r);
+		GLsizei w = wire_get_i32(r);
+		GLsizei h = wire_get_i32(r);
+		GLsizei bytes = 0;
+		void *data = wire_take_image(r, &bytes);
+
+		printf("glwire: widget upload texture %u target %#x internal %#x %dx%d format %#x type %#x "
+		    "row %d pixel %d rect %d,%d %dx%d bytes %d\n", texture, target, internal, width, height,
+		    format, type, row_bytes, pixel_bytes, x, y, w, h, bytes);
+		fflush(stdout);
+		names_texture_upload(g, texture, target, internal, width, height, format, type,
+		    row_bytes, pixel_bytes, data);
+		host_widget_rect(g, texture, x, y, w, h);
+		break;
+	}
 	case 200: {
 		/* vertex arrays that the next draw needs (the guest sends them from its own
 		 * pointers; the GL signature of glVertexAttribPointer carries no size) */

@@ -93,6 +93,17 @@ host_program_skip(struct glstate *g)
 }
 
 static void
+host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h)
+{
+	(void)g;
+	(void)guest;
+	(void)x;
+	(void)y;
+	(void)w;
+	(void)h;
+}
+
+static void
 host_fbo_bind(struct glstate *g, GLenum target, GLuint guest, GLuint host)
 {
 	(void)g;

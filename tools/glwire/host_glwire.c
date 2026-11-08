@@ -532,6 +532,118 @@ host_dump_uniform_ring(GLint host_location)
 static int last_draw_was_glyph;
 
 /*
+ * Stage nineteen, P3 MVP: a widget surface arrives as opcode 202, the opcode-201 upload plus the
+ * screen rectangle the guest says it occupies.  The texture is made by names_texture_upload(); the
+ * table here keeps the host name and rectangle so the frame can be composited after the replay,
+ * without every draw having to know about widget layers.  Off unless GLWIRE_WIDGET=1 reaches this
+ * process and the guest sends a 202 record.
+ */
+struct widget_rect {
+	GLuint texture;
+	GLint x, y, w, h;
+};
+
+static struct widget_rect widgets[8];
+static unsigned widget_count;
+
+static void
+host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h)
+{
+	GLuint texture = names_texture(g, guest);
+	unsigned i;
+
+	if (texture == 0 || w <= 0 || h <= 0) {
+		return;
+	}
+	for (i = 0; i < widget_count; i++) {
+		if (widgets[i].texture == texture) {
+			widgets[i].x = x;
+			widgets[i].y = y;
+			widgets[i].w = w;
+			widgets[i].h = h;
+			return;
+		}
+	}
+	if (widget_count < sizeof(widgets) / sizeof(widgets[0])) {
+		widgets[widget_count].texture = texture;
+		widgets[widget_count].x = x;
+		widgets[widget_count].y = y;
+		widgets[widget_count].w = w;
+		widgets[widget_count].h = h;
+		widget_count++;
+	}
+}
+
+/* One textured quad per widget, in the frame's pixels, after the replay and before the read-back.
+ * The caller supplies the target that will be read; the state it touches is saved and restored. */
+static void
+host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
+{
+	GLint previous_fbo = 0, previous_view[4] = { 0, 0, 0, 0 };
+	GLint previous_active = 0, previous_texture = 0;
+	unsigned i;
+	static unsigned said;
+
+	(void)g;
+	if (getenv("GLWIRE_WIDGET") == NULL || widget_count == 0 || width <= 0 || height <= 0) {
+		return;
+	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
+	glGetIntegerv(GL_VIEWPORT, previous_view);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+
+	glPushAttrib(GL_ALL_ATTRIB_BITS);
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glViewport(0, 0, width, height);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glActiveTexture(GL_TEXTURE0);
+	glEnable(GL_TEXTURE_2D);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	for (i = 0; i < widget_count; i++) {
+		const struct widget_rect *widget = &widgets[i];
+		float x0 = 2.0f * (float)widget->x / (float)width - 1.0f;
+		float x1 = 2.0f * (float)(widget->x + widget->w) / (float)width - 1.0f;
+		float top = 2.0f * (float)(height - widget->y) / (float)height - 1.0f;
+		float bottom = 2.0f * (float)(height - widget->y - widget->h) / (float)height - 1.0f;
+
+		glBindTexture(GL_TEXTURE_2D, widget->texture);
+		glBegin(GL_QUADS);
+		glTexCoord2f(0.0f, 0.0f); glVertex2f(x0, top);
+		glTexCoord2f(1.0f, 0.0f); glVertex2f(x1, top);
+		glTexCoord2f(1.0f, 1.0f); glVertex2f(x1, bottom);
+		glTexCoord2f(0.0f, 1.0f); glVertex2f(x0, bottom);
+		glEnd();
+	}
+	if (said < 4) {
+		said++;
+		printf("glwire: widget compose %u texture(s) into fbo %u %dx%d\n", widget_count,
+		    (unsigned)fbo, width, height);
+		fflush(stdout);
+	}
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+	glPopMatrix();
+	glPopAttrib();
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous_fbo);
+	glViewport(previous_view[0], previous_view[1], previous_view[2], previous_view[3]);
+	glActiveTexture((GLenum)previous_active);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture);
+}
+
+/*
  * Stage nineteen, P0/v3: the text-draw line must describe the state the draw *started* with.
  * names_attribs_release() frees the CPU copies of the vertex arrays before host_after_draw() runs,
  * so a line built from the after-draw state reported "attrib -1" for every draw and never saw a
@@ -3511,6 +3623,18 @@ serve_frame(struct client *client)
 	}
 	if (fbo_log && (frames_replayed + 1 <= 2 || (frames_replayed + 1) % 100 == 0 || dump_draws_runtime)) {
 		host_fbo_summary("frame", frames_replayed + 1, client);
+	}
+	/* (P3 MVP: widget surfaces are composited into the frame that is about to be read) */
+	if (widget_count != 0 && getenv("GLWIRE_WIDGET") != NULL) {
+		GLuint target = client->framebuffer;
+
+		if (panel_drawn_fbo != 0 && panel_drawn_frame == (int)frames_replayed + 1) {
+			target = panel_drawn_fbo;
+		}
+		host_widgets_compose(&client->names, target, width, height);
+		/* (the compositor restores the state it found: bind the target that was just drawn
+		 * before the read-back, so the picture includes the widgets) */
+		glBindFramebuffer(GL_FRAMEBUFFER, target);
 	}
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 	/*
