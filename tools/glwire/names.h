@@ -504,6 +504,65 @@ names_vertex_pointer(struct glstate *g, GLuint index, GLint size, GLenum type,
 }
 
 static void
+names_attrib_sanitize_tc0(void *data, GLint size, GLenum type, GLsizei stride, GLsizei bytes)
+{
+	size_t need, step, count, replaced = 0;
+
+	if (getenv("GLWIRE_TC0_SANITIZE") == NULL || data == NULL || size != 2 || bytes <= 0) {
+		return;
+	}
+	if (type == GL_FLOAT) {
+		need = 8;               /* two floats */
+	} else if (type == 0x140b) {
+		need = 4;               /* two half-floats */
+	} else {
+		return;
+	}
+	step = stride > 0 ? (size_t)stride : need;
+	if (step < need) {
+		return;
+	}
+	count = (size_t)bytes / step;
+	for (size_t v = 0; v < count; v++) {
+		unsigned char *at = (unsigned char *)data + v * step;
+		int bad = 0;
+
+		if (type == GL_FLOAT) {
+			GLfloat x, y;
+
+			memcpy(&x, at, 4);
+			memcpy(&y, at + 4, 4);
+			/* (the comparisons are false for NaN and infinity as well) */
+			bad = !(x >= -4.0f && x <= 4.0f) || !(y >= -4.0f && y <= 4.0f);
+			if (bad) {
+				memset(at, 0, 8);
+			}
+		} else {
+			uint16_t x, y;
+
+			memcpy(&x, at, 2);
+			memcpy(&y, at + 2, 2);
+			/* (exponent all ones is NaN/Inf; 0x4400 is 4.0, so larger magnitudes fail) */
+			bad = (x & 0x7c00u) == 0x7c00u || (x & 0x7fffu) > 0x4400u ||
+			    (y & 0x7c00u) == 0x7c00u || (y & 0x7fffu) > 0x4400u;
+			if (bad) {
+				memset(at, 0, 4);
+			}
+		}
+		replaced += (size_t)bad;
+	}
+	if (replaced != 0) {
+		static unsigned said;
+
+		if (said < 5) {
+			said++;
+			printf("glwire: tc0 sanitized %zu vertices\n", replaced);
+			fflush(stdout);
+		}
+	}
+}
+
+static void
 names_attrib_data(struct glstate *g, GLuint index, GLint size, GLenum type, GLboolean normalized,
     GLsizei stride, GLsizei bytes, void *data)
 {
@@ -512,6 +571,9 @@ names_attrib_data(struct glstate *g, GLuint index, GLint size, GLenum type, GLbo
 	if (index >= 16) {
 		free(data);
 		return;
+	}
+	if (index == 3) {
+		names_attrib_sanitize_tc0(data, size, type, stride, bytes);
 	}
 	free(g->attribs[index].data);
 	g->attribs[index].data = data;
