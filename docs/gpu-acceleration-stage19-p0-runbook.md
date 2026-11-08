@@ -837,6 +837,60 @@ within 8 in every channel: 1216183/1218000 (99.85%) -> SAME FRAME
 
 **v7 计入 P0 第一发**；还差 **2 发同口径**（v8/v9 已派）。**现在 1/3，不能写「P0 已通过」**；要等 v8/v9 里至少再有一发满足全部判据，才达到「3 发里 ≥2 发」。
 
+### 4.9 v8/v9 与 P0 判定：v7+v9 = 2/3，P0 达成
+
+> 归档：`/host/iosvm/logs/s19o-v8/`、`/host/iosvm/logs/s19o-v9/`（`report.md`、四张 dump、`diffdump.txt`、`check_panel.txt`、日志、截图）。**这些文件都不进 git**。
+> 结论按 P0 原判据：**连续 3 发里 ≥2 发满足名称、截图、同帧 diff** → **v7 + v9 = 2/3，P0 达成**。v8 不计入，原因是**采样时刻落在 UI 加载动画中**，不是渲染/配对回归。
+
+**两发总表**
+
+| 项 | v8 | v9 |
+|---|---|---|
+| 时间 | 2026-11-08 07:45:40Z–08:00:05Z | 2026-11-08 08:05:18Z–08:19:42Z |
+| 口径 | `glwire_local=1` + `NO_PANEL=1` + `PAIR=1` + `AT=800` | 同 v8 |
+| `end=` | `ui=660s`，`ui_bytes=320147` | `ui=630s`，`ui_bytes=309137` |
+| 最大截图 | **327,753 B** | **326,461 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host 1,271 帧 | 0/0/0；host 1,060 帧 |
+| 名称（dump 时） | 10 App + 2 widget；Clock/News 未显示，Search「Se」 | 10 App + 2 widget；Clock/News 未显示，Search「Se」 |
+| panel | 15,975 色、pure green 0、两帧 md5 不同 | 11,774 色、pure green 0、两帧 md5 不同 |
+| C4 `f-n1` tol 8 | **89.53% NOT** | **99.98% SAME FRAME** |
+| 是否计入 P0 | **否** | **是** |
+
+**v8：失败模式是「dump 抓到 UI 加载动画」**
+
+```
+painted: panel 608663 (50.0%), picture 493367 (40.5%)
+missing (panel paints, picture black): 117079 (9.61%), box (46, 142, 729, 1603)
+extra   (picture paints, panel black):   1783 (0.15%), box (44, 491, 626, 1258)
+differing: 129296 (10.62%), box (44, 54, 729, 1603)
+within 8: 1090498/1218000 (89.53%) -> NOT the same frame (the line is 95%)
+```
+
+- 四种配对都救不回来：same N = 89.53%、same N+1 = 89.53%、cross = **89.03%**、cross2 = **89.03%**。所以**不是配对选错**。
+- 内容差一代：`diff/panel.png` 是**完整桌面**（16 个名称、完整 Search、4 个 dock 图标），`diff/picture.png` 还停在 **10 图标 + 「Se」+ 2 个 dock** 的状态。
+- `missing` 的 9.61% 正好是「新加载出来的图标/名称/dock」。即 dump 落在 UI 从 10 图标向完整桌面加载的动画中，**host replay 落后于 guest 呈现**。
+- v8 的 `end=ui`、327,753 B、10 名称、panel 真实都成立；**只有 C4 的采样时刻不成立**。v8 明确不计入 P0。
+
+**v9：五项数据齐全，C4 99.98% SAME**
+
+```
+painted: panel 492858 (40.5%), picture 492858 (40.5%)
+missing: 0 (0.00%)
+extra:   0 (0.00%)
+differing: 193 (0.02%), box (413, 769, 468, 785)
+within 8 in every channel: 1217808/1218000 (99.98%) -> SAME FRAME
+```
+
+- `end=ui` 630 s；最大截图 **326,461 B**；10 App + 2 widget；panel 11,774 色、0 绿、两帧 md5 不同。
+- P0 口径 `f-n1` = **99.98% SAME FRAME**；cross `f-n1-panel` vs `f-picture` = **100.00%** 作佐证。
+- 注意：same N（`f-panel` vs `f-picture`）只有 **89.58%**，说明 `f` 那一帧也在加载动画上；P0 用的是 PAIR 的 `f-n1` 静态帧（99.98%），不是 same N。
+
+**P0 判定**
+
+- 原判据：**连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95%**。
+- 计数：**v7（99.85% SAME）+ v9（99.98% SAME）= 2/3 → P0 达成**。v8 因采样时刻 89.53% NOT，不计入。
+- **诚实边界**：v8 不是渲染回归，也不是配对错误；P0 的 C4 对 **dump 时刻是否落在 UI 加载动画里**很敏感。后续验收要选**静态时刻**（例如 panel/picture 连续两帧稳定），或把「panel 与 picture 的加载状态一致」加为稳定性门槛；**不要用 v8 的动画帧当回归基线**。
+
 ---
 
 ## 五、铁律与提交
