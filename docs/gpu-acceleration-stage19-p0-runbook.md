@@ -1533,6 +1533,64 @@ PosterBoard（pid 43）日志：
   - 两者都不出现 → Darwin notify 跨进程在此环境不可达，只能走编译的 `layers_at` timer。
 - 保持 900s（UI 690s 后 3.5 分钟，SpringBoard 已注册）；**不要再用 300s 或盲改 plist 域/timing**。
 
+> **P2c-alt2 已执行（§4.20）**：unlock/switcher 两条都 `posted`，但三个 handler 一个都没跑；**notify 通道不可用**，转编译的 `layers_at` timer。
+
+### 4.20 s19o-p2c-alt2 实测：notify 通道不可用，转编译 `layers_at`（P2 未达成）
+
+> 归档：`/host/iosvm/logs/s19o-p2c-alt2/`（`report.md`、`imgdiff.txt`、`apfs-verify.txt`、日志、截图）。**这些文件都不进 git**。
+> P2c-alt2 通道对照发；**notify 发得出去、送不到**，P2 仍未达成。
+
+**镜像（仅重建 root.apfs）**
+
+| 项 | 值 |
+|---|---|
+| 构建 | `PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh`（**不设 `SYSTEM`**） |
+| root.apfs | 5,902,336 B，md5 **`5f8ba9ea793aa04683bc6e93e1c994e9`** |
+| system.apfs | 未动：2,476,748,800 B，md5 **`b75d80caaa5e276a58a4d45307d2165b`** |
+| plist | Args = `/redwood/bin/rwtouch wait 900 notify com.hakios.unlock notify com.hakios.switcher`；`UserName mobile`；stdout/err=`/dev/console`；镜像内解析一致 |
+| 核验 | `/etc/rc` = `rc.vtop`；libs 90,128 / 108,040 / 401,816 / 14,805,208，未回退 |
+| 备份 | `/tmp/root.apfs.bak-P2c-alt2`（`a10680fa…`，P2c-alt 版） |
+
+**Boot**
+
+| 项 | 值 |
+|---|---|
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000`；`XCMD=glwire_local=1`；`HOST_ENV=GLWIRE_NO_PANEL=1` |
+| `end=` | `end=ui`：`ui=660s`，`ui_bytes=308955`；最大截图 **326,744 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **3,517** 帧 |
+
+**机制：launchd + 两条 posted 都成功**
+
+- `(user/501/com.iosvm.layers [19])` → `Successfully spawned rwtouch[19]`（**user/501**，mobile 域）。
+- 900s 后：
+
+  ```text
+  rwtouch: notification com.hakios.unlock: posted
+  rwtouch: notification com.hakios.switcher: posted
+  ```
+
+**handler：三个一个都没跑**
+
+- `hakios: unlock` 全 log 只有 **1 行**：`hakios: unlock: asked, answer 1` —— 出现在 boot 早期（15:46 前的自动解锁，10s 保险），**在 15:51 的通知之前**，不是通知触发的。
+- `hakios: the switcher` / `hakios: layers` = **0 行**。
+- `SBWallpaperEffectView` / `PBUIWallpaperView` / `PRSPoster` / `CALayerHost` = **0**。
+- 截图：shot vs final `within tolerance 8 = 99.88%`（差异 bbox 只在 `590,212–1057,1187`，是时钟/widget 刷新），**没有 switcher 画面**；左右边缘非黑 **0/36,000** → 背景仍纯黑。
+- 对照组：同一次注入的 `dispatch_after(1s)` 主队列块照常执行（`hakios: battery: SOC=-1%`），SpringBoard[9] 全程 running。
+
+**判定**
+
+- LaunchDaemon + rwtouch 链路完全正常（域、运行、输出、退出码都对）。
+- **`notify_post` 返回 OK ≠ 投递成功**：unlock/switcher/layers 三个 handler 都没跑，说明跨进程 Darwin notification 在这个环境/这一代 dylib 里没有送达（或注册不在 SpringBoard 的 notify 命名空间）。
+- **notify 通道不可用**；不再盲改 plist/timing。转 **SpringBoard 进程内 `dispatch_after` 的 `layers_at` timer**（`inject_sb.c`，默认关），不依赖 rwtouch/notify。
+- **这是触发/通道问题，不是壁纸结论**；没有层树仍不能判断 wallpaper 层有无。P2 未达成。
+
+**阻塞项：exp 容器编不了新 dylib**
+
+- `layers_at` 需要新 `libhakios.sb.dylib`，但 **exp 容器没有 clang/SDK**，无法编译。
+- 需要**宿主编译产物**：`userland/obj/libhakios.sb.dylib`（含 `layers_at`，来自 `c056fb6`/对应 patch），或给 exp 容器挂工具链。
+- 拿到产物后：只重建 root.apfs（`RC=rc.vtop`，不设 SYSTEM），boot `XCMD="glwire_local=1 layers_at=900"`、`UI_GRACE=900 MAXSECS=3000`；先验 `layers timer 900s fired` 与 `hakios: layers`，仍不加 4 个 job。
+- **P3 guest 同样依赖这个编译环境**：没有新 dylib，P3 的 guest 侧代码也进不了镜像。
+
 ---
 
 ## 五、铁律与提交
