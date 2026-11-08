@@ -281,21 +281,26 @@ names_texture_take(struct glstate *g, GLuint guest)
 }
 
 /*
- * Stage nineteen, P1d: a glyph atlas tile's last rows carry the dotted residue seen under the
- * labels (raw dump: a 42-row tile has the dots in its bottom 8 rows).  GLWIRE_GLYPH_TRIM=<n>
- * zeroes the last n alpha rows of a GL_ALPHA 42/90-row upload, before it reaches GL.  row_bytes is
- * the upload's own stride (0 asks the current GL unpack state); only 1-byte alpha is touched, and
- * nothing happens unless the variable is set.
+ * Stage nineteen, P1d/P1e: a glyph atlas tile's last rows carry the dotted residue seen under the
+ * labels, but the upload buffer's row order need not be the dump's.  GLWIRE_GLYPH_TRIM=<n> zeroes
+ * n alpha rows of a GL_ALPHA 42/90-row upload; GLWIRE_GLYPH_TRIM_FROM=start|end (default end)
+ * says which end of the *upload buffer* to clear.  row_bytes is the upload's own stride (0 asks
+ * the current GL unpack state); only 1-byte alpha is touched, and nothing happens unless the
+ * variable is set.  The first eight trims print the two cleared rows' hashes so a run can say
+ * which end that was without guessing.
  */
 static void
 names_glyph_trim(void *data, GLsizei bytes, GLsizei width, GLsizei height, GLenum internal,
     GLenum format, GLenum type, GLsizei row_bytes, GLsizei pixel_bytes)
 {
 	const char *value = getenv("GLWIRE_GLYPH_TRIM");
+	const char *from = getenv("GLWIRE_GLYPH_TRIM_FROM");
 	char *end = NULL;
-	long parsed;
+	long parsed, first, last;
+	int from_start;
 	size_t stride, row_length;
 	GLint unpack_row = 0, unpack_alignment = 4;
+	uint32_t hash_first = 2166136261u, hash_last = 2166136261u;
 
 	if (value == NULL || *value == '\0' || data == NULL || bytes <= 0 || width <= 0 ||
 	    height <= 0 || (height != 42 && height != 90) || type != GL_UNSIGNED_BYTE ||
@@ -339,7 +344,24 @@ names_glyph_trim(void *data, GLsizei bytes, GLsizei width, GLsizei height, GLenu
 	    (size_t)bytes < stride * (size_t)(height - 1) + (size_t)width) {
 		return;
 	}
-	for (long y = height - parsed; y < height; y++) {
+	from_start = from != NULL && strcmp(from, "start") == 0;
+	if (from_start) {
+		first = 0;
+		last = parsed - 1;
+	} else {
+		first = height - parsed;
+		last = height - 1;
+	}
+	{
+		const unsigned char *line_first = (const unsigned char *)data + (size_t)first * stride;
+		const unsigned char *line_last = (const unsigned char *)data + (size_t)last * stride;
+
+		for (size_t x = 0; x < (size_t)width; x++) {
+			hash_first = (hash_first ^ line_first[x]) * 16777619u;
+			hash_last = (hash_last ^ line_last[x]) * 16777619u;
+		}
+	}
+	for (long y = first; y <= last; y++) {
 		memset((unsigned char *)data + (size_t)y * stride, 0, (size_t)width);
 	}
 	{
@@ -347,8 +369,9 @@ names_glyph_trim(void *data, GLsizei bytes, GLsizei width, GLsizei height, GLenu
 
 		if (said < 8) {
 			said++;
-			printf("glwire: glyph trim texture %dx%d rows %ld\n", (int)width, (int)height,
-			    parsed);
+			printf("glwire: glyph trim %dx%d rows %ld from %s first=%08x last=%08x\n",
+			    (int)width, (int)height, parsed, from_start ? "start" : "end",
+			    hash_first, hash_last);
 			fflush(stdout);
 		}
 	}
