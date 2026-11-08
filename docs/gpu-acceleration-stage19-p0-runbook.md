@@ -530,6 +530,8 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 
 ### 4.5 s19o-v3 实测与判读：字形仍然全灭，viewport 待验
 
+> **后记（v4/v5）**：本节保留 v3 当时的判读。后来 v4 用 `GLWIRE_VIEWPORT_TO_TARGET` 证实 viewport 才是根因，v5 用跨帧保留 viewport 让 prog15 从全 0 变成 223/223 >0。**v3 把 tc0 当成文字根因是误判**：v5 里 prog15 的 223 笔中有 36 笔带 NaN 仍能落像素，`tc0 v1.y NaN` 不阻断渲染；v3 的 tc0 问题实际主要是 prog13 背板/阴影路径的遗留。详见 §4.6、§4.7。
+>
 > 归档：`/host/iosvm/logs/s19o-v3/`（`report.md`、`text-draws.tsv`、`draws-landed.txt`、`draws-zero-*.txt`、`imgdiff-*.txt`、日志与截图）。**这些文件都不进 git**。本节只记录事实与未决点，**P0 仍未通过**。
 
 **运行**
@@ -562,16 +564,16 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 | target | 字形 draw 只进 750x200 / 64x19 / 64x9 等小 tile；这些 target **没有一笔 landed**；landed 全在 750x1624 合成与 138x138 图标 | target 选对了，不是「画到别的层」 |
 | matrix | 46 种矩阵，**0 个 NaN/Inf**；`m00=2/750`，`m11=2/200`（750x200 tile）把 bbox **精确映射进自己的 scissor**（#19: (374,1193)→clip(-1,-1)，(551,1283)→clip(-0.528,-0.1)） | 矩阵/几何不是本轮 zero 的原因 |
 | scissor | 字形 102 笔（51 对）**100% 含住 bbox**；2,246 笔 zero 里 **2,144 笔 scissor 是 off** | scissor 基本排除；不是「被裁掉」 |
-| `tc0` | **1,811 / 2,442（74.2%）含 NaN**；UI 段 **1,190 / 1,435（82.9%）**；NaN 固定在**顶点 2 的 y（v1.y）**，另有 `1.376e29` 垃圾值 | **这是当前唯一还站得住的根因方向** |
+| `tc0` | **1,811 / 2,442（74.2%）含 NaN**；UI 段 **1,190 / 1,435（82.9%）**；NaN 固定在**顶点 2 的 y（v1.y）**，另有 `1.376e29` 垃圾值 | v3 当时误判为根因；v4/v5 证明 NaN 不阻断，真正原因是 viewport（§4.6/§4.7） |
 
-`tc0` 的关键反例：`program 15` 的 UI 段 46 笔中，**41 笔不含 NaN**（24 笔是 `0.25..0.50` 图集网格、16 笔是 `0.125..0.50` 网格、1 笔仍带 `4.156`/`1.376e29` 垃圾值），**这 41 笔仍然全部落 0**。所以不能把问题简单写成「有 NaN 所以全灭」——**tc0 合法时也还没落像素**，这正是 viewport 问题要回答的。
+`tc0` 的关键反例：`program 15` 的 UI 段 46 笔中，**41 笔不含 NaN**（24 笔是 `0.25..0.50` 图集网格、16 笔是 `0.125..0.50` 网格、1 笔仍带 `4.156`/`1.376e29` 垃圾值），**这 41 笔仍然全部落 0**。所以不能把问题简单写成「有 NaN 所以全灭」——**tc0 合法时也还没落像素**。v4/v5 已经回答：这批 0 是 viewport 被拉成 750x1624 后裁掉的，不是 tc0 阻断；v5 的 prog15 带 NaN 也能落 221–1174 像素。
 
-**关键未决：viewport 与 target 的尺寸不一致**
+**当时的未决点：viewport 与 target 的尺寸不一致（v4 已证实，v5 已修复）**
 
 - v3 的 `program 15` 全部 232 笔的 viewport 都是 **750x1624**，而 target/matrix 是按 **200 高**（或 19 高）的小 tile 生成的。
 - 运行时观察（lead 口径）：每帧只有 **2 次 `glViewport`**，帧末 viewport 又变成小 target 尺寸。若 text draw 发生在「viewport 还是全屏、target 已是小 tile」的窗口里，几何会按全屏比例落到小 target 上，矩阵再对也无法覆盖预期像素。
-- **这是未决假设，不是已修复结论。** 下一发 `s19o-v4` 用 `GLWIRE_VIEWPORT_LOG` + `GLWIRE_VIEWPORT_TO_TARGET` 验证：每次 text draw 时的 viewport 是否等于 target 尺寸；如果不是，viewport 的切换时机就是下一层根因。
-- **s19o-v4 是探针发，不是验收发。** 在它给出数据前，不要写「viewport 已修好」或「P0 已通过」。
+- 这是 v3 当时的未决假设；v4 已用 `GLWIRE_VIEWPORT_LOG` + `GLWIRE_VIEWPORT_TO_TARGET` 证实，v5 已用跨帧保留 viewport 修复。**v5 的 prog15 223/223 >0**，见 §4.7。
+- v4 是探针发、v5 是根因验证发，都不是 P0 验收发；P0 仍要按 §三 连跑 3 发。
 
 **Search 的「Se」：位置不重叠，无法像素级归属**
 
@@ -594,8 +596,8 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 
 - 界面/稳定性：OK（4,918 帧、0 panic/SIGSEGV/usertrap；`ui=0` 只是 251 KB < 300 KB 的门槛）。
 - 字形层：`prog13/15` **2,246/2,246 全 zero**；P0 **仍未通过**。
-- 四维里 target、matrix、scissor 基本排除；`tc0` 仍有 74.2%/82.9% 的 NaN，但 prog15 UI 有 41 笔不含 NaN 仍 zero，**viewport 未决**。
-- 下一发：**`s19o-v4`（viewport 探针）**，不是验收发；等它回答 viewport 与 target 是否一致后，再谈修 tc0 或验收。
+- 四维里 target、matrix、scissor 基本排除；`tc0` 的 NaN 是当时剩下的疑点，但 v4/v5 证明 **viewport 才是根因，tc0 v1.y NaN 不阻断**。v3 的「tc0 根因」结论作废，改为「prog13 背板/阴影路径的遗留问题」。
+- 下一发 v4（viewport 探针）已完成；结果与 v5 根因修复见 §4.6、§4.7。
 
 ### 4.6 s19o-v4 实测：`end=ui` 首次达成，viewport 假设成立（P0 仍未通过）
 
@@ -656,7 +658,73 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 
 - **里程碑**：`end=ui` 首次达成；10 个 App 名称 + 2 个 widget 名称；viewport 假设被 override 实验证实。
 - **P0 不能算达标**：只有 **1 发**，没有同帧 `diffdump --tolerance 8` ≥95%，Clock/News 仍缺；「Se」也还在。
-- **下一步**：code 做根因修复（跨 frame 保留 guest viewport，panel 绘制前后 save/restore），随后 **v5 验证**；v5 也不是验收发，P0 仍要按 §三 连跑 3 发、≥2 发过全部判据。
+- **下一步**：code 做根因修复（跨 frame 保留 guest viewport，panel 绘制前后 save/restore），随后 **v5 验证**；v5 结果见 §4.7。v5 也不是验收发，P0 仍要按 §三 连跑 3 发、≥2 发过全部判据。
+
+### 4.7 s19o-v5 实测：根因修复成立，但 diffdump 仍 n/a（P0 不能计入）
+
+> 归档：`/host/iosvm/logs/s19o-v5/`（`report.md`、`rows.json`、`draws-early-prog15.txt`、`imgdiff-*.txt`、日志与截图）。**这些文件都不进 git**。本节只记录 v5 的事实；**P0 仍未通过，v5 暂不能计入 P0 发次**。
+
+**运行与结束**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-v5` / 2026-11-08 05:52:20Z–06:07:58Z |
+| 修复基线 | `204ae10`（`tools(glwire): keep the guest viewport across frame boundaries`）；不再设 `GLWIRE_VIEWPORT_TO_TARGET` |
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1500 MINFRAMES=99999 MAXSECS=1800 UI_GRACE=300 MINSHOT=200000`；`HOST_ENV="GLWIRE_TEXT_DRAW_LINE=1 GLWIRE_DUMP=/tmp/s19o-v5/f GLWIRE_DUMP_AT=800 GLWIRE_DUMP_PAIR=1"` |
+| `end=` | **`end=ui`**：`ui=600s`，`ui_bytes=308809` |
+| 最大截图 | **322,481 B ≥ 300,000**（`s19o-v5-shot.png`；last 320,105 B、final 320,462 B） |
+| 稳定性 | `panic=0`、`SIGSEGV=0`、`usertrap=0`；host frames **2,964** |
+| text draw | **1,770 行**；`nz>0` **273** 笔 |
+
+**视觉**
+
+- 名称与 v4 相同：**10 个 App + 2 个 widget**（Weather、Calendar；FaceTime、Calendar、Photos、Mail；Notes、Reminders；TV、Podcasts；Health、Wallet）。
+- **Clock、News 仍无名称**；Search 仍是「**Se**」。
+- **新增正确元素**：Search 圆角药丸背景、dock 圆角背景这次画出来了（v4 该区域是纯黑）。
+
+**根因修复成立：prog15 从全 0 变 223/223 >0**
+
+- 本发**不设** `GLWIRE_VIEWPORT_TO_TARGET`，只靠跨帧保留 guest viewport。
+- `program 15`：**223/223 全部 `nz>0`**；`program 13`：**1,283/1,283 全部 0**。
+- `frame < 100` 的 **71 笔 prog15 全部 >0**（`nz` 221–1174）；viewport 已变成 **`0,0 750x200`**（不再是 v4 的 750x1624），对应 scissor 如 `0,0 178x90`。
+- 代表行：`frame 9 #28 prog 15 ... viewport 0,0 750x200 scissor on 0,0 143x90 ... scissor-nonzero 585`。
+- **Clock / News 的 prog15 draw 本身成功**：Clock `nz 888/888`、News `nz 536/536`，矩阵/bbox 都落在 750x200 tile 的 scissor 内。它们不上屏是 **draw 之后的合成/层**问题，**不要写成「字形没画出来」**。
+
+**tc0 修正（v3 的结论作废）**
+
+- v5 的 prog15 里只有 **36/223 笔 tc0 带 NaN**，其余是 `0.125/0.25` 的良性 texel 网格；**`tc0 v1.y` 的 NaN 不阻断渲染**（Clock/News 带 NaN 仍有 888/536 像素）。
+- v3 的「tc0 是文字根因」应修正为 **`prog13` 背板/阴影路径的遗留问题**：v5 UI 段 **573 笔全 prog13、全 0**，是背板 pass，不是字形 pass。
+- 名称是在**早期 frame 9–781** 一次性画进 750x200 标签层，之后 UI 只复用，不再重画字形。
+
+**diffdump：n/a（不是 SAME/NOT）**
+
+- `GLWIRE_DUMP_PAIR=1` 只写出了 `f-picture-750x1624.bgra` 与 `f-n1-picture-750x1624.bgra`，**没有 `f-panel` / `f-n1-panel`**；`diffdump.py` 报 `need both ...-panel-*.rgba and ...-picture-*.bgra`，所以 C4 **n/a**。
+- 根因在宿主侧 `names.h:332`：只有 `guest == 0xFFFF0001` 或 **1125x2436** 时才把上传存进 `g->panel`；本发面板是 **750x1624**、纹理名 1/4/7/10，全日志 `1125x2436` 出现 0 次，`client->names.panel` 全程 NULL。**这是分辨率从 1125x2436 切到 750x1624 后 panel 落盘条件没跟着更新，不是 dump 太早。**
+- dump 行号本身合格：首个非零 draw 在日志第 54 行（frame 9 #28），PAIR 写在 9836 行（frame 2082），晚于字形且晚于 UI。**缺的只是 panel 文件。**
+- code 正在修 panel 条件；修好后重跑 **v6** 才能拿到 P0 C4。**不要把 n/a 写成 NOT，也不要写成 SAME。**
+
+**imgdiff：v5 vs A1（截图回归，不是 C4）**
+
+| 范围 | within | different | bbox（right/bottom exclusive） | 判定 |
+|---|---:|---:|---|---|
+| 全图 1125x2436 | **95.20%** | **4.80%** | `(29,80,988,2407)` | PASS（≥95%） |
+| Search crop `250,2000 650x300` | **78.81%** | **21.19%** | `(250,2000,563,2300)` | **FAIL** |
+
+- 全图差异来自名称出现 + 新画出的 Search 药丸/dock 圆角背景，不是画面回归；全图仍 ≥95%。
+- Search crop 的 FAIL 也是**新生儿素**（药丸 2000–2080、dock 背景 2150–2300）造成的，**不是 Se 字形变差**。
+- 这是截图回归，**不是 C4**：C4 要同发 panel/picture 的 `diffdump`，v5 的 panel 没落盘，C4 只能 n/a。
+
+**P0 记分与边界**
+
+| P0 判据 | v5 | 说明 |
+|---|---|---|
+| 首页 ≥5 个 App 名称 | ✅ 10 App + 2 widget | Clock/News 仍缺 |
+| 截图 ≥300,000 B | ✅ 322,481 B | |
+| 同帧 `diffdump --tolerance 8` ≥95% | ❌ **n/a** | panel 未落盘（`names.h` 条件过时），不是 SAME/NOT |
+| `end=ui` / 无 panic | ✅ | |
+
+- **v5 暂不能计入 P0 发次**：面板条件修好后重跑 v6，一次拿齐 panel/picture 才有 C4；P0 仍要按 §三 连跑 3 发、≥2 发过全部判据。
+- 下一步不是「验收」，是 **v6（panel 修复后的同帧 diffdump 验证）**。
 
 ---
 
