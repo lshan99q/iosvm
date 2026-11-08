@@ -1173,7 +1173,63 @@ P1d 已运行，trim 执行但**清错端**，band 3499→6246；完整数据与
 
 1. code 复核上传缓冲行序与 P1c dump 的对应关系（建议 trim 前后各做一次 ATLAS_DUMP，或打印被清第一/最后一行的指纹）。
 2. 增加 **`GLWIRE_GLYPH_TRIM_FROM=start|end`**（或等价参数），明确清「视觉底部 6–8 行」而不是固定「缓冲最后 n 行」；注意 90 高背板 tile 的点线在背板下缘之外，行数可能不同。
-3. **P1e** 用 `TRIM_FROM=end`（或修正后的 TRIM）验证点带消失且 descender 不被削；P1e 数据前 P1 保持「进行中」。
+3. **P1e** 用 `TRIM_FROM=start`（或其他修正后的 TRIM）验证点带消失且 descender 不被削；P1e 数据前 P1 保持「进行中」。
+
+### 4.15 s19o-p2 实测：lookup 修好、PosterBoard 起来了，但壁纸未出现（P2 未达成）
+
+> 归档：`/host/iosvm/logs/s19o-p2/`（`report.md`、`build-p2.log`、`apfs-verify.txt`、`bands.txt`、`report/`、日志、截图）。**这些文件都不进 git**。
+> P2 第一次 boot；**lookup 链修好，但壁纸判据三项里只过第一项**，P2 未达成。
+
+**构建与镜像**
+
+| 项 | 值 |
+|---|---|
+| 改动 | `userland/build.sh` 三处：`root/LaunchAngels` + 拷 `com.apple.PosterBoard.plist`；`sysroot/System/Library/LaunchAngels -> /redwood/LaunchAngels` |
+| 命令 | `PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop SYSTEM=1 ./build.sh` |
+| 产物 | `root.apfs` **5,902,336 B**；`system.apfs` **2,476,748,800 B** |
+| 核验 | system：`LaunchAngels` = symlink → `/redwood/LaunchAngels`；root：`/LaunchAngels/com.apple.PosterBoard.plist` 存在（1000 B）；`/lib` 的 libhakios 90,128 / libhakios.sb 108,040 / libhakios.gl 401,816 / libOSMesa 14,805,208 与备份树逐项相同，**无回退** |
+| 备份 | `/tmp/system.apfs.bak-P2`、`/tmp/root.apfs.bak-P2`、`/tmp/userland-root.bak-P2`、`/tmp/prebuilt-userland.bak-P2` |
+
+**Boot**
+
+| 项 | 值 |
+|---|---|
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MAXSECS=2400 UI_GRACE=300 MINSHOT=200000`；`XCMD=glwire_local=1`；`HOST_ENV=GLWIRE_NO_PANEL=1`（trim/sanitize/dump 全关） |
+| `end=` | `end=ui`：`ui=660s`，`ui_bytes=313636`；最大截图 **324,944 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **1,023** 帧 |
+
+**判据逐条**
+
+| 判据 | 结果 | 证据 |
+|---|---|---|
+| `posterboardservices` lookup 不再失败 | ✅ | P2 日志中 `posterboardservices` **0 次**；v9 有 2 次 `No such process` |
+| PosterBoard 起来并持续运行 | ✅ | `Successfully spawned PosterBoard[43] because launch job demand`；`service state: running`；无 exit/kill |
+| 宿主出现 1125x2436 或全屏非 panel 纹理 | ❌ | host 上传 1027×`750x1624`（panel `4294901761`）+ 180x180/28x95/6x85 等图标；**无 1125x2436，也无第二张全屏非 panel 纹理** |
+| 主屏背景非纯黑 | ❌ | 截图左右边缘（x0..60 / x1060..1120，y700..1300）非黑像素 **0**；顶部只有红条，背景纯黑 |
+
+**为什么没出壁纸：PosterBoard 没崩，缺依赖/流程**
+
+PosterBoard（pid 43）日志：
+
+- `failed lookup: com.apple.managedconfiguration.profiled.public`（**10 次**）
+- `failed lookup: com.apple.powerlog.plxpclogger.xpc`（**4 次**）
+- `Invalid XPCService dictionary` + `Could not get domain target from bundle: .../MediaConversionService.framework/XPCServices/com.apple.photos.VideoConversionService.xpc`（**error 22: Invalid argument**）；ImageConversionService 同样
+- `Unable to find persona with type 6: 3 - No such process`（**2 次**，11:58）
+- SpringBoard 侧 shim：`poster switcher not offered`
+- **没有 SIGSEGV/exit**：进程一直 running；也就是说它起来了，但**没有生成 poster/wallpaper 表面**，也没有上传壁纸纹理。
+
+**重要副作用：重建后 P1 基线变了**
+
+- 本发 **trim/sanitize 都没开**（host log `glyph trim`=0、`tc0 sanitized`=0），但 14 标签 band 合计 = **6989/3970/2652（v9 3499 的 199.7%）**，与 P1d（trim=6，6246）同量级。
+- 说明重建后的镜像或该次 UI 状态改变了标签渲染；**不能把变化归因于 trim**。
+- **P1e 起用 `6989` 作新 baseline**；旧的 v9 `3499` 不再直接可比。若 P0/P1 要基于新镜像继续，先做一次「旧镜像 + 新 host」或「新镜像 + 旧 host」的对照，确认点带变化来源；旧镜像备份在 `/tmp`。
+
+**结论与下一步**
+
+- lookup 链修好、PosterBoard 启动并 running，但**壁纸未出现，P2 未达成**。
+- 不是 PosterBoard 崩溃，而是依赖/流程没走完：上述 lookup/XPC/persona 失败 + SpringBoard shim 是下一层入口。
+- 下一步：code 离线查 PosterBoard 依赖链（managedconfiguration/powerlog/MediaConversion/persona）；不要在没有新证据时重复重建镜像。
+- **P1e** 用 P2 的新 baseline `6989` 验证 `TRIM_FROM=start`；P1 仍未修复。
 
 ---
 
@@ -1254,9 +1310,9 @@ P0: <2/3 或 3/3> PASS；阻塞：<几何/scissor 的哪一处>；下一发：<�
 
 **P4 四格表**：`tools/glwire/harness/four-cell.sh` 是 **dry-run 骨架**，镜像由外部构建，未跑 QEMU；不要把它 `--dry-run` 读旧日志算出的表格当成一次实测四格表。
 
-## 七、P2 壁纸重建配方（预置，未执行）
+## 七、P2 壁纸重建配方（已执行一次；结果见 §4.15）
 
-> **这是 P2 的预置配方，尚未在本阶段执行。** 构建/重建 `system.apfs` 期间跑测量会触发 tick-spinlock panic；必须等 **P1d 与当前测量全部结束、无 qemu** 后再做（§2.2 的 `ps` 检查）。P2 不改变 P0 的 2/3 结论。
+> **本配方已按 §4.15 跑过一次。** 首次执行结果：lookup 修好、PosterBoard 启动并 running，但**壁纸未出现**（无 1125x2436/全屏非 panel 纹理，背景纯黑），P2 未达成。构建/重建 `system.apfs` 期间跑测量会触发 tick-spinlock panic；必须等 **P1d 与当前测量全部结束、无 qemu** 后再做（§2.2 的 `ps` 检查）。P2 不改变 P0 的 2/3 结论。
 > 任务文里写的 `com.apple.PostBoard.plist` 是简写/笔误；实际文件名是 **`com.apple.PosterBoard.plist`**，命令按实际名写。
 
 ### 7.1 前置与备份
@@ -1272,8 +1328,9 @@ ps -eo pid,comm | grep -E 'qemu-system|host_glwire' || echo clean
 test -f ../sysimage/rootfs/System/Library/LaunchAngels/com.apple.PosterBoard.plist && echo plist-ok
 
 # 备份当前镜像（GB 级；确认磁盘空间）
-cp -a root.apfs /tmp/root.apfs.pre-p2
-cp -a system.apfs /tmp/system.apfs.pre-p2
+cp -a root.apfs /tmp/root.apfs.bak-P2
+cp -a system.apfs /tmp/system.apfs.bak-P2
+cp -a root /tmp/userland-root.bak-P2
 ```
 
 ### 7.2 改 `userland/build.sh`（两处）
@@ -1301,10 +1358,12 @@ ln -s /redwood/LaunchAngels sysroot/System/Library/LaunchAngels
 
 ```sh
 cd "$KERNEL/userland"
-SYSTEM=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh root.apfs
+PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop SYSTEM=1 ./build.sh
 ```
 
-`SYSTEM=1` 强制重建 `system.apfs`（10–20 分钟）；`root.apfs` 每次都会重建。期望末尾有 `root.apfs: ...` 与 `system.apfs: ...` 两行，且没有 `error`/`FAILED`。
+`PREBUILT=1` 是因为容器里没有 `~/theos`；`SYSTEM=1` 强制重建 `system.apfs`（10–20 分钟），`root.apfs` 每次都会重建。期望末尾有 `root.apfs: ...` 与 `system.apfs: ...` 两行，且没有 `error`/`FAILED`。
+
+> 首次执行（§4.15）的防回退步骤：构建前把 `prebuilt/userland` 里 17 个旧库临时同步成 `obj/` 的新版本，构建后恢复；备份在 `/tmp/prebuilt-userland.bak-P2`。若不做这一步，10-31 的旧库可能覆盖 11-07 的新库。
 
 ```sh
 python3 ../tools/apfs/apfs.py ls root.apfs /LaunchAngels
