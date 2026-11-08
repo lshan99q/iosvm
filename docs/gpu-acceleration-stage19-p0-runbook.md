@@ -1302,6 +1302,92 @@ PosterBoard（pid 43）日志：
 - P1c 的 tile 字节与 P1e 的 FNV 一致（同一 tile 内容），而 P2 baseline 6989 远高于 v9 3499 → 漂移更可能来自 **host binary 版本（`ec129181`→`6584cdf`）或 UI 时刻**，不是镜像/字体。
 - 后续 P1 对比要**固定 host binary**，并记录 UI 时刻；不要再拿 v9 的 3499 直接比新镜像。
 
+### 4.17 s19o-p2 根因分析：不是依赖卡死，更像 hosted wallpaper scene 没接上
+
+> 材料：`/host/iosvm/logs/s19o-p2-root-cause.md`（离线分析）、`/host/iosvm/logs/s19o-p2/` 的日志、`/host/iosvm/logs/rc.p2diag`（P2b 的 rc 文件）。**这些文件都不进 git**。
+> 结论：**没有证据表明 PosterBoard 被依赖卡死，也没有崩溃**；更可能是 **hosted wallpaper scene 没被 SpringBoard 接上 / 没有 poster 配置**。下一步用层树诊断，不盲加 daemon。
+
+**时间线（PosterBoard[43]）**
+
+| 时间 | 事件 | 读法 |
+|---|---|---|
+| 11:55:01.77 | launchd `WILL_SPAWN`；`kpersona_find_by_type` type 6 失败 | persona 错误在 spawn 前就有，系统级，不是 PosterBoard 特有 |
+| 11:55:03.81 | `service spawned with pid 43`，state running | 进程起来了 |
+| 11:55:07.53 | `failed lookup: com.apple.managedconfiguration.profiled.public` | 早，但 24 s 后仍在继续 |
+| 11:55:31.20 | `failed lookup: com.apple.powerlog.plxpclogger.xpc` | 同上，不是立即放弃 |
+| 11:55:34.58 | `(pid/43) uncorking domain` | app 主体开始 |
+| 11:55:48 | 大量 `Service stub created`；MediaConversion Video/ImageConversion `error 22` | 框架初始化；错误来自 Photos 转换服务，不是壁纸 |
+| 11:57:22–11:58:09 | 继续 `Service stub created`（FontServices/CoreAccessories/SensorKit 等） | 仍在初始化，没有卡在某个 lookup |
+| 11:58:21–11:58:34 | `extensionkitservice` stub→spawn pid 48→running；11:58:32 persona 错误 | PosterBoard 主动向 ExtensionKit 要扩展 |
+| 11:59:47 | `extensionkitservice` `job state = running` | 之后到结束（12:02）没有 pid/43 新行 |
+
+- **没有 PosterBoard 创建的 IOSurface**：全日志 `MiniIOSurface: ... created surface` 只有 backboardd/SpringBoard，PosterBoard[43] **0 条**。
+- **进程没有退出/被杀**：无 exit/SIGKILL/panic；只是没有更多日志。
+- **没有 `/var/mobile/Library/{PosterBoard,PaperBoard,Wallpaper}` 写出**：poster 数据模型没落盘，不能只怪显示。
+
+**注意：PosterBoard 没 surface ≠ 黑屏证据**
+
+壁纸可能是 PosterBoard 在另一个进程 live 画、host 进 SpringBoard 的 layer tree；SpringBoard 自己只有 placeholder/没有 bitmap。PosterBoard 的 host scene 可能**不新建自己的 MiniIOSurface**。所以「0 条 PosterBoard surface」只能说明它没走到自己的渲染/快照，**不能单独判死**。真正要回答的是 SpringBoard 层树里有没有 wallpaper 层及其 contents——P2 没触发 `com.hakios.layers`，这份证据缺。
+
+**依赖审计：存在/加载/最小修法**
+
+| 依赖 | 镜像里 | P2 是否加载 | 结论 / 最小修法 |
+|---|---|---|---|
+| `com.apple.managedconfiguration.profiled.public` | plist + `/usr/libexec/profiled` 都在 | **否**：root.apfs `/LaunchDaemons` 无此 job | 加 job（低代价）；但 PosterBoard 失败后继续走 3 分钟，**非致命嫌疑大** |
+| `com.apple.powerlog.plxpclogger.xpc` | `com.apple.powerlogHelperd.plist` + `/usr/bin/powerlogHelperd` 在 | **否** | 加 `powerlogHelperd` job；遥测，非壁纸关键 |
+| MediaConversion Video/ImageConversion | 两个 `.xpc` 的 Info.plist 与二进制都在；`XPCService=False`（老式，需要 launchd job） | **否**；launchd 报 `Invalid XPCService dictionary/error 22` | 加两个 Photos job（低代价）；**只影响 Photos 转换，不影响壁纸** |
+| `com.apple.locationd.synchronous` | plist 有，但 `/usr/libexec/locationd` **二进制缺失** | 否 | 不能简单加 job；stub 同步 XPC 协议代价高，**不做** |
+| persona type 6 | personas plist 在；`kpersona_find_by_type` 在 wifid/chronod/backboardd/SpringBoard 都失败 | 系统级 | 不是 PosterBoard 特有；伪造 persona 影响全局，**不动** |
+| `posterboardservices.dataModel` / `data-store` | **没有 launchd plist**；只有客户端字符串 | 无 provider 可见 | 更像 SpringBoard/PosterBoard **进程内 BSService**；加 plist 修不了，需 layer/runtime 证据 |
+| `chronoservices` / `extensionkitservice` | chronod running；extensionkitservice 由 PosterBoard 拉起 pid 48 | 是 | 不是缺失项；但 `CollectionsPoster` 等 poster provider appex 没看到被拉起，ExtensionKit 发现结果仍是问号 |
+| 默认壁纸素材 | `/Library/Wallpaper/.../iOS_16`（id 7400）与 `DefaultWallpapers~iphone.plist` 都在 system.apfs | — | **素材不缺**；缺的是 poster 配置/数据模型或 layer 连接 |
+
+**判断**
+
+- 没有证据是依赖卡死：profiled/powerlog/MediaConversion 的失败都发生在 PosterBoard 继续初始化之前/期间；它之后持续创建几十个 service stub，并主动找 extensionkitservice。
+- 黑屏更像 **PosterBoard hosted wallpaper scene 没有被 SpringBoard 接上 / 没有 poster 配置**，不是缺某个 daemon。
+- **不要写成「PosterBoard 崩溃」**：它没有崩，全程 running，没有 exit/SIGKILL/panic。
+
+**P2b 诊断（已派）：层树 + 更长 grace，不混发**
+
+- 在 `userland/` 放 `rc.p2diag`（`/host/iosvm/logs/rc.p2diag`，复制 `rc.vtop` 加一行）：
+  ```sh
+  ( /redwood/bin/rwtouch wait 900 notify com.hakios.layers ) &
+  ```
+- 构建：**只重建 root.apfs**，`RC=rc.p2diag`，**不设 `SYSTEM=1`**（system.apfs 不动）：
+  ```sh
+  cd "$KERNEL/userland"
+  cp -a root.apfs /tmp/root.apfs.bak-P2b
+  cp /host/iosvm/logs/rc.p2diag rc.p2diag
+  PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.p2diag ./build.sh
+  ```
+- Boot（完整命令；`MAXSECS` 真正生效的是第三个位置参数 `3000`，环境变量会被脚本覆盖）：
+
+  ```sh
+  cd /host/iosvm
+  export REPO=/host/iosvm
+  export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+  export GLWIRE=$REPO/tools/glwire
+  export ROOT=$KERNEL/userland/root.apfs
+  LABEL=s19p2b-1
+  mkdir -p /tmp/$LABEL
+
+  XCMD="glwire_local=1" \
+  ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000 \
+  HOST_ENV="GLWIRE_NO_PANEL=1" \
+  IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
+  tools/glwire/harness/boot-measure.sh "$LABEL" "$ROOT" 3000
+  ```
+- 判据：
+  1. **层树**（`hakios: layers...`）里出现/不出现 `SBWallpaperEffectView` / `PBUIWallpaperView` / `PRSPoster` / `CALayerHost`，以及 `frame`、`contents`、`opacity`；若出现 `CALayerHost`，是否对应 PosterBoard 的 context id。
+  2. **宿主**：是否出现第二张全屏（750x1624 非 panel）纹理，或壁纸区域的 draw。
+  3. **截图边缘**是否仍全黑。
+- 分支：
+  - 有 wallpaper 层且 `contents` 非空 → 壁纸路径通，问题在内容/快照；
+  - 有层但 `contents` 空 → 内容/快照；
+  - 完全没有 wallpaper 层 → **下一发才加 4 个 job 对照**（`managedconfiguration.profiled`、`powerlogHelperd`、Video/ImageConversion），**不要和层树诊断混在同一 boot**，否则分不清是时间、job 还是层树变化。
+- 不要在同一发加 daemon；不要动 locationd/persona stub。
+
 ---
 
 ## 五、铁律与提交
