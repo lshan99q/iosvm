@@ -1465,6 +1465,73 @@ PosterBoard（pid 43）日志：
 
 - P2c 先验：guest log 出现 **`layers timer 900s fired`**（或等价日志）与 `hakios: layers`；若 timer 不 fired，先查 boot arg 是否传到 SpringBoard，不要先加 job。
 - **仍然不加 4 个 job**；P2c 只解决「层树触发」，wallpaper 层有无/contents 是否有值是下一层判断。
+- **实际执行的是 P2c-alt（LaunchDaemon + rwtouch，见 §4.19）**：机制成功，但 SpringBoard 的 handler 没跑；P2c-alt2 做通知通道对照。
+
+### 4.19 s19o-p2c-alt 实测：LaunchDaemon 机制成功，SpringBoard handler 没跑
+
+> 归档：`/host/iosvm/logs/s19o-p2c-alt/`（`report.md`、`build-p2c-alt.log`、`apfs-verify.txt`、日志、截图）。**这些文件都不进 git**。
+> P2c 的替代路线；**机制通了、内容失败**，P2 仍未达成。
+
+**镜像（仅重建 root.apfs）**
+
+| 项 | 值 |
+|---|---|
+| 构建 | `PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh`（**不设 `SYSTEM`**） |
+| root.apfs | 5,902,336 B，md5 **`a10680fa64b7e24907dc0cd39ea70dc7`** |
+| system.apfs | 未动：2,476,748,800 B，md5 **`b75d80caaa5e276a58a4d45307d2165b`** |
+| 新 job | `/LaunchDaemons/com.iosvm.layers.plist` **837 B**；`plistlib` 解析 OK：Label `com.iosvm.layers`、Args `/redwood/bin/rwtouch wait 900 notify com.hakios.layers`、`UserName mobile`、`RunAtLoad=true` |
+| 核验 | `/etc/rc` 与本地 `rc.vtop` md5 一致（`b0f1d6b0…`）；libs 90,128 / 108,040 / 401,816 / 14,805,208，未回退 |
+| 备份 | `/tmp/root.apfs.bak-P2c-alt`（`b2e9199…`，P2b 版） |
+
+**Boot**
+
+| 项 | 值 |
+|---|---|
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000`；`XCMD=glwire_local=1`；`HOST_ENV=GLWIRE_NO_PANEL=1` |
+| `end=` | `end=ui`：`ui=690s`，`ui_bytes=310639`；最大截图 **328,595 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **3,479** 帧 |
+
+**判据 a：launchd / rwtouch 成功**
+
+- `pending spawn, domain in on-demand-only mode: com.iosvm.layers` → `WILL_SPAWN` → `launching: speculative`（14:49:42）。
+- **`(user/501/com.iosvm.layers [19])`**：`Successfully spawned rwtouch[19]`（14:51:34，`user/501` = mobile 域 ✅）。
+- 900s 后：**`rwtouch: notification com.hakios.layers: posted`**（15:07:49），随后 `EXITED, code = 0`。
+- 同一次注入里的 `dispatch_after(1s)` 主队列块**执行了**（`hakios: battery: SOC=-1% …`）→ SpringBoard 主队列正常、`say` 输出可达。
+
+**判据 a：层树仍然 0**
+
+- `hakios: layers` = **0 行**；`SBWallpaperEffectView` / `PBUIWallpaperView` / `PRSPoster` / `CALayerHost` = **0**。
+- SpringBoard[9] 全程 running，无 exit/restart/崩溃。
+- dylib 侧：`obj/libhakios.sb.dylib` strings 含 `_notify_register_dispatch` 与 `com.hakios.layers`（另含 `unlock`/`switcher`），说明注册代码在二进制里。
+- **结论**：`notify_post` 返回成功，但 SpringBoard 的 handler 没有跑。可能原因：
+  1. 跨进程 Darwin notify 在该环境没有送达（`posted` 只代表 API 成功，不代表有监听者收到）；
+  2. 注册与 post 不在同一个 notify 命名空间/会话（尽管二者同为 `user/501`）；
+  3. 现有 dylib（11-07 构建）的 layers 注册与源码现状不完全一致（源码今天加了 timer，notify 注册行更早）。
+
+**判据 b：壁纸/背景仍失败**
+
+- host 上传：3,483 张 `750x1624`，其中 **3,479 张是 panel `4294901761`**；另有 1/4/7/10 四张启动期全屏；**无第二张持续非 panel 全屏纹理、无 1125x2436**。
+- 截图左右边缘各 **0 / 36,000** 非黑 → **背景仍纯黑**。
+- PosterBoard 照旧 running，依赖错误与 P2 相同。
+- **这是触发/注册问题，不是壁纸结论**：没有层树就不能判断 wallpaper 层有无。
+
+**下一步：P2c-alt2 通知通道对照**
+
+- 用**同一个 LaunchDaemon 机制**，把 `ProgramArguments` 改成依次 post **已知 handler** `com.hakios.unlock` / `com.hakios.switcher`：
+
+  ```text
+  /redwood/bin/rwtouch wait 900 notify com.hakios.unlock wait 5 notify com.hakios.switcher
+  ```
+
+  若 `rwtouch` 不支持一条命令里连续动作，就拆成两发（alt2-unlock / alt2-switcher），**不要同时改域/timing/代码**。
+- 构建仍只重建 root.apfs（`RC=rc.vtop`、不设 `SYSTEM`；plist 由 build.sh 拷入），备份 `/tmp/root.apfs.bak-P2c-alt2`。
+- Boot 同 P2c-alt：`UI_GRACE=900`、`MAXSECS=3000`、`XCMD=glwire_local=1`。
+- 判据：
+  - `com.hakios.unlock` → 日志出现 **`hakios: unlock:`**（`asked/not locked` 都算 handler 跑过）；
+  - `com.hakios.switcher` → 日志出现 **`hakios: the switcher:`**（即使屏幕不变，也证明 handler 跑过）；
+  - 任一出现 → **notify 通道正常**，layers 是注册/版本问题，等 code 带 timer 的新 dylib；
+  - 两者都不出现 → Darwin notify 跨进程在此环境不可达，只能走编译的 `layers_at` timer。
+- 保持 900s（UI 690s 后 3.5 分钟，SpringBoard 已注册）；**不要再用 300s 或盲改 plist 域/timing**。
 
 ---
 
