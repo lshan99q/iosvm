@@ -1006,6 +1006,11 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		if (text_line && last_draw_was_glyph) {
 			host_text_snapshot(g, serial);
 		}
+		/* (ATLAS_DUMP alone: no draw log and no label state, just the tile the glyph draw samples) */
+		if (last_draw_was_glyph && getenv("GLWIRE_ATLAS_DUMP") != NULL &&
+		    getenv("GLWIRE_LABEL_DUMP") == NULL) {
+			host_label_sample(g);
+		}
 		host_viewport_to_target();
 		return;
 	}
@@ -1295,6 +1300,9 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 			    (double)matrix[13], (double)matrix[14], (double)matrix[15]);
 			host_attrib_state(g);
 			fflush(stdout);
+		} else if (getenv("GLWIRE_ATLAS_DUMP") != NULL) {
+			/* (the tile without the label state/read-back the block above prints) */
+			host_label_sample(g);
 		}
 		host_dump_uniforms(g, "text-draw");
 		/* (stage fourteen: what the text draw actually asks the GPU to do) */
