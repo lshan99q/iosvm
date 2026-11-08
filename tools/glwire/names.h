@@ -280,6 +280,80 @@ names_texture_take(struct glstate *g, GLuint guest)
 	return (GLuint)name_map_take(&g->textures, guest);
 }
 
+/*
+ * Stage nineteen, P1d: a glyph atlas tile's last rows carry the dotted residue seen under the
+ * labels (raw dump: a 42-row tile has the dots in its bottom 8 rows).  GLWIRE_GLYPH_TRIM=<n>
+ * zeroes the last n alpha rows of a GL_ALPHA 42/90-row upload, before it reaches GL.  row_bytes is
+ * the upload's own stride (0 asks the current GL unpack state); only 1-byte alpha is touched, and
+ * nothing happens unless the variable is set.
+ */
+static void
+names_glyph_trim(void *data, GLsizei bytes, GLsizei width, GLsizei height, GLenum internal,
+    GLenum format, GLenum type, GLsizei row_bytes, GLsizei pixel_bytes)
+{
+	const char *value = getenv("GLWIRE_GLYPH_TRIM");
+	char *end = NULL;
+	long parsed;
+	size_t stride, row_length;
+	GLint unpack_row = 0, unpack_alignment = 4;
+
+	if (value == NULL || *value == '\0' || data == NULL || bytes <= 0 || width <= 0 ||
+	    height <= 0 || (height != 42 && height != 90) || type != GL_UNSIGNED_BYTE ||
+	    (internal != GL_ALPHA && format != GL_ALPHA)) {
+		return;
+	}
+	parsed = strtol(value, &end, 10);
+	if (end == value || *end != '\0' || parsed <= 0) {
+		return;
+	}
+	if (parsed > height) {
+		parsed = height;
+	}
+	if (pixel_bytes > 0 && pixel_bytes != 1) {
+		return;         /* (an RGBA upload is not one of the 1-byte alpha glyph tiles) */
+	}
+	if (row_bytes > 0) {
+		stride = (size_t)row_bytes;
+	} else {
+		glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpack_row);
+		glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack_alignment);
+		row_length = unpack_row > 0 ? (size_t)unpack_row : (size_t)width;
+		stride = row_length;
+		if (unpack_alignment > 1) {
+			stride = (stride + (size_t)unpack_alignment - 1) /
+			    (size_t)unpack_alignment * (size_t)unpack_alignment;
+		}
+	}
+	if ((size_t)bytes < stride * (size_t)height) {
+		/* (the stream's stride is not the state's: trust the byte count if it gives a row) */
+		if ((size_t)bytes % (size_t)height == 0 &&
+		    (size_t)bytes / (size_t)height >= (size_t)width) {
+			stride = (size_t)bytes / (size_t)height;
+		} else if ((size_t)bytes >= (size_t)width * (size_t)height) {
+			stride = (size_t)width;
+		} else {
+			return;
+		}
+	}
+	if (stride < (size_t)width ||
+	    (size_t)bytes < stride * (size_t)(height - 1) + (size_t)width) {
+		return;
+	}
+	for (long y = height - parsed; y < height; y++) {
+		memset((unsigned char *)data + (size_t)y * stride, 0, (size_t)width);
+	}
+	{
+		static unsigned said;
+
+		if (said < 8) {
+			said++;
+			printf("glwire: glyph trim texture %dx%d rows %ld\n", (int)width, (int)height,
+			    parsed);
+			fflush(stdout);
+		}
+	}
+}
+
 /* An IOSurface upload from eagl.c: create the host texture if the guest made it outside the table,
  * then give it the pixels with the surface's own row stride. */
 static void
@@ -295,6 +369,8 @@ names_texture_upload(struct glstate *g, GLuint guest, GLenum target, GLint inter
 		free(data);
 		return;
 	}
+	names_glyph_trim(data, row_bytes > 0 ? (GLsizei)((size_t)row_bytes * (size_t)height) : 0,
+	    width, height, (GLenum)internal, format, type, row_bytes, pixel_bytes);
 	/* GL_BGRA is a format, not a desktop internal format; the guest's ES driver accepts it. */
 	if (internal == GL_BGRA) {
 		internal = GL_RGBA;

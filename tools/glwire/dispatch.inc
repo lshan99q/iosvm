@@ -220,6 +220,7 @@ switch (opcode) {
 		GLenum a7 = wire_get_u32(r);
 		GLsizei n8 = 0;
 		void *p8 = wire_take_image(r, &n8);
+		names_glyph_trim(p8, n8, a3, a4, (GLenum)a2, a6, a7, 0, 0);
 		if (watch_wanted != NULL) {
 			GLint watch_bound = 0;
 
