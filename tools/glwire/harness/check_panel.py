@@ -97,17 +97,19 @@ def main():
     if suspect:
         print("check_panel: panel is mask-like; diffdump percentage would be meaningless")
         sys.exit(1)
+    # the dump pair is <base>-panel / <base>-n1-panel; accept either the base or the -n1 prefix
+    base = prefix[:-3] if prefix.endswith("-n1") else prefix
     print("pairings (tol 8):")
     s1 = pair(prefix, "", "")
-    # cross pair needs the -n1- panel and the plain picture; handle name shapes explicitly
-    n1 = sorted(glob.glob(prefix + "-n1-panel-*.rgba"))
-    pic = sorted(glob.glob(prefix + "-picture-*.bgra"))
+    n1_panel = sorted(glob.glob(prefix + "-panel-*.rgba")) if prefix.endswith("-n1") \
+        else sorted(glob.glob(base + "-n1-panel-*.rgba"))
+    pic = sorted(glob.glob(base + "-picture-*.bgra"))
     s2 = None
-    if n1 and pic:
-        p = load_rgba(n1[0]); q = load_bgra(pic[0])
+    if n1_panel and pic:
+        p = load_rgba(n1_panel[0]); q = load_bgra(pic[0])
         share, orient = score(p, q)
         s2 = share
-        print(f"  {n1[0].split('/')[-1]} vs {pic[0].split('/')[-1]}: "
+        print(f"  {n1_panel[0].split('/')[-1]} vs {pic[0].split('/')[-1]}: "
               f"within 8 = {share*100:.2f}% ({orient})  [picture(N)==panel(N+1)]")
     best = max([x for x in (s1, s2) if x is not None], default=0.0)
     print(f"best pairing: {best*100:.2f}% -> {'PASS' if best >= 0.95 else 'FAIL'} (line 95%)")
