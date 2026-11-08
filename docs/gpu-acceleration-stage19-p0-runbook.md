@@ -597,6 +597,67 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 - 四维里 target、matrix、scissor 基本排除；`tc0` 仍有 74.2%/82.9% 的 NaN，但 prog15 UI 有 41 笔不含 NaN 仍 zero，**viewport 未决**。
 - 下一发：**`s19o-v4`（viewport 探针）**，不是验收发；等它回答 viewport 与 target 是否一致后，再谈修 tc0 或验收。
 
+### 4.6 s19o-v4 实测：`end=ui` 首次达成，viewport 假设成立（P0 仍未通过）
+
+> 归档：`/host/iosvm/logs/s19o-v4/`（`report.md`、`viewport-1590-1710.txt`、`imgdiff-*.txt`、日志与截图）。**这些文件都不进 git**。本节接 §4.5，记录 v4 的事实；**P0 仍未通过**。
+
+**运行与结束**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-v4` / 2026-11-08 04:32:12Z–04:54:58Z |
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1500 MINFRAMES=99999 MAXSECS=1800 UI_GRACE=300 MINSHOT=200000`；`HOST_ENV="GLWIRE_VIEWPORT_LOG=1 GLWIRE_VIEWPORT_TO_TARGET=1 GLWIRE_TEXT_DRAW_LINE=1 GLWIRE_TEXT_DRAW_FROM_FRAME=1500"` |
+| `end=` | **`end=ui`（首次）**：`ui=630s`，`ui_bytes=295846`（≥ 本发 `MINSHOT=200000`） |
+| 最大截图 | **301,883 B**（`s19o-v4-shot.png`；`-last.png` 298,296 B） |
+| 稳定性 | `panic=0`、`SIGSEGV=0`、`usertrap=0`；host frames **3,086** |
+| text draw | **638 行**，frame **1501–3038**（UI 段；`FROM_FRAME=1500` 把早期 draw 滤掉了） |
+
+注意：本发 `MINSHOT=200000`，不是默认 300,000；`ui_bytes=295,846` 是按 200 KB 门槛记的，最大截图 301,883 B 才 >300 KB。不要把 `end=ui` 写成「300 KB 判据已满足」——300 KB 是 P0 的单发判据，本发最大图刚好过线，但 `ui` 本身是按 200 KB 门槛触发的。
+
+**视觉：10 个 App 名称 + 2 个 widget 名称**
+
+| 位置 | 可读名称 |
+|---|---|
+| widget 行 | **Weather**、**Calendar** |
+| 第一行 | **FaceTime**、**Calendar**、**Photos**、**Mail** |
+| 第二行 | **Notes**、**Reminders**（右侧 Clock、News 两个图标**没有名称**） |
+| 第三行 | **TV**、**Podcasts** |
+| 第四行 | **Health**、**Wallet** |
+| dock / Search | dock 按 iOS 惯例不显示名称；Search 仍是「**Se**」两个字母 |
+
+共 **11 个不同字符串 / 12 个标签**（Calendar 同时出现于 widget 与第一行）：10 个 App 名称 + 2 个 widget 名称。对比 A1（`s19n-repro`，0 个 App 名称、只有「Se」），这是首次把 App 名称真正写上屏。**缺口仍是 Clock、News 两个 label**；「Se」也还在。
+
+**根因链：viewport 被每帧 replay 末尾冲掉（本发已验证假设）**
+
+1. text draw 是**下一帧的第一条记录**，出现在该帧所有 `viewport` 命令之前；guest 在**上一帧末尾**才把目标 viewport 设成小尺寸（如 64x19）。
+2. host 在每帧 replay 结束时执行 `glViewport(0,0,panel_w,panel_h)`（给 panel 合成用），把 guest 刚设好的小 viewport 冲掉。
+3. 于是下一条 text draw 到达时，实际 `GL_VIEWPORT` 是 **750x1624**，而它的 matrix 是按 **200 高 / 19 高**的小 tile 生成的 → 纵向拉伸后被裁掉。
+4. `GLWIRE_VIEWPORT_TO_TARGET=1` 在 glyph draw 前临时 `glViewport(0,0,target)`，draw 后恢复；override 日志 **20 条是打印上限，不是总次数**，全部是 `fbo 5 750x200 (was 0,0 750x1624)`，集中在 frame ~10–19。这批早期 750x200 标签 draw 被修正后，名称写进 label layer 并保留到 UI。
+
+**这是诊断 override 验证了根因，不是根因修复。** 代码正在做的修复是「跨 frame 保留 guest viewport + panel 绘制前后 save/restore」；在 v5 给出数据前，不要写「viewport 已修好」。
+
+**仍 zero 的 638 笔：UI 段全是 prog13，没有 prog15**
+
+- UI 窗口 638 笔 text draw **全部是 `program 13`**（64x19/64x9、fbo 4），**`program 15` 出现 0 次**。
+- 因为 `FROM_FRAME=1500` 把早期 draw 行滤掉了，这只说明 **UI 段没有 prog15**，**不能**据此写「prog15 的 nz 从 0 变成 >0」；本发无法按原样回答早期 prog15 的 nz。
+- `u0` 采样的是字形图集，不是目标：`tex 49 146x90` ×441、`tex 45 161x90` ×189、`tex 13 203x90` ×8；**`u0==target` = 0 笔**，排除反馈环。
+- `tc0`：**573/638 含 NaN**；其余 65 笔前两对是 `0.000,3.375`，但后两对仍是 `5.6579e28` 级垃圾。638/638 `scissor-nonzero=0`，这是**阴影/暗化路径的遗留问题**，不是「标签层已经全好」。
+
+**imgdiff：v4 vs A1（截图回归，不是 P0 同帧 diff）**
+
+| 范围 | within | different | bbox（right/bottom exclusive） |
+|---|---:|---:|---|
+| 全图 1125x2436 | **98.41%** | **1.59%** | `(65,80,1015,2056)` |
+| Search crop `250,2000 650x300` | **99.89%** | **0.11%** | `(523,2048,563,2056)` |
+
+全图差异从 v3 的 99.56% 降到 98.41%，**原因是名称出现了**（diff bbox 覆盖 label 区），不是画面回归；Search crop 几乎不变（Se 的差异 bbox 还从 `(487,2042,563,2056)` 缩到 `(523,2048,563,2056)`）。这是截图回归，**不是 C4**：v4 没有 `GLWIRE_DUMP` 的 panel/picture pair，同帧 `diffdump` 没有数据，不能拿 98.41% 充当 P0 通过。
+
+**结论与边界**
+
+- **里程碑**：`end=ui` 首次达成；10 个 App 名称 + 2 个 widget 名称；viewport 假设被 override 实验证实。
+- **P0 不能算达标**：只有 **1 发**，没有同帧 `diffdump --tolerance 8` ≥95%，Clock/News 仍缺；「Se」也还在。
+- **下一步**：code 做根因修复（跨 frame 保留 guest viewport，panel 绘制前后 save/restore），随后 **v5 验证**；v5 也不是验收发，P0 仍要按 §三 连跑 3 发、≥2 发过全部判据。
+
 ---
 
 ## 五、铁律与提交
