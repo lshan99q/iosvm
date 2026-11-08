@@ -528,6 +528,75 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
    `0.1250..0.5000`，均早于 UI**。**它们不能代表 UI 时刻的 tc0**；UI 时刻的 tc0 由 s19o 的
    `GLWIRE_TEXT_DRAW_LINE` 回答，本文不预设结论。
 
+### 4.5 s19o-v3 实测与判读：字形仍然全灭，viewport 待验
+
+> 归档：`/host/iosvm/logs/s19o-v3/`（`report.md`、`text-draws.tsv`、`draws-landed.txt`、`draws-zero-*.txt`、`imgdiff-*.txt`、日志与截图）。**这些文件都不进 git**。本节只记录事实与未决点，**P0 仍未通过**。
+
+**运行**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-v3` / 2026-11-08 03:30:02Z–04:00:48Z |
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1500 MINFRAMES=99999 MAXSECS=1800 UI_GRACE=300`；`HOST_ENV="GLWIRE_TEXT_DRAW_LINE=1"` |
+| `end=` | `qemu-exited`（1800 s 到点，`terminating on signal 15 ... (timeout)`），**不是崩溃** |
+| `ui=` | `0s` / `ui_bytes=0`：最大截图 **251,125 B < `MINSHOT=300000`**，与 A1 的 `ui=0` 同口径 |
+| 稳定性 | `panic=0`、`SIGSEGV=0`、`usertrap=0`；host frames **4,918** |
+| 截图 | `s19o-v3-shot.png` 251,125 B；`s19o-v3-last.png` 245,084 B |
+| text draw | **2,442 行**；UI 段（frame ≥ 1500）**1,435 行** |
+
+**分组：字形层全 zero**
+
+| 口径 | 总数 | landed (`nz>0`) | zero (`nz=0`) | skip (`nz=-`) |
+|---|---:|---:|---:|---:|
+| 全部 | 2,442 | **32** | **2,246** | **164** |
+| UI 段 frame ≥ 1500 | 1,435 | **12** | **1,387** | **36** |
+
+- `program 13` = 2,014 笔**全 zero**；`program 15` = 232 笔**全 zero**；两者就是字形层。
+- landed 的 32 笔不是字形：`program 5` 图标（138x138 19,044 px；750x1624 94,692 px）与 `program 17/19` 合成（301,056 / 215,040 px）。
+- UI 段 landed 12 笔：`prog5`×8、`prog17`×2、`prog19`×2。
+
+**四维核对**
+
+| 维度 | v3 实测 | 读法 |
+|---|---|---|
+| target | 字形 draw 只进 750x200 / 64x19 / 64x9 等小 tile；这些 target **没有一笔 landed**；landed 全在 750x1624 合成与 138x138 图标 | target 选对了，不是「画到别的层」 |
+| matrix | 46 种矩阵，**0 个 NaN/Inf**；`m00=2/750`，`m11=2/200`（750x200 tile）把 bbox **精确映射进自己的 scissor**（#19: (374,1193)→clip(-1,-1)，(551,1283)→clip(-0.528,-0.1)） | 矩阵/几何不是本轮 zero 的原因 |
+| scissor | 字形 102 笔（51 对）**100% 含住 bbox**；2,246 笔 zero 里 **2,144 笔 scissor 是 off** | scissor 基本排除；不是「被裁掉」 |
+| `tc0` | **1,811 / 2,442（74.2%）含 NaN**；UI 段 **1,190 / 1,435（82.9%）**；NaN 固定在**顶点 2 的 y（v1.y）**，另有 `1.376e29` 垃圾值 | **这是当前唯一还站得住的根因方向** |
+
+`tc0` 的关键反例：`program 15` 的 UI 段 46 笔中，**41 笔不含 NaN**（24 笔是 `0.25..0.50` 图集网格、16 笔是 `0.125..0.50` 网格、1 笔仍带 `4.156`/`1.376e29` 垃圾值），**这 41 笔仍然全部落 0**。所以不能把问题简单写成「有 NaN 所以全灭」——**tc0 合法时也还没落像素**，这正是 viewport 问题要回答的。
+
+**关键未决：viewport 与 target 的尺寸不一致**
+
+- v3 的 `program 15` 全部 232 笔的 viewport 都是 **750x1624**，而 target/matrix 是按 **200 高**（或 19 高）的小 tile 生成的。
+- 运行时观察（lead 口径）：每帧只有 **2 次 `glViewport`**，帧末 viewport 又变成小 target 尺寸。若 text draw 发生在「viewport 还是全屏、target 已是小 tile」的窗口里，几何会按全屏比例落到小 target 上，矩阵再对也无法覆盖预期像素。
+- **这是未决假设，不是已修复结论。** 下一发 `s19o-v4` 用 `GLWIRE_VIEWPORT_LOG` + `GLWIRE_VIEWPORT_TO_TARGET` 验证：每次 text draw 时的 viewport 是否等于 target 尺寸；如果不是，viewport 的切换时机就是下一层根因。
+- **s19o-v4 是探针发，不是验收发。** 在它给出数据前，不要写「viewport 已修好」或「P0 已通过」。
+
+**Search 的「Se」：位置不重叠，无法像素级归属**
+
+- 截图里「Se」的实测像素在 1125 空间 `(483,2019)–(562,2050)`，换算到 750 空间约 `(322,1346)–(375,1367)`。
+- v3 的 text draw 全表里，**没有任何一笔的 bbox 覆盖这个位置**（bbox 的 y 最大到 1283）；唯一宽度 177 px 的 Search 标签是 frame 7 #19/#20，bbox (374,1193)–(551,1283)，`scissor-nonzero=0`。
+- 本发**没有 `GLWIRE_LABEL_DUMP`**，无法做像素级归属；「Se」可能来自 tile 被其它复合 draw 复用/缓存。**不要把「Se」写成 text draw 画出来的**，只能记「屏幕上有 Se，归属未定」。
+
+**imgdiff：这是截图回归，不是 P0 同帧 diff**
+
+`s19o-v3` vs A1 基线（`s19n-repro`），`--tolerance 8`：
+
+| 范围 | within | different | bbox |
+|---|---:|---:|---|
+| 全图 1125x2436 | **99.56%** | **0.44%** | `(91,80,769,2056)` |
+| Search crop `(250,2000,650,300)` | **99.89%** | **0.11%** | `(487,2042,563,2056)` |
+
+这是**截图回归**，说明 v3 与 A1 的画面很接近；它**不是 P0 的 C4 同帧 diff**（C4 要同一发的 panel vs picture，`diffdump` ≥95%）。v3 本发没有 `GLWIRE_DUMP`，C4 没有数据，不能拿 99.56% 充当 P0 通过。
+
+**结论**
+
+- 界面/稳定性：OK（4,918 帧、0 panic/SIGSEGV/usertrap；`ui=0` 只是 251 KB < 300 KB 的门槛）。
+- 字形层：`prog13/15` **2,246/2,246 全 zero**；P0 **仍未通过**。
+- 四维里 target、matrix、scissor 基本排除；`tc0` 仍有 74.2%/82.9% 的 NaN，但 prog15 UI 有 41 笔不含 NaN 仍 zero，**viewport 未决**。
+- 下一发：**`s19o-v4`（viewport 探针）**，不是验收发；等它回答 viewport 与 target 是否一致后，再谈修 tc0 或验收。
+
 ---
 
 ## 五、铁律与提交
