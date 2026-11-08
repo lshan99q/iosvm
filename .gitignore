@@ -56,3 +56,4 @@ tools/glwire/map_test
 tools/host-glquad/gpu_host
 tools/host-glquad/gpu_host_ram
 tools/host-glquad/rammap
+.scion/agents/
