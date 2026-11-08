@@ -166,6 +166,23 @@ mknod /dev/nvidia0 c 195 0               # Operation not permitted
 | numpy 缺失 | `python3 -c 'import numpy'` | 镜像未装 | 装 numpy（§3.10），或明确记录 **C4 不可执行、P0 不能判通过**；不能写成通过 |
 | `boot-measure.sh` 用了宿主默认路径 | `grep -n '^IOSVM=\|^GLWIRE='` | 没传 `IOSVM`/`GLWIRE` | 按 §3.10 用 env 覆盖到 `/host` 两棵树 |
 
+### 2.4 根因（已永久修复）：scion server 重启丢了 `SCION_DOCKER_*`
+
+**一句话根因**：scion server 之前重启时丢了 `SCION_DOCKER_DEVICES` / `SCION_DOCKER_VOLUMES`，重建出来的 exp/code 容器就没有 `/host` 挂载和 GPU 设备——15:5x 的「全裸」不是镜像坏了，是 server 的环境变量没带到新容器。
+
+**永久修复（2026-11-08）**：server 改由 **systemd user service** 管理（enabled + active），把这两个变量写进 unit 的 `Environment=`。以后 server 重启、重建容器仍会带上，不再依赖某次手工 `docker run`。验证（在宿主/systemd 用户侧执行，容器内没有 `systemctl`）：
+
+```sh
+# 先找到 unit 名（只读；不要 kill/restart 别的服务）
+UNIT=$(systemctl --user list-unit-files --no-legend | awk '/scion.*\.service/{print $1; exit}')
+echo "unit=$UNIT"
+systemctl --user is-enabled "$UNIT"                        # 期望 enabled
+systemctl --user status "$UNIT" --no-pager                 # 期望 active (running)
+systemctl --user show "$UNIT" -p Environment | tr ' ' '\n' | grep SCION_DOCKER_
+```
+
+**期望**：`enabled`、`active (running)`，且 `SCION_DOCKER_DEVICES`、`SCION_DOCKER_VOLUMES` 都出现在 `Environment=` 里。验证完再重启一次 server，重建一个容器，跑 §3 全清单——**重启后仍能通过 §3.2/§3.5 才算永久修复生效**。
+
 ---
 
 ## 三、恢复检查清单（命令 + 期望）
@@ -384,6 +401,7 @@ python3 -c 'import numpy; print("numpy", numpy.__version__)'
 
 容器内没有能力修，顺序必须是「先编排、后检查」：
 
+0. 先确认 server 的 systemd user unit 已加载 `SCION_DOCKER_*`（§2.4）；永久修复优先于任何手工重挂。
 1. **停掉所有 qemu/host_glwire**（宿主或编排侧执行；不要在重挂时还让进程映射 `ram.img`）。
 2. 重新创建/重挂容器，至少满足 §1.1 的三类资源：
    - bind：`/host/iosvm`（rw）、`/host/iosvm-work`（rw）、`/host/ipsw`（ro）；
@@ -430,6 +448,20 @@ tools/glwire/harness/boot-measure.sh s19p0-1 "$ROOT" 1500
 export QEMU_EFI="$KERNEL/qemu/efi64.fd"
 export QEMU_VARS="$KERNEL/qemu/vars.fd"
 ```
+
+### 4.4 应急：从 lead 容器套 mounts/devices（已被永久修复取代）
+
+如果 systemd 修复还没生效、又必须马上起一个容器，可以临时照 lead 容器的 `HostConfig` 抄挂载与设备（在宿主/编排侧执行，不在实验容器内）：
+
+```sh
+# 先找到 lead 容器名（已停止的也要列出来）
+LEAD=$(docker ps -a --format '{{.Names}}' | grep -i 'lead' | head -1)
+echo "lead=$LEAD"
+docker inspect "$LEAD" --format '{{json .HostConfig.Binds}}'
+docker inspect "$LEAD" --format '{{json .HostConfig.Devices}}'
+```
+
+把输出里的 bind 与 device 套到新容器，然后跑 §3 全清单。**这只是应急**：它不解决 server 重启再次丢变量的问题，不能代替 §2.4 的 systemd `Environment=` 永久修复。永久修复生效后，本节只作为回滚/对照手段保留。
 
 ---
 
