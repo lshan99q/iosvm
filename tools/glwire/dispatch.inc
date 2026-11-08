@@ -100,6 +100,10 @@ switch (opcode) {
 		GLenum a0 = wire_get_u32(r);
 		GLint a1 = wire_get_i32(r);
 		GLsizei a2 = wire_get_i32(r);
+		if (host_program_skip(g)) {
+			names_attribs_release(g);
+			break;
+		}
 		g->drawn_framebuffer = g->bound_framebuffer;
 		host_fbo_draw(g);
 		host_note_draw(g, "arrays", a0, a2);
@@ -115,6 +119,11 @@ switch (opcode) {
 		GLenum a2 = wire_get_u32(r);
 		GLsizei n3 = 0;
 		void *p3 = wire_take(r, &n3);
+		if (host_program_skip(g)) {
+			names_attribs_release(g);
+			free(p3);
+			break;
+		}
 		g->drawn_framebuffer = g->bound_framebuffer;
 		host_fbo_draw(g);
 		host_note_draw(g, "elements", a0, a1);

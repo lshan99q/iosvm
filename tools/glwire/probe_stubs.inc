@@ -85,6 +85,13 @@ host_viewport_log(GLint x, GLint y, GLsizei width, GLsizei height)
 	(void)height;
 }
 
+static int
+host_program_skip(struct glstate *g)
+{
+	(void)g;
+	return 0;
+}
+
 static void
 host_fbo_bind(struct glstate *g, GLenum target, GLuint guest, GLuint host)
 {

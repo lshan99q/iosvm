@@ -669,6 +669,48 @@ host_viewport_log(GLint x, GLint y, GLsizei width, GLsizei height)
 	fflush(stdout);
 }
 
+/*
+ * Stage nineteen, P1: a draw of one programme can be dropped from the replay, to see what its
+ * output contributes (whether programme 13's small tile is the noise under a label).  The draw is
+ * not dispatched and host_note_draw()/GLWIRE_AFTER_DRAW() do not run; its vertex arrays are still
+ * released, and the stream's textures and other state replay exactly as before.  Off by default.
+ */
+static int
+host_program_skip(struct glstate *g)
+{
+	static int wanted = -2;        /* -2 unread, -1 no switch */
+	static unsigned said;
+	GLint program = 0;
+
+	(void)g;
+	if (wanted == -2) {
+		const char *value = getenv("GLWIRE_PROGRAM_SKIP");
+
+		wanted = -1;
+		if (value != NULL && *value != '\0') {
+			char *end = NULL;
+			long parsed = strtol(value, &end, 0);
+
+			if (end != value && *end == '\0' && parsed >= 0 && parsed <= 0x7fff) {
+				wanted = (int)parsed;
+			}
+		}
+	}
+	if (wanted < 0) {
+		return 0;
+	}
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	if (program != wanted) {
+		return 0;
+	}
+	if (said < 5) {
+		said++;
+		printf("glwire: program %d draw skipped\n", (int)program);
+		fflush(stdout);
+	}
+	return 1;
+}
+
 /* (stage sixteen: programme 13's 64x19 backdrop is created empty here -- the wire records no fill for
  * it -- so the darken pass multiplies the text to zero.  GLWIRE_BACKDROP=1 fills that texture from
  * the panel once per frame, and the darken pass then has something to darken.) */
