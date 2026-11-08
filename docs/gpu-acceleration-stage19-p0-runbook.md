@@ -940,6 +940,7 @@ P1b 已做（见 §4.11）：`TC0_SANITIZE=1` **没有消掉噪声带，反而�
 
 > 归档：`/host/iosvm/logs/s19o-p1b/`（`report.md`、`measure.txt`、`imgdiff-crop.txt`、`diffdump.txt`、`crop_*`、四张 dump、日志、截图）。**这些文件都不进 git**。
 > 这是 **P1 诊断发**，不改变 P0 结论，也不代表 P1 已修好。
+> 合并入 main：`85d0d97`（main 首次快进至 `ce80195`）。
 
 **口径**
 
@@ -1002,6 +1003,7 @@ P1b 已做（见 §4.11）：`TC0_SANITIZE=1` **没有消掉噪声带，反而�
 
 > 归档：`/host/iosvm/logs/s19o-p1-dots.md`（统计口径与结论）、`/host/iosvm/logs/s19o-p1-dots/`（`analysis*.txt`、`analyze_dots*.py`、`band_Weather.png`、`band_FaceTime.png`、`band_Photos.png` 等）。**这些文件都不进 git**。
 > 这是离线统计，不 boot、不改代码；**P1 仍未修复**。
+> 合并入 main：`ce80195`。
 
 **口径**
 
