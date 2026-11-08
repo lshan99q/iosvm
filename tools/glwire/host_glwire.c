@@ -290,6 +290,9 @@ make_frame_buffer(struct client *client, int width, int height)
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
 	client->width = width;
 	client->height = height;
+	/* (the context's drawable is a 16x16 pbuffer, so its default viewport is not the frame's; this
+	 * is the one reset -- the replayed stream keeps whatever viewport the guest left behind) */
+	glViewport(0, 0, width, height);
 }
 
 /* The panel-sized texture eagl.c uploaded is the picture the guest composed. Draw it as a quad;
@@ -3104,6 +3107,7 @@ serve_frame(struct client *client)
 	double began, took;
 	unsigned char *records;
 	unsigned char *picture;
+	GLint saved_viewport[4] = { 0, 0, 0, 0 };
 
 	wire_segment *segments = NULL;
 	wire_segment *segments2 = NULL;
@@ -3276,7 +3280,15 @@ serve_frame(struct client *client)
 	 * on a 750x1624 stand-in while they were aimed at a 184x90 glyph surface (their scissor says so).
 	 * GLWIRE_KEEP_BINDING=1 keeps the guest's binding across the boundary; a binding of 0 is the
 	 * drawable, which is what the stand-in is for.
+	 *
+	 * Stage nineteen, v5: the viewport is continuous across the boundary in the same way.  The
+	 * guest leaves a glyph target's viewport (64x19/750x200) set at the previous frame's end, and
+	 * a per-frame glViewport(0,0,width,height) threw it away before the next frame's first text
+	 * draw -- whose matrix is built for that small target.  Keep the guest's value; only the
+	 * host's own panel picture needs the panel viewport, and it is put back immediately.
+	 * GLWIRE_RESET_VIEWPORT=1 restores the old unconditional reset for an A/B run.
 	 */
+	glGetIntegerv(GL_VIEWPORT, &saved_viewport[0]);
 	client->names.stand_in = client->framebuffer;
 	panel_drawn_fbo = 0;             /* (stage seventeen: the frame's panel target starts unknown) */
 	shadow_frame = -1;
@@ -3295,10 +3307,19 @@ serve_frame(struct client *client)
 		glBindFramebuffer(GL_FRAMEBUFFER, client->framebuffer);
 		client->names.bound_framebuffer = client->framebuffer;
 	}
-	glViewport(0, 0, width, height);
+	if (getenv("GLWIRE_RESET_VIEWPORT") != NULL) {
+		glViewport(0, 0, width, height);
+		saved_viewport[0] = 0;
+		saved_viewport[1] = 0;
+		saved_viewport[2] = width;
+		saved_viewport[3] = height;
+	}
 	if (!no_panel && client->names.panel != NULL && client->names.panel_width == width &&
 	    client->names.panel_height == height) {
+		glViewport(0, 0, width, height);
 		draw_panel(client, client->names.panel, width, height);
+		glViewport(saved_viewport[0], saved_viewport[1], saved_viewport[2],
+		    saved_viewport[3]);
 	} else {
 		wire_buffer r;
 		size_t offset = 0;
