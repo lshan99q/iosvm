@@ -891,6 +891,51 @@ within 8 in every channel: 1217808/1218000 (99.98%) -> SAME FRAME
 - 计数：**v7（99.85% SAME）+ v9（99.98% SAME）= 2/3 → P0 达成**。v8 因采样时刻 89.53% NOT，不计入。
 - **诚实边界**：v8 不是渲染回归，也不是配对错误；P0 的 C4 对 **dump 时刻是否落在 UI 加载动画里**很敏感。后续验收要选**静态时刻**（例如 panel/picture 连续两帧稳定），或把「panel 与 picture 的加载状态一致」加为稳定性门槛；**不要用 v8 的动画帧当回归基线**。
 
+### 4.10 s19o-p1a 实测：prog13 是标签噪声带的主来源（P1 诊断，未修复）
+
+> 归档：`/host/iosvm/logs/s19o-p1a/`（`report.md`、`crop_v9.png`、`crop_p1a.png`、`crop_side_by_side*.png`、`imgdiff-crop.txt`、四张 dump、日志、截图）。**这些文件都不进 git**。
+> 这是 **P1 诊断发**，不是 P0 验收发；**P1 仍未修复**。
+
+**口径**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-p1a` / 2026-11-08 08:44:50Z–09:01:43Z |
+| 基础口径 | 同 v7/v9：`XCMD=glwire_local=1`；`HOST_ENV` 含 `GLWIRE_NO_PANEL=1`、`GLWIRE_DUMP_PAIR=1`、`GLWIRE_DUMP_AT=800` |
+| 本发新增 | **`GLWIRE_PROGRAM_SKIP=13`**（只跳过 program 13） |
+| 其他 env | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=2400 UI_GRACE=300 MINSHOT=200000` |
+| `end=` | `end=ui`：`ui=630s`，`ui_bytes=310246`；最大截图 **327,839 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **955** 帧 |
+
+**skip 生效，prog15 未误伤**
+
+- `program 13 draw skipped` = **5 条**；这是源码的**打印上限**（`said < 5`），只说明“跳过了 ≥5 笔”，不是总次数。
+- 本发 `text draw ... program 13` 行数 = **0**（v9 同口径是 **416** 行）→ prog13 确实没有 dispatch。
+- `text draw ... program 15` = **140 行，140 笔 `nz>0`** → prog15 没被误伤，仍然全部落像素。
+
+**Weather 标签区并排对比（crop `80,620 420x180`）**
+
+- 裁图：`crop_v9.png`（v9）、`crop_p1a.png`（P1a）；并排 `crop_side_by_side.png`、`crop_side_by_side_2x.png`。
+- 量化区域：Weather 下方噪声带，绝对坐标 **y 730–760 / x 200–500**。
+
+| | 非黑像素 | 亮像素（mean > 150） |
+|---|---:|---:|
+| v9（有噪声带） | **562 / 9000** | 47 |
+| P1a（SKIP=13） | **44 / 9000** | 4 |
+
+- **-92%**（562 → 44）；肉眼：v9 在「Weather」下有一条贯穿的白色虚线/点状带，P1a 只剩「er」下方一小簇残点，**文字完整、无缺笔画**。
+- `imgdiff` v9 vs P1a，crop `80,620 420x180`，tol 8：**99.06% within、0.94% different**，diff bbox **(205,736,401,749)** 正好落在噪声带（y 736–749）。
+
+**判读**
+
+- **prog13 是标签下方虚线/点状噪声带的主来源**（-92%），不是 prog15 的 glyph tile；prog15 的 140 笔全部正常落像素。
+- 残留 **44 px** 不是零：可能来自 prog15 或其它层，需另一发 `GLWIRE_PROGRAM_SKIP=15` 或 `GLWIRE_DARKEN_OFF` 对照才能定性；本轮没跑。
+- **不要写成「P1 已修复」**：这只证明 prog13 是主来源，还没有闭环，也没有验证阴影/圆角的可接受度。
+
+**下一步**
+
+code 计划加 **`GLWIRE_TC0_SANITIZE=1`**：把 prog13 的 NaN/Inf/越界 texcoord 洗成 0，exp 跑 **P1b** 与 P1a/v9 对比。若噪声带消失且阴影可接受，才作为 P1 修复候选；在 P1b 数据出来前，保持「P1 进行中」。
+
 ---
 
 ## 五、铁律与提交
