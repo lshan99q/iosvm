@@ -526,6 +526,41 @@ host_dump_uniform_ring(GLint host_location)
 
 static int last_draw_was_glyph;
 
+/*
+ * Stage nineteen, P0/v3: the text-draw line must describe the state the draw *started* with.
+ * names_attribs_release() frees the CPU copies of the vertex arrays before host_after_draw() runs,
+ * so a line built from the after-draw state reported "attrib -1" for every draw and never saw a
+ * vertex.  host_note_draw() now takes this snapshot after it has decided the draw is a glyph and
+ * before dispatch() calls glDraw*; host_after_draw() only reads the target back and prints it.
+ */
+struct text_draw_snapshot {
+	int valid;
+	unsigned long long frame;         /* (frames are per record; the draw number is not) */
+	unsigned long long draw_number;   /* global draw serial, never reset per frame */
+	GLint program;
+	GLint fbo, kind, name, width, height;
+	GLint view[4];
+	int scissor_on;
+	GLint scissor[4];
+	int blend_on;
+	GLint blend_src, blend_dst;
+	GLint attrib_index, attrib_type;
+	int vertices;
+	float xs[4], ys[4], x0, y0, x1, y1;
+	int tc_valid;
+	float tcs[4][2];
+	uint32_t tc_raw[2];
+	uint32_t texmat[4];
+	int matrix_valid;
+	uint32_t vertex_matrix[16];
+};
+
+static struct text_draw_snapshot text_snap;
+static unsigned long long draw_serial;
+
+/* (defined next to host_attrib_xy(), which it uses; forward-declared for host_note_draw()) */
+static void host_text_snapshot(struct glstate *g, unsigned long long draw_number);
+
 /* (stage sixteen: programme 13's 64x19 backdrop is created empty here -- the wire records no fill for
  * it -- so the darken pass multiplies the text to zero.  GLWIRE_BACKDROP=1 fills that texture from
  * the panel once per frame, and the darken pass then has something to darken.) */
@@ -738,17 +773,92 @@ host_fix_nan_texmat(GLuint program)
 	}
 }
 
+/*
+ * Stage nineteen fix: recognising the text draw and repairing a NaN sampler matrix are probes, not
+ * debug prints.  Both used to sit behind GLWIRE_DRAW_LOG / GLWIRE_LABEL_DUMP, so a run that asked
+ * for the text-draw line but not the draw log saw nothing: host_note_draw() returned before the
+ * glyph scan and last_draw_was_glyph stayed 0.  These two run first; the logging below is still
+ * gated exactly as before.
+ */
+static int
+host_draw_binds_glyph(void)
+{
+	GLint active = 0, glyph_height = 0;
+
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	for (unsigned unit = 0; unit < 8; unit++) {
+		GLint bound = 0, height = 0;
+
+		glActiveTexture(GL_TEXTURE0 + unit);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+		if (bound == 0) {
+			continue;
+		}
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		if (height == 90 || height == 42) {
+			glyph_height = height;
+		}
+	}
+	glActiveTexture((GLenum)active);
+	return glyph_height != 0;
+}
+
+static void
+host_texmat_nan_to_identity(GLint program)
+{
+	GLint location = glGetUniformLocation((GLuint)program, "texmat0");
+	GLfloat texmat[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	uint32_t bits[4];
+	int nan = 0;
+
+	if (location < 0) {
+		return;
+	}
+	glGetUniformfv((GLuint)program, location, texmat);
+	memcpy(bits, texmat, sizeof(bits));
+	for (int i = 0; i < 4; i++) {
+		if (((bits[i] >> 23) & 0xff) == 0xff) {
+			nan = 1;
+		}
+	}
+	if (nan) {
+		static unsigned said_nan;
+
+		glUniform4f(location, 1.0f, 1.0f, 0.0f, 0.0f);
+		if (said_nan < 5) {
+			said_nan++;
+			printf("glwire: texmat0 was a NaN (programme %d), set to (1,1,0,0)\n", (int)program);
+			fflush(stdout);
+		}
+	}
+}
+
 static void
 host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 {
 	static unsigned logged;
 	GLint program = 0, active = 0, glyph_height = 0;
+	unsigned long long serial = ++draw_serial;
+	int text_line = getenv("GLWIRE_TEXT_DRAW_LINE") != NULL;
 
+	/* (a stale snapshot from the previous text draw must not be printed for a draw that is not one) */
+	text_snap.valid = 0;
+	/* (the glyph probe and the NaN repair run before this gate: they are what the text-draw line
+	 * needs, and a run that does not want the draw log still needs them) */
+	last_draw_was_glyph = host_draw_binds_glyph();
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	if (last_draw_was_glyph && getenv("GLWIRE_TEXMAT_NAN_TO_IDENTITY") != NULL) {
+		host_texmat_nan_to_identity(program);
+	}
 	if (logged >= 20000 || getenv("GLWIRE_DRAW_LOG") == NULL) {
+		/* (the draw-log path is the common one to skip, but the text-draw line still has to see
+		 * this draw's state before glDraw* -- the arrays are freed right after it) */
+		if (text_line && last_draw_was_glyph) {
+			host_text_snapshot(g, serial);
+		}
 		return;
 	}
 	logged++;
-	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
 	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
 	{
 		GLint viewport[4] = { 0, 0, 0, 0 };
@@ -1015,32 +1125,9 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 				uint32_t here[4];
 
 				memcpy(here, texmat, sizeof(here));
-				if (getenv("GLWIRE_TEXMAT_NAN_TO_IDENTITY") != NULL) {
-					/* stage nineteen: every label draw after the first few carries a NaN sampler
-					 * matrix (0x7fffff80); with it the glyph sample is undefined and nothing lands
-					 * in the target.  An identity is the only mapping these 1:1 alpha-texture draws
-					 * can want: texcoord0_0 is already the unit square. */
-					int nan = 0;
-
-					for (int i = 0; i < 4; i++) {
-						uint32_t exponent = (here[i] >> 23) & 0xff;
-
-						if (exponent == 0xff) {
-							nan = 1;
-						}
-					}
-					if (nan && texmat_location >= 0) {
-						static unsigned said_nan;
-
-						glUniform4f(texmat_location, 1.0f, 1.0f, 0.0f, 0.0f);
-						if (said_nan < 5) {
-							said_nan++;
-							printf("glwire: texmat0 was a NaN (programme %d), set to (1,1,0,0)\n",
-							    (int)program);
-							fflush(stdout);
-						}
-					}
-				}
+				/* (stage nineteen: the NaN repair now runs in host_note_draw, before the
+				 * draw, so it is independent of GLWIRE_LABEL_DUMP; this block only records
+				 * the bits the draw actually used) */
 				if (uniform_ring_dumped < 4) {
 					uniform_ring_dumped++;
 					printf("glwire: texmat0 bits at the state line %08x %08x %08x %08x\n",
@@ -1064,6 +1151,10 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 			host_program_source(g, (GLuint) program);
 			host_attrib_state(g);
 		}
+	}
+	/* (the last thing before dispatch() calls glDraw*: the state this draw is about to use) */
+	if (text_line && last_draw_was_glyph) {
+		host_text_snapshot(g, serial);
 	}
 }
 
@@ -2067,6 +2158,343 @@ dispatch(struct glstate *g, wire_buffer *r, uint32_t opcode)
 }
 
 
+/*
+ * Stage nineteen, P0/v3: one line per text draw, so the draws that land pixels and the ones that
+ * land none are compared field by field.  The fields are what the two groups can differ in -- the
+ * target and its own size (which need not be the viewport's), the viewport, the scissor test and its
+ * box, the four vertices of the position attribute and their bounding box, the four texcoords and
+ * the first vertex's raw bytes, the vertex matrix, the sampler matrix bits, the blend state, the
+ * frame and the draw's global serial, and the read-back counts inside the scissor rectangle.
+ *
+ * The state is the snapshot host_note_draw() took before dispatch() calls glDraw*; this line only
+ * reads the target back.  That ordering is the point: names_attribs_release() frees the CPU copies
+ * of the vertex arrays before host_after_draw() runs, so an after-draw line could never see them.
+ *
+ * GLWIRE_TEXT_DRAW_LINE=1 turns it on.  GLWIRE_TEXT_DRAW_LIMIT caps the lines (default 20000), and
+ * GLWIRE_TEXT_DRAW_FROM_FRAME=<n> starts at that frame (default: every frame).  Off by default, so a
+ * measurement that does not ask for it is unchanged.
+ */
+static int
+host_attrib_xy(const struct attrib_state *attrib, GLint type, int vertex, float *x, float *y)
+{
+	const unsigned char *at = (const unsigned char *)attrib->data +
+	    (size_t)vertex * (size_t)(attrib->stride > 0 ? attrib->stride : 0);
+
+	if (type == GL_FLOAT) {
+		memcpy(x, at, 4);
+		memcpy(y, at + 4, 4);
+		return 1;
+	}
+	if (type == 0x140b) {   /* GL_HALF_FLOAT: what the guest records for some arrays */
+		uint16_t hx = 0, hy = 0;
+
+		memcpy(&hx, at, 2);
+		memcpy(&hy, at + 2, 2);
+		*x = half_to_float(hx);
+		*y = half_to_float(hy);
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * The draw's state, taken before it runs.  Every query here is a read except the temporary binding
+ * of the draw framebuffer and of an attachment name to get its size; both are put back, and the
+ * draw framebuffer binding is the one the draw is about to use anyway.
+ */
+static void
+host_text_snapshot(struct glstate *g, unsigned long long draw_number)
+{
+	struct text_draw_snapshot *s = &text_snap;
+
+	memset(s, 0, sizeof(*s));
+	s->valid = 1;
+	s->frame = frames_replayed + 1;
+	s->draw_number = draw_number;
+	s->kind = -1;
+
+	glGetIntegerv(GL_CURRENT_PROGRAM, &s->program);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &s->fbo);
+	glGetIntegerv(GL_VIEWPORT, s->view);
+	s->scissor_on = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
+	glGetIntegerv(GL_SCISSOR_BOX, s->scissor);
+	s->blend_on = glIsEnabled(GL_BLEND) ? 1 : 0;
+	glGetIntegerv(GL_BLEND_SRC_RGB, &s->blend_src);
+	glGetIntegerv(GL_BLEND_DST_RGB, &s->blend_dst);
+
+	/* the position array: attribute 0 when it is the 2+-wide float/half array, else the first one */
+	s->attrib_index = -1;
+	for (GLint i = 0; i < 16; i++) {
+		GLint enabled = 0, size = 0, type = 0;
+
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+		if (!enabled || g->attribs[i].data == NULL) {
+			continue;
+		}
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
+		glGetVertexAttribiv((GLuint)i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
+		if (size < 2 || (type != GL_FLOAT && type != 0x140b)) {
+			continue;
+		}
+		if (s->attrib_index < 0 || i == 0) {
+			s->attrib_index = i;
+			s->attrib_type = type;
+			if (i == 0) {
+				break;
+			}
+		}
+	}
+	if (s->attrib_index >= 0) {
+		s->x0 = s->y0 = 1e30f;
+		s->x1 = s->y1 = -1e30f;
+		for (int v = 0; v < 4; v++) {
+			float x = 0, y = 0;
+
+			/* (a quad is four vertices: the bbox is what the scissor has to contain) */
+			if (!host_attrib_xy(&g->attribs[s->attrib_index], s->attrib_type, v, &x, &y)) {
+				break;
+			}
+			s->xs[v] = x;
+			s->ys[v] = y;
+			if (x < s->x0) s->x0 = x;
+			if (x > s->x1) s->x1 = x;
+			if (y < s->y0) s->y0 = y;
+			if (y > s->y1) s->y1 = y;
+			s->vertices++;
+		}
+	}
+
+	/* attrib 3 is texcoord0 in the guest's stream: four vertices of two floats, plus the first
+	 * vertex's 8 raw bytes so it can be compared with the guest's own emit line word by word */
+	{
+		GLint enabled3 = 0, size3 = 0, type3 = 0;
+
+		glGetVertexAttribiv(3, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled3);
+		if (enabled3 && g->attribs[3].data != NULL) {
+			glGetVertexAttribiv(3, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size3);
+			glGetVertexAttribiv(3, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type3);
+		}
+		if (enabled3 && g->attribs[3].data != NULL && size3 >= 2 &&
+		    (type3 == GL_FLOAT || type3 == 0x140b)) {
+			size_t avail = g->attribs[3].stride > 0 ? (size_t)g->attribs[3].stride :
+			    (size_t)size3 * (type3 == 0x140b ? 2u : 4u);
+
+			memcpy(s->tc_raw, g->attribs[3].data, avail < sizeof(s->tc_raw) ? avail : sizeof(s->tc_raw));
+			s->tc_valid = 1;
+			for (int v = 0; v < 4; v++) {
+				if (!host_attrib_xy(&g->attribs[3], type3, v, &s->tcs[v][0], &s->tcs[v][1])) {
+					break;
+				}
+			}
+		}
+	}
+
+	/* bits, not printed floats: a NaN or a sign flip has to be visible, not rounded away */
+	{
+		GLint location = glGetUniformLocation((GLuint)s->program, "vertex_matrix");
+
+		if (location >= 0) {
+			GLfloat matrix[16] = { 0 };
+
+			glGetUniformfv((GLuint)s->program, location, matrix);
+			memcpy(s->vertex_matrix, matrix, sizeof(s->vertex_matrix));
+			s->matrix_valid = 1;
+		}
+	}
+	{
+		GLint location = glGetUniformLocation((GLuint)s->program, "texmat0");
+
+		if (location >= 0) {
+			GLfloat texmat[4] = { 0, 0, 0, 0 };
+
+			glGetUniformfv((GLuint)s->program, location, texmat);
+			memcpy(s->texmat, texmat, sizeof(s->texmat));
+		}
+	}
+
+	/* the target's own size: the attachment's, not the viewport's, is what clips the quad */
+	if (s->fbo != 0) {
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)s->fbo);
+		glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &s->kind);
+		glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &s->name);
+		if (s->kind == GL_TEXTURE && s->name != 0) {
+			GLint previous_texture = 0;
+
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+			glBindTexture(GL_TEXTURE_2D, (GLuint)s->name);
+			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &s->width);
+			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &s->height);
+			glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture);
+		} else if (s->kind == GL_RENDERBUFFER && s->name != 0) {
+			GLint previous_rb = 0;
+
+			glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous_rb);
+			glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)s->name);
+			glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &s->width);
+			glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &s->height);
+			glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)previous_rb);
+		}
+		if (s->width <= 0 || s->height <= 0) {
+			s->width = s->view[2];
+			s->height = s->view[3];
+		}
+	} else {
+		s->width = s->view[2] > 0 ? s->view[2] : trace_width;
+		s->height = s->view[3] > 0 ? s->view[3] : trace_height;
+	}
+}
+
+/* The line itself: read the snapshot's target rectangle back, then print the snapshot.  The
+ * snapshot is the draw's own state, so nothing here queries or infers the draw. */
+static void
+host_text_draw_line(const struct text_draw_snapshot *snap)
+{
+	static unsigned lines_said;
+	unsigned limit = getenv("GLWIRE_TEXT_DRAW_LIMIT") != NULL ?
+	    (unsigned)atoi(getenv("GLWIRE_TEXT_DRAW_LIMIT")) : 20000;
+	const char *from_text = getenv("GLWIRE_TEXT_DRAW_FROM_FRAME");
+	unsigned long long from_frame = from_text != NULL ? strtoull(from_text, NULL, 10) : 0;
+	unsigned long long frame = snap->frame, draw_number = snap->draw_number;
+	GLint read_fbo = 0, draw_fbo = 0, read_buffer = 0, draw_buffer = 0;
+	int rect_valid = 0, rx = 0, ry = 0, rw = 0, rh = 0;
+	unsigned nonzero = 0, alpha = 0;
+	char vtext[256], mtext[200], tctext[256], nztext[32], atext[32];
+
+	if (!snap->valid) {
+		return;
+	}
+	if (from_frame != 0 && frame < from_frame) {
+		return;
+	}
+	/* (a boot has 1600+ label draws: cap the lines so one measurement cannot fill a disk,
+	 * and say once where it stopped) */
+	if (lines_said >= limit) {
+		if (lines_said == limit) {
+			lines_said++;
+			printf("glwire: text draw line limit reached %u (GLWIRE_TEXT_DRAW_LIMIT)\n", limit);
+			fflush(stdout);
+		}
+		return;
+	}
+	lines_said++;
+
+	if (snap->vertices > 0) {
+		snprintf(vtext, sizeof(vtext), "%.1f,%.1f %.1f,%.1f %.1f,%.1f %.1f,%.1f bbox %.1f,%.1f %.1f,%.1f",
+		    (double)snap->xs[0], (double)snap->ys[0], (double)snap->xs[1], (double)snap->ys[1],
+		    (double)snap->xs[2], (double)snap->ys[2], (double)snap->xs[3], (double)snap->ys[3],
+		    (double)snap->x0, (double)snap->y0, (double)snap->x1, (double)snap->y1);
+	} else {
+		snprintf(vtext, sizeof(vtext), "none");
+	}
+	if (snap->tc_valid) {
+		int at = 0;
+
+		for (int v = 0; v < 4; v++) {
+			at += snprintf(tctext + at, sizeof(tctext) - (size_t)at, "%s%.3f,%.3f",
+			    at == 0 ? "" : " ", (double)snap->tcs[v][0], (double)snap->tcs[v][1]);
+		}
+		snprintf(tctext + at, sizeof(tctext) - (size_t)at, " raw %08x %08x",
+		    snap->tc_raw[0], snap->tc_raw[1]);
+	} else {
+		snprintf(tctext, sizeof(tctext), "-");
+	}
+	if (snap->matrix_valid) {
+		int at = 0;
+
+		at += snprintf(mtext + at, sizeof(mtext) - (size_t)at, "matrix");
+		for (int i = 0; i < 16 && at < (int)sizeof(mtext) - 10; i++) {
+			at += snprintf(mtext + at, sizeof(mtext) - (size_t)at, " %08x", snap->vertex_matrix[i]);
+		}
+	} else {
+		snprintf(mtext, sizeof(mtext), "matrix -");
+	}
+
+	/* (the read-back bookkeeping is the only state this line touches: it is restored below) */
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+	glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+	glGetIntegerv(GL_DRAW_BUFFER, &draw_buffer);
+
+	/*
+	 * Only the scissor rectangle is read: it is the draw's own clip, so a count inside it is the
+	 * "did this draw land a pixel" answer, and it is small (a glyph box, a tile).  With the scissor
+	 * off the whole target is read only when it is at most a million pixels; a 750x1624 panel is
+	 * not, and one full read per draw is what would stall the guest's display lock.
+	 */
+	if (trace_client != NULL && snap->width > 0 && snap->height > 0) {
+		if (snap->scissor_on) {
+			rx = snap->scissor[0];
+			ry = snap->scissor[1];
+			rw = snap->scissor[2];
+			rh = snap->scissor[3];
+			rect_clip(&rx, &ry, &rw, &rh, snap->width, snap->height);
+		} else {
+			rx = 0;
+			ry = 0;
+			rw = snap->width;
+			rh = snap->height;
+		}
+		if (rw > 0 && rh > 0 && (uint64_t)rw * (uint64_t)rh <= 1000000) {
+			size_t bytes = (size_t)rw * (size_t)rh * 4;
+			unsigned char *pixels = calloc(1, bytes);
+
+			if (pixels != NULL) {
+				GLint pack = 4;
+
+				rect_valid = 1;
+				glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)snap->fbo);
+				glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+				glPixelStorei(GL_PACK_ALIGNMENT, 1);
+				glReadPixels(rx, ry, rw, rh, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+				glPixelStorei(GL_PACK_ALIGNMENT, pack);
+				for (size_t i = 0; i + 3 < bytes; i += 4) {
+					if (pixels[i] | pixels[i + 1] | pixels[i + 2] | pixels[i + 3]) {
+						nonzero++;
+					}
+					if (pixels[i + 3] != 0) {
+						alpha++;
+					}
+				}
+				free(pixels);
+			}
+		}
+	}
+	if (rect_valid) {
+		snprintf(nztext, sizeof(nztext), "%u", nonzero);
+		snprintf(atext, sizeof(atext), "%u", alpha);
+	} else {
+		rx = ry = rw = rh = 0;
+		snprintf(nztext, sizeof(nztext), "-");
+		snprintf(atext, sizeof(atext), "-");
+	}
+
+	/* put the bindings and the buffer selections back exactly as the draw left them, so a
+	 * GLWIRE_LABEL_DUMP read-back that follows sees the same read/draw framebuffers it would
+	 * have seen without this line (GL_READ_BUFFER/GL_DRAW_BUFFER are per-framebuffer, so they
+	 * are restored after their framebuffer is bound again) */
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read_fbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw_fbo);
+	glReadBuffer((GLenum)read_buffer);
+	glDrawBuffer((GLenum)draw_buffer);
+
+	printf("glwire: text draw frame %llu #%llu program %d fbo %d %s %d %dx%d viewport "
+	    "%d,%d %dx%d scissor %s %d,%d %dx%d blend %s %#x %#x attrib %d %s texmat "
+	    "%08x %08x %08x %08x readrect %d,%d %dx%d scissor-nonzero %s alpha %s tc0 %s %s\n",
+	    frame, draw_number, (int)snap->program, (int)snap->fbo,
+	    snap->kind == GL_TEXTURE ? "texture" :
+	    snap->kind == GL_RENDERBUFFER ? "renderbuffer" : (snap->fbo != 0 ? "other" : "default"),
+	    (int)snap->name, (int)snap->width, (int)snap->height, (int)snap->view[0],
+	    (int)snap->view[1], (int)snap->view[2], (int)snap->view[3],
+	    snap->scissor_on ? "on" : "off", (int)snap->scissor[0], (int)snap->scissor[1],
+	    (int)snap->scissor[2], (int)snap->scissor[3], snap->blend_on ? "on" : "off",
+	    snap->blend_src, snap->blend_dst, snap->attrib_index, vtext, snap->texmat[0],
+	    snap->texmat[1], snap->texmat[2], snap->texmat[3], rx, ry, rw, rh, nztext, atext,
+	    tctext, mtext);
+	fflush(stdout);
+}
+
 /* The state a draw saw, and the framebuffer as it stood after it. GLWIRE_DUMP_DRAWS=<prefix>
  * writes <prefix>-draw-N-fbo-F-program-P.bgra (bottom row first, as glReadPixels returns it). */
 static void
@@ -2191,6 +2619,10 @@ host_after_draw(struct glstate *g)
 				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)tile_fbo);
 			}
 		}
+	}
+	/* (the draw's own state, taken by host_note_draw() before glDraw*: read back and print it) */
+	if (getenv("GLWIRE_TEXT_DRAW_LINE") != NULL && text_snap.valid) {
+		host_text_draw_line(&text_snap);
 	}
 	/*
 	 * Stage fourteen: every label draw (the one that binds a glyph tile) into the framebuffer the
