@@ -77,6 +77,15 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 }
 
 static void
+host_viewport_log(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+	(void)x;
+	(void)y;
+	(void)width;
+	(void)height;
+}
+
+static void
 host_fbo_bind(struct glstate *g, GLenum target, GLuint guest, GLuint host)
 {
 	(void)g;

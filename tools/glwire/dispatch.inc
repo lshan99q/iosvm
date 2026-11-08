@@ -285,6 +285,7 @@ switch (opcode) {
 		GLsizei a2 = wire_get_i32(r);
 		GLsizei a3 = wire_get_i32(r);
 		glViewport(a0, a1, a2, a3);
+		host_viewport_log(a0, a1, a2, a3);
 		break;
 	}
 	case 27: {

@@ -553,6 +553,10 @@ struct text_draw_snapshot {
 	uint32_t texmat[4];
 	int matrix_valid;
 	uint32_t vertex_matrix[16];
+	/* (unit 0's sampler input: an empty tile and a feedback loop both look like "tc0 is right and
+	 * nothing landed", so the line carries the texture's own size and whether it is the target) */
+	int u0_valid;
+	GLint u0_tex, u0_w, u0_h;
 };
 
 static struct text_draw_snapshot text_snap;
@@ -560,6 +564,105 @@ static unsigned long long draw_serial;
 
 /* (defined next to host_attrib_xy(), which it uses; forward-declared for host_note_draw()) */
 static void host_text_snapshot(struct glstate *g, unsigned long long draw_number);
+
+/*
+ * Stage nineteen, P0/v4: the text draw's own target is 64x19 or 750x200, but the stream leaves the
+ * viewport at the panel's size (750x1624) when the draw arrives, so the quad is clipped/scaled out
+ * of the small attachment.  GLWIRE_VIEWPORT_TO_TARGET=1 sets the viewport to the attachment for
+ * glyph draws only, then restores the stream's viewport in host_after_draw().
+ */
+static struct {
+	int active;
+	GLint fbo;
+	GLint view[4];
+} viewport_override;
+
+static void
+host_viewport_to_target(void)
+{
+	GLint view[4], fbo = 0, kind = -1, name = 0, width = 0, height = 0;
+
+	viewport_override.active = 0;
+	if (!last_draw_was_glyph || getenv("GLWIRE_VIEWPORT_TO_TARGET") == NULL) {
+		return;
+	}
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+	if (fbo == 0) {
+		/* (the default framebuffer's size is the drawable; the panel viewport is right for it) */
+		return;
+	}
+	glGetIntegerv(GL_VIEWPORT, view);
+	glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
+	glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+	if (kind == GL_TEXTURE && name != 0) {
+		GLint previous_texture = 0;
+
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+		glBindTexture(GL_TEXTURE_2D, (GLuint)name);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture);
+	} else if (kind == GL_RENDERBUFFER && name != 0) {
+		GLint previous_rb = 0;
+
+		glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous_rb);
+		glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)name);
+		glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &width);
+		glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &height);
+		glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)previous_rb);
+	}
+	if (width <= 0 || height <= 0) {
+		return;
+	}
+	if (view[0] == 0 && view[1] == 0 && view[2] == width && view[3] == height) {
+		return;
+	}
+	viewport_override.active = 1;
+	viewport_override.fbo = fbo;
+	memcpy(viewport_override.view, view, sizeof(view));
+	glViewport(0, 0, width, height);
+	{
+		static unsigned said;
+
+		if (said < 20) {
+			said++;
+			printf("glwire: viewport override fbo %d %dx%d (was %d,%d %dx%d)\n", (int)fbo,
+			    (int)width, (int)height, (int)view[0], (int)view[1], (int)view[2],
+			    (int)view[3]);
+			fflush(stdout);
+		}
+	}
+}
+
+static void
+host_viewport_restore(void)
+{
+	if (!viewport_override.active) {
+		return;
+	}
+	glViewport(viewport_override.view[0], viewport_override.view[1],
+	    viewport_override.view[2], viewport_override.view[3]);
+	viewport_override.active = 0;
+}
+
+/* (one line per glViewport: it says whether the small target's viewport is set before or after
+ * the text draw that needs it) */
+static void
+host_viewport_log(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+	GLint fbo = 0;
+
+	if (getenv("GLWIRE_VIEWPORT_LOG") == NULL) {
+		return;
+	}
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+	printf("glwire: viewport frame %llu fbo %d %d,%d %dx%d\n",
+	    (unsigned long long)(frames_replayed + 1), (int)fbo, (int)x, (int)y, (int)width,
+	    (int)height);
+	fflush(stdout);
+}
 
 /* (stage sixteen: programme 13's 64x19 backdrop is created empty here -- the wire records no fill for
  * it -- so the darken pass multiplies the text to zero.  GLWIRE_BACKDROP=1 fills that texture from
@@ -856,6 +959,7 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 		if (text_line && last_draw_was_glyph) {
 			host_text_snapshot(g, serial);
 		}
+		host_viewport_to_target();
 		return;
 	}
 	logged++;
@@ -1156,6 +1260,7 @@ host_note_draw(struct glstate *g, const char *how, GLenum mode, GLsizei count)
 	if (text_line && last_draw_was_glyph) {
 		host_text_snapshot(g, serial);
 	}
+	host_viewport_to_target();
 }
 
 /*
@@ -2344,6 +2449,22 @@ host_text_snapshot(struct glstate *g, unsigned long long draw_number)
 		s->width = s->view[2] > 0 ? s->view[2] : trace_width;
 		s->height = s->view[3] > 0 ? s->view[3] : trace_height;
 	}
+
+	/* unit 0's sampled texture: size only (no read-back -- an empty tile and a feedback loop are
+	 * both "tc0 is right, nothing landed" until the texture itself is named) */
+	{
+		GLint previous_active = 0;
+
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active);
+		glActiveTexture(GL_TEXTURE0);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &s->u0_tex);
+		if (s->u0_tex != 0) {
+			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &s->u0_w);
+			glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &s->u0_h);
+			s->u0_valid = 1;
+		}
+		glActiveTexture((GLenum)previous_active);
+	}
 }
 
 /* The line itself: read the snapshot's target rectangle back, then print the snapshot.  The
@@ -2360,7 +2481,7 @@ host_text_draw_line(const struct text_draw_snapshot *snap)
 	GLint read_fbo = 0, draw_fbo = 0, read_buffer = 0, draw_buffer = 0;
 	int rect_valid = 0, rx = 0, ry = 0, rw = 0, rh = 0;
 	unsigned nonzero = 0, alpha = 0;
-	char vtext[256], mtext[200], tctext[256], nztext[32], atext[32];
+	char vtext[256], mtext[200], tctext[256], nztext[32], atext[32], utext[64];
 
 	if (!snap->valid) {
 		return;
@@ -2409,6 +2530,12 @@ host_text_draw_line(const struct text_draw_snapshot *snap)
 		}
 	} else {
 		snprintf(mtext, sizeof(mtext), "matrix -");
+	}
+	if (snap->u0_valid) {
+		snprintf(utext, sizeof(utext), "tex %d %dx%d%s", (int)snap->u0_tex, (int)snap->u0_w,
+		    (int)snap->u0_h, snap->name != 0 && snap->u0_tex == snap->name ? " u0==target" : "");
+	} else {
+		snprintf(utext, sizeof(utext), "tex 0 -");
 	}
 
 	/* (the read-back bookkeeping is the only state this line touches: it is restored below) */
@@ -2481,7 +2608,7 @@ host_text_draw_line(const struct text_draw_snapshot *snap)
 
 	printf("glwire: text draw frame %llu #%llu program %d fbo %d %s %d %dx%d viewport "
 	    "%d,%d %dx%d scissor %s %d,%d %dx%d blend %s %#x %#x attrib %d %s texmat "
-	    "%08x %08x %08x %08x readrect %d,%d %dx%d scissor-nonzero %s alpha %s tc0 %s %s\n",
+	    "%08x %08x %08x %08x readrect %d,%d %dx%d scissor-nonzero %s alpha %s tc0 %s %s u0 %s\n",
 	    frame, draw_number, (int)snap->program, (int)snap->fbo,
 	    snap->kind == GL_TEXTURE ? "texture" :
 	    snap->kind == GL_RENDERBUFFER ? "renderbuffer" : (snap->fbo != 0 ? "other" : "default"),
@@ -2491,7 +2618,7 @@ host_text_draw_line(const struct text_draw_snapshot *snap)
 	    (int)snap->scissor[2], (int)snap->scissor[3], snap->blend_on ? "on" : "off",
 	    snap->blend_src, snap->blend_dst, snap->attrib_index, vtext, snap->texmat[0],
 	    snap->texmat[1], snap->texmat[2], snap->texmat[3], rx, ry, rw, rh, nztext, atext,
-	    tctext, mtext);
+	    tctext, mtext, utext);
 	fflush(stdout);
 }
 
@@ -2505,6 +2632,9 @@ host_after_draw(struct glstate *g)
 	const char *prefix = getenv("GLWIRE_DUMP_DRAWS");
 	int number = draws_seen++;
 	unsigned char *pixels;
+
+	/* (the draw is over: put the stream's viewport back before any probe reads it) */
+	host_viewport_restore();
 
 	/*
 	 * Stage seventeen: the label's own rectangle first (the dump below clears last_draw_was_glyph),
