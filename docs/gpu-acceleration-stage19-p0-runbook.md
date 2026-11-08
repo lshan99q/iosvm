@@ -770,8 +770,72 @@ tools/glwire/harness/boot-measure.sh s19n-repro "$ROOT" 1500
 | 同帧 `diffdump --tolerance 8` ≥95% | ❌ **n/a** | panel 未落盘（`names.h` 条件过时），不是 SAME/NOT |
 | `end=ui` / 无 panic | ✅ | |
 
-- **v5 暂不能计入 P0 发次**；v6 补了 panel 文件但 panel 源仍错，C4 仍是假 NOT。等 **v7（local composition + `GLWIRE_NO_PANEL=1`）** 按 §二 C4 的正确配方拿真 panel，再谈 P0 发次。
-- 下一步不是「验收」，是 **v7（正确 C4 配方下的同帧 diffdump 验证）**。
+- **v5 暂不能计入 P0 发次**；v6 补了 panel 文件但 panel 源仍错，C4 仍是假 NOT。
+- v7 已按正确配方跑完：**C4 首次 SAME FRAME**，计入 P0 第一发，见 §4.8。
+
+### 4.8 s19o-v7 实测：C4 首次 SAME FRAME，P0 计入 1/3
+
+> 归档：`/host/iosvm/logs/s19o-v7/`（`report.md`、四张 dump、`diffdump.txt`、`check_panel.txt`、日志、截图、`aborted/`）。**这些文件都不进 git**。本节记录 v7 的事实；**P0 记为 1/3，不是已经通过**。
+
+**口径（与 §2.4/C4 的修正配方一致）**
+
+| 项 | 值 |
+|---|---|
+| label / 时间 | `s19o-v7` / 2026-11-08 07:08:34Z–07:25:04Z |
+| XCMD | **`glwire_local=1`**；guest log：`the frame is drawn here as well (glwire_local); recorder mask 0xffffffffffffffff` |
+| HOST_ENV | `GLWIRE_NO_PANEL=1 GLWIRE_TEXT_DRAW_LINE=1 GLWIRE_DUMP=/tmp/s19o-v7/f GLWIRE_DUMP_AT=800 GLWIRE_DUMP_PAIR=1` |
+| 其他 env | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=2400 UI_GRACE=300 MINSHOT=200000` |
+| 本地合成证据 | host `upload texture 4294901761 target 0xde1 internal 0x1908 750x1624 ...` **982 次 = 982 host 帧（1:1）**；panel hash 逐帧变化（v6 是恒定） |
+
+**结束与视觉**
+
+- 收尾：`xb: s19o-v7 end=ui ui=630s ui_bytes=321669 hostframes=982 MATCH=47 DIFF=935 SIGSEGV=0 usertrap=0 panic=0 biggest=330931`。
+- 最大截图 **330,931 B ≥ 300,000**（shot 330,931 / last 330,085 / final 330,389）；`MINSHOT=200000` 只是本发的 `ui` 门槛，**不改变 P0 的 300 KB 单发判据**。
+- dump 时刻（~800 s）名称：widget **Weather、Calendar**；App **FaceTime、Calendar、Photos、Mail、Notes、Reminders、TV、Podcasts、Health、Wallet**（10 个）；Clock、News 此时未显示；Search 仍「Se」。
+- **时序不是永久缺失**：同配方的 aborted 发（`DUMP_AT=1200` 被终止）在更晚的 460,001 B 截图里出现了 **Clock、News、App Store、Maps、Settings 和完整「Search」**（`logs/s19o-v7/aborted/`）。所以 Clock/News 是 **UI 分批加载时序**，不是标签永久坏。
+
+**prog15 与 Clock/News**
+
+- text draw **640 行**（frame 8..973）：`nz>0` 106、`nz=0` 405、`nz=-` 129。
+- `prog15`：**120 笔，86 笔 `nz>0`**，34 笔 skip（readrect 无效）；`prog13`：442 笔、**0 笔 `nz>0`**（背板 pass）。
+- 早期 `frame<100`：139 笔（prog13 71 + prog15 68）；**prog15 有 34 笔 `nz>0`（221–1149）**，另 34 笔 skip。
+- Clock：`frame 15 #55 prog15 ... 750x200 ... scissor on 0,0 146x90 ... nz 598`；News：`frame 21 #88 prog15 ... scissor on 0,0 144x90 ... nz 536`。两笔都成功，和 v5 的结论一致：**不上屏是之后的合成/加载，不是字形没画出来**。
+
+**panel 真实性**
+
+```text
+f-panel-750x1624.rgba       a116b83d172f869bed2350dc0a882f2c
+f-n1-panel-750x1624.rgba    deef639e7da66c94ac675236c0dcc4d4   (md5 不同)
+check_panel: colours 6052; painted 293284/1218000 (24.1%)
+             black 924716 (75.9%), pure green 0 (0.0%)
+             verdict: looks like a picture
+```
+
+**C4：`diffdump /tmp/s19o-v7/f-n1 --tolerance 8`**
+
+```text
+painted: panel 293284 (24.1%), picture 294825 (24.2%)
+missing: 48 (0.00%) box (46,142,355,451)
+extra:   1589 (0.13%) box (47,491,642,878)
+differing: 2040 (0.17%) box (46,142,642,878)
+within 8 in every channel: 1216183/1218000 (99.85%) -> SAME FRAME
+```
+
+- **P0 口径：same-index `f-n1` = 99.85%，SAME FRAME，通过。**
+- 交叉配对：same-index `f` 也是 99.85%；cross `f-n1-panel` vs `f-picture` = **98.68%**，作为 `picture(N)==panel(N+1)` 关系的佐证，不替代 P0 的 same-index 结果。
+- 时序：dump 写入 frame **568/569（~800 s）**，晚于 UI（630 s）与首个非零 text draw（frame 8 #23，nz 1030），满足“dump 在界面/字形之后”。
+
+**P0 记分**
+
+| 判据 | v7 |
+|---|---|
+| `end=ui` / 无 panic | ✅ 630 s |
+| 截图 ≥300,000 B | ✅ 330,931 B |
+| ≥5 App 名称 | ✅ 10 App + 2 widget（更晚状态还有 Clock/News） |
+| 同帧 `diffdump` ≥95% SAME | ✅ **99.85% SAME FRAME** |
+| panel 真实 | ✅ 6052 色、0 绿、两帧 md5 不同、1:1 上传 |
+
+**v7 计入 P0 第一发**；还差 **2 发同口径**（v8/v9 已派）。**现在 1/3，不能写「P0 已通过」**；要等 v8/v9 里至少再有一发满足全部判据，才达到「3 发里 ≥2 发」。
 
 ---
 
