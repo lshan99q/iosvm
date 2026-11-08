@@ -1388,6 +1388,84 @@ PosterBoard（pid 43）日志：
   - 完全没有 wallpaper 层 → **下一发才加 4 个 job 对照**（`managedconfiguration.profiled`、`powerlogHelperd`、Video/ImageConversion），**不要和层树诊断混在同一 boot**，否则分不清是时间、job 还是层树变化。
 - 不要在同一发加 daemon；不要动 locationd/persona stub。
 
+> **P2b 已执行（结果见 §4.18）**：`rc.p2diag` 的 `rwtouch` 后台子进程没有活过 `exec /sbin/launchd.darwin`，层树 **0 行**；这是触发失败，不是「没有 wallpaper 层」的结论。下一发 P2c 改用进程内 `dispatch_after`。
+
+### 4.18 s19o-p2b 实测：层树触发没到 SpringBoard，P2 仍未达成
+
+> 归档：`/host/iosvm/logs/s19o-p2b/`（`report.md`、`build-p2b.log`、`apfs-verify.txt`、日志、截图）。**这些文件都不进 git**。
+> P2b 诊断发；**没有拿到层树，P2 仍未达成**。
+
+**镜像（只重建 root.apfs）**
+
+| 项 | 值 |
+|---|---|
+| 构建 | `PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.p2diag ./build.sh`（**未设 `SYSTEM=1`**） |
+| root.apfs | 5,902,336 B，md5 **`b2e919915b42e9f3aa7e7059a632d67d`** |
+| system.apfs | 未动：2,476,748,800 B，md5 **`b75d80caaa5e276a58a4d45307d2165b`**（mtime 仍是 11:42） |
+| 核验 | `/etc/rc` md5 = `c50ae661…`（与 `rc.p2diag` 一致）；`/bin/rwtouch` 66,832 B；libhakios 90,128 / sb 108,040 / gl 401,816 / libOSMesa 14,805,208，未回退 |
+| 备份 | `/tmp/root.apfs.bak-P2b`（P2 版本，md5 `b20d670f…`） |
+
+**Boot**
+
+| 项 | 值 |
+|---|---|
+| 配方 | `ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000`；`XCMD=glwire_local=1`；`HOST_ENV=GLWIRE_NO_PANEL=1` |
+| `end=` | `end=ui`：`ui=690s`，`ui_bytes=309072`；最大截图 **326,206 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **3,771** 帧 |
+
+**层树：0 行，触发没到 SpringBoard**
+
+- guest log：`hakios: layers` = **0 行**；`SBWallpaperEffectView` / `PBUIWallpaperView` / `PRSPoster` / `CALayerHost` = **0**。
+- `rwtouch:` 输出 = **0 行**：没有 `notification com.hakios.layers: posted`，也没有 `/dev/hakios-touch` 的 perror。
+- 但 rc 确实执行了，日志有：
+
+  ```text
+  $ ( /redwood/bin/rwtouch wait 900 notify com.hakios.layers ) &
+  $ exec /sbin/launchd.darwin
+  ```
+
+  且 `/dev/hakios-touch` 在 log 的 ls 里存在（`crw-rw-rw-`）。
+- 判定：**触发没有到达 SpringBoard**（或 rwtouch 没跑过 900s）。最可能是 rwtouch 作为 rc 的后台子进程，在 `exec /sbin/launchd.darwin` 之后没有继续（或输出丢失）；因此没有 `posted` 行，SpringBoard 的 `notify_register_dispatch("com.hakios.layers")` 回调自然也没跑。
+- **这不是「没有 wallpaper 层」的结论**；只是这一发的触发方式失败。
+
+**壁纸/背景：仍然失败**
+
+- host 上传：**3,776 张 `750x1624`**，其中 **3,772 张是 panel `4294901761`**；另有 1/4/7/10 四张启动期全屏纹理；**没有第二张持续的全屏非 panel 纹理，没有 1125x2436**。
+- 截图背景：左右边缘各 **0 / 36,000** 非黑；顶部条只有红条 → **仍纯黑**。
+- PosterBoard：pid 44，`service state: running`；依赖错误与 P2 相同（managedconfiguration/powerlog/persona 等）。
+
+**结论与 P2c**
+
+- P2b **没有拿到层树**，不能判断「有 wallpaper 层但 contents 空」还是「完全没有 wallpaper 层」；P2 **未达成**。
+- P2c（已派）：在 `inject_sb.c` 里加**进程内 `dispatch_after`** + boot arg **`layers_at=900`**（默认关），不再依赖 rc 的后台子进程。exp 用普通 `rc.vtop` 重建 root.apfs：
+
+  ```sh
+  export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+  cd "$KERNEL/userland"
+  cp -a root.apfs /tmp/root.apfs.bak-P2c
+  PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
+  ```
+
+  boot：
+
+  ```sh
+  cd /host/iosvm
+  export REPO=/host/iosvm
+  export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+  export GLWIRE=$REPO/tools/glwire
+  export ROOT=$KERNEL/userland/root.apfs
+  LABEL=s19p2c-1
+
+  XCMD="glwire_local=1 layers_at=900" \
+  ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000 \
+  HOST_ENV="GLWIRE_NO_PANEL=1" \
+  IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
+  tools/glwire/harness/boot-measure.sh "$LABEL" "$ROOT" 3000
+  ```
+
+- P2c 先验：guest log 出现 **`layers timer 900s fired`**（或等价日志）与 `hakios: layers`；若 timer 不 fired，先查 boot arg 是否传到 SpringBoard，不要先加 job。
+- **仍然不加 4 个 job**；P2c 只解决「层树触发」，wallpaper 层有无/contents 是否有值是下一层判断。
+
 ---
 
 ## 五、铁律与提交

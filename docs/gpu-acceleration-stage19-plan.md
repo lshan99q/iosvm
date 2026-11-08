@@ -40,7 +40,7 @@
 |---|---|---|---|
 | P0 | 标签是文字（**已达成 2/3：v7+v9**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
-| P2 | 壁纸（**进行中：lookup 0 失败、PosterBoard running；根因更像 hosted scene/配置缺失，依赖非卡死；P2b 层树诊断已派**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
+| P2 | 壁纸（**进行中：P2b 层树触发失败（0 行，rwtouch 没活过 exec）；P2c 进程内 `layers_at=900` 已派；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
 | P3 | widget | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
 | P4 | 收尾 | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
 
@@ -299,7 +299,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 | D1 | P0 诊断 + VBO 影子/快照 | 宿主日志 attrib 3 回到 0.125..0.5 |
 | D2 | P1 绕开 darken → 修 backdrop | 能读出 App 名称的截图；**实际 P1a：`SKIP=13` Weather 562→44；全标签 101.7%（重分布）；P1b `TC0_SANITIZE` 53.9% 但 Weather 719→741；P1c 点带在 glyph tile alpha；P1d end 清底部出竖条；P1e start 清空白顶行、band 73.6% 但分标签有升有降；trim 方向停止，P1 暂停** |
 | D3 | 三发验证 | ≥2/3 发标签为文字、截图 ≥300 KB、diff ≥95%；**实际 v7 99.85%、v9 99.98%（2/3）；v8 89.53% 因 dump 落在 UI 加载动画，不计入** |
-| D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard[43] running；无 wallpaper 纹理、背景纯黑；依赖失败但继续初始化，根因更像 hosted scene/配置；P2b 层树诊断中** |
+| D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；无 wallpaper 纹理、背景纯黑；P2b 层树触发失败（0 行），未拿到层树；P2c `layers_at=900` 诊断中** |
 | D5–D6 | P3 widget（时间盒） | 可行/不可行结论 |
 | D7 | P4 四格表 + 收尾 | 四个数字 + `make test` + 推送 |
 
@@ -308,7 +308,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 P0 已达成 2/3（v7+v9），但只覆盖「名称上屏」。下一阶段按 P1 → P2 → P3：
 
 - **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1e：FNV 证明 upload row0=视觉顶部，`TRIM_FROM=start` 清的是空白顶行；band 6989→5146（73.6%）但 Wallet +1244%、Health +70%、Photos +81%，trim 不是干净修复。停止 trim，转查 90 高背板/复合层；P1 方向暂停，优先 P2 依赖/P3。P1 未修复。**
-- **P2 壁纸**：P2 首次 boot 已修好 lookup、拉起 PosterBoard[43] 并 running；但无壁纸纹理、背景纯黑，P2 未达成。离线审计：profiled/powerlog/MediaConversion 的 plist/二进制在但 job 未加载（低代价、非第一嫌疑）；locationd 二进制缺（高代价，不做）；persona 系统级；dataModel 疑似进程内 BSService。判断更像 hosted wallpaper scene 没接上/缺 poster 配置，**不是依赖卡死、不是 PosterBoard 崩溃**。P2b 用 `rc.p2diag` 在 900s 打 SpringBoard 层树（只重建 root.apfs、`RC=rc.p2diag`、不设 SYSTEM、`UI_GRACE=900 MAXSECS=3000`）；先看层树/第二张全屏非 panel 纹理/截图边缘，再决定加 4 个 job 对照，不混发。
+- **P2 壁纸**：P2 首次 boot 修好 lookup、PosterBoard running；无壁纸纹理、背景纯黑。离线审计：profiled/powerlog/MediaConversion plist 在但 job 未加载（低代价、非第一嫌疑）；locationd 二进制缺（不做）；persona 系统级；dataModel 疑似进程内 BSService。判断更像 hosted wallpaper scene 没接上/缺 poster 配置，**不是依赖卡死、不是 PosterBoard 崩溃**。P2b 用 `rc.p2diag` 的 rwtouch 触发层树，但**后台子进程没活过 exec launchd，层树 0 行**，没拿到结论。P2c 改为 `inject_sb.c` 进程内 `dispatch_after` + boot arg `layers_at=900`（默认关），普通 `rc.vtop` 重建 root.apfs，boot `XCMD="glwire_local=1 layers_at=900"`、`UI_GRACE=900 MAXSECS=3000`；先验 `layers timer 900s fired` 与层树，仍不加 4 个 job。
 - **P3 widget**：`312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天）。
 - **回归基线**：不要用 v8 的动画帧当基线（v8 的 panel 已完整、picture 还停在前一状态，89.53% 是采样时刻问题）；用 v7/v9 这类静态时刻，或给 dump 加「连续两帧 panel/picture 稳定」门槛。
 
