@@ -2081,6 +2081,18 @@ UIWindowLayer "colour ( 0 1 )"
 
 > **状态：模板，未到期、未判定。** P3 只允许三种结论：**可行 / 不可行 / 需要更多信息**；不要提前写结论。
 
+**Surface 枚举（2026-11-09 10:51Z，独立探针）**
+
+- 900s 枚举到 **30 个存活 MiniIOSurface**：
+  - id 1/2：750x1624 BGRA（显示面；bpr 3072/3008）；
+  - **id 3：184x124 BGRA bpr 736（SpringBoard[9]**，stage11 的旧 widget snapshot）；
+  - **id 4：312x202 LA08 bpr 640（SpringBoard[9]**，文字/字形覆膜）；
+  - id 5–30：backboardd 的 180x180 图标面 + 28x95/28x65/28x28/19x19/16x16/6x85/6x6 装饰面。
+- **没有 155x155 pt（310x310 @2x / 465x465 @3x）或任何 widget 尺寸候选**；同 boot 950s 层树 155x155 `CALayerHost` = **`0x500b566f`/`0x7f535c4c`**，与枚举表任何 id 无对应。
+- → **widget 内容面不是 MiniIOSurface，而是 widget extension 的远程 CAContext**；`surface → opcode 202 → 真实 widget` 的 surface 路径**不可行**（没有可点的 id）。
+- 同 boot 试合成 id3/id4 时，host 收到的是全零 202（`widget upload texture 0 ... 0x0 rect 0,0`），截图 widget 区仍 mean 251 白块；这是主队列调 `eagl_remote_widget_upload` 的编码/remote 状态技术问题（P3a 从 widget 线程调用正常），不影响枚举结论。
+- fallback 验收 boot **已 GO**（占位实现见下）；P3 真实路径不可行，最终三选一待 fallback 截图验收后填。
+
 **判据逐条对照**
 
 | # | P3 判据 | 当前证据 | 到期填 |
@@ -2091,13 +2103,14 @@ UIWindowLayer "colour ( 0 1 )"
 | 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | ✅/❌ |
 | 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | ✅/❌ |
 | 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | ✅/❌ |
-| 7 | fallback（拉面最小实现）可交付 | **已实现，待 exp 截图验收**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 exp 截图验收（不是 P3 通过） |
+| 7 | fallback（拉面最小实现）可交付 | **已实现、验收 boot 已 GO，待 exp 截图回填**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 exp 截图验收（不是 P3 通过） |
+| 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | ❌ |
 
 **三选一判定条件**
 
-- **可行**：第 1、2 条都过（当前 widget 内容真的进宿主并发到截图），且不依赖已死 extension；否则不能选。
+- **可行**：第 1、2 条都过（当前 widget 内容真的进宿主并发到截图），且不依赖已死 extension；否则不能选。surface 枚举（第 8 条）已经排除「点某个 surface id」这条路，当前证据**强烈倾向不可行**。
 - **不可行**：时间盒到期，第 1/2 条未过，且第 4/5/6 条的证据表明 CAContext + extension 路线在时间盒内不可达；**fallback 已实现但还要 exp 截图验收；验收不过则写「未交付」**。
-- **需要更多信息**：只允许在「有一个具体、可测、未做的测量」时选（例如同 boot 拿到 widget extension context id 的新方法）；**不能拿「还没试够」当选需要更多信息的理由**。
+- **需要更多信息**：只允许在「有一个具体、可测、未做的测量」时选（例如同 boot 拿到 widget extension context id 的新方法）；**不能拿「还没试够」当选需要更多信息的理由**。surface 枚举已完成，不能再把「不知道 surface 几号」当选需要更多信息。
 
 **到期填写**
 
