@@ -1798,6 +1798,39 @@ UIWindowLayer "colour ( 0 1 )"
 - C1 未执行；P2 未达成；不要写「P2 已修复」。
 
 
+### 4.24 s19o-p2e 实测：`ExtensionWatchdogTimeout=120` 未生效（P2 未达成；C1 失败）
+
+> **状态：已回填（2026-11-09 05:50Z）。C1 失败，P2 未达成。** limits plist 在 system.apfs 里且能被 plistlib 解析，但 extension 仍在 **spawn 后 ~9s** 被 `Extension is hanging on launch. Killing.` 杀掉，未见 120s 生效。
+
+**镜像**
+
+| 项 | 值 |
+|---|---|
+| system.apfs | 2026-11-09 05:10:50Z，2,476,752,896 B，md5 **`8bf5f838d52e46d6c8bf77f13a5ad946`** |
+| root.apfs | **未动，保持 P2d**：5,906,432 B，md5 `b59fcf668707da64c716c3bb76dffab1`（build.sh 顺带重刷的 root 已用 `/tmp/root.apfs.bak-P2e` 还原） |
+| limits plist | system.apfs `/private/etc/com.apple.xpc.launchd.limits.plist` 691 B；plistlib 解析 `SIGTERMTimeout=3`、`CrashOnSIGTERMTimeout=true`、`ExtensionWatchdog=true`、`ExtensionWatchdogTimeout=120` |
+| 备份 | `/tmp/system.apfs.bak-P2e`（b75d80ca…）、`/tmp/root.apfs.bak-P2e`（b59fcf66…） |
+
+**Boot**：`XCMD="glwire_local=1 layers_at=1800"`、`GLWIRE_NO_PANEL=1`、`UI_GRACE=1500`、`MAXSECS=3600`；`end=ui`、`ui=630s`、`biggest=430921`、`hostframes=6301`、panic=0。
+
+**Extension watchdog（失败）**
+
+| 时间 | 事件 |
+|---|---|
+| 05:22:30.98 | `GradientPosterExtension WILL_SPAWN` |
+| 05:22:33.75 | `service spawned with pid 51` |
+| 05:22:42.67 | **`Extension is hanging on launch. Killing.` / `killing extension hanging on launch`**（spawn 后 **~9s**） |
+| 05:22:59.80 | `exited with exit reason … XPC_EXIT_REASON_EXTENSION_CHECK_IN_TIMEOUT | extension check-in timeout` |
+
+- 全 log `XPC_EXIT_REASON_EXTENSION_CHECK_IN_TIMEOUT` **50 次**、`checked in as alive` **0 次**；WallpaperKit.CollectionsPoster 同样被杀。
+- **判断**：`ExtensionWatchdogTimeout=120` 未被 launchd 采纳（默认量级仍是 ~10s）；不是「120s 到了才被杀」。按约定**不再加 timeout**。
+
+**1800s 层树（仍空）**：405 行、9 window、`layers: end`。`_SBWallpaperSecureWindow`（level −3，ctx `0x2081fc3d`，3068 commits）下 `PBUIPosterWallpaperRemoteViewController → …ViewController → …ViewController` 仍在（375x812、opacity 1），但子树 **contents=0**、旁 `CALayer colour ( 0 0 )` 黑层；`CALayerHost` 8 个全是 SpringBoard 自己的 window context，**无 PosterBoard**。
+
+**宿主/背景**：6,039 张 750x1624 全 panel；无第二张非 panel、无 1125x2436；shot/final 左右边缘 0/36,000 → 背景纯黑（430,921 B 的晚到截图是图标/widget 内容，不是壁纸）。
+
+**结论**：C1 单变量失败——limits 文件在镜像里但不生效；extension check-in 仍超时，壁纸 provider 起不来。下一步按 §4.23 的 fallback 转 **C2（xpcproxy/persona）**或离线 launchd/XPCServices 分析，**不要继续加 timeout**。P2 未达成。
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
