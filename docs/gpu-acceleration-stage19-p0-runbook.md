@@ -861,10 +861,10 @@ within 8 in every channel: 1216183/1218000 (99.85%) -> SAME FRAME
 
 **v7 计入 P0 第一发**；还差 **2 发同口径**（v8/v9 已派）。**现在 1/3，不能写「P0 已通过」**；要等 v8/v9 里至少再有一发满足全部判据，才达到「3 发里 ≥2 发」。
 
-### 4.9 v8/v9 与 P0 判定：v7+v9 = 2/3，P0 达成
+### 4.9 v8/v9 与 P0 判定：v7+v9 = 2/3（当时；p0-3 后 3/3，见 §4.33）
 
 > 归档：`/host/iosvm/logs/s19o-v8/`、`/host/iosvm/logs/s19o-v9/`（`report.md`、四张 dump、`diffdump.txt`、`check_panel.txt`、日志、截图）。**这些文件都不进 git**。
-> 结论按 P0 原判据：**连续 3 发里 ≥2 发满足名称、截图、同帧 diff** → **v7 + v9 = 2/3，P0 达成**。v8 不计入，原因是**采样时刻落在 UI 加载动画中**，不是渲染/配对回归。
+> 结论按 P0 原判据：**连续 3 发里 ≥2 发满足名称、截图、同帧 diff** → **v7 + v9 = 2/3，当时 P0 达成**（p0-3 后最终 3/3，见 §4.33）。v8 不计入，原因是**采样时刻落在 UI 加载动画中**，不是渲染/配对回归。
 
 **两发总表**
 
@@ -912,7 +912,7 @@ within 8 in every channel: 1217808/1218000 (99.98%) -> SAME FRAME
 **P0 判定**
 
 - 原判据：**连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95%**。
-- 计数：**v7（99.85% SAME）+ v9（99.98% SAME）= 2/3 → P0 达成**。v8 因采样时刻 89.53% NOT，不计入。
+- 计数：**v7（99.85% SAME）+ v9（99.98% SAME）= 2/3 → 当时 P0 达成；p0-3 后最终 3/3（§4.33）**。v8 因采样时刻 89.53% NOT，不计入。
 - **诚实边界**：v8 不是渲染回归，也不是配对错误；P0 的 C4 对 **dump 时刻是否落在 UI 加载动画里**很敏感。后续验收要选**静态时刻**（例如 panel/picture 连续两帧稳定），或把「panel 与 picture 的加载状态一致」加为稳定性门槛；**不要用 v8 的动画帧当回归基线**。
 
 ### 4.10 s19o-p1a 实测：prog13 是标签噪声带的主来源（P1 诊断，未修复）
@@ -1860,7 +1860,7 @@ UIWindowLayer "colour ( 0 1 )"
 - **停止 C1**：不再加 timeout、不再改 limits plist；120s 未生效，继续调只是重复。
 - **C2 限时**：code 做 **30 分钟**离线限时（xpcproxy/persona/check-in 方向）；到点无论结果都汇报，不无限深挖。
 - **P3 正式开工**（不等待 P2）：guest 库已可编；MVP = boot-arg 固定 surface ID + backboardd `IOSurfaceLookup` + host **opcode 202 / `GLWIRE_WIDGET`**。
-- **P2 不阻塞 P3**；P1 暂停；P0 仍 **2/3**，P2 未达成。
+- **P2 不阻塞 P3**；P1 暂停；P0 最终 **3/3**（p0-3 补齐，见 §4.33），P2 未达成。
 
 ---
 
@@ -1918,7 +1918,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 **判读**：guest 侧 `hakios: widget surface 3 184x124 bpr 736 -> texture 0xffff1003 rect 46,142 309x309 scale 1.000` 出现 1 次；host 上传 1 次、合成 4 次；`widget texture removed`=0。**链路（surface→202→host compose）验证通过**；像素内容是空白白块，说明 surface 3 是旧 snapshot/空白面。下一步见 **§4.27**：拿当前 widget 的 CAContext snapshot，不再调 rect。本发无绿色 1/4 伪影（0 纯绿像素）。
 
-**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P2-C2 已失败；P0 仍 2/3。
+**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P2-C2 已失败；P0 最终 3/3。
 
 ---
 
@@ -1993,7 +1993,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 **建议**：① 选择器表加 `contextWithId:`，type encoding 用容忍偏移的解析；② `widget_cacontext_at=SECONDS` 延迟到 UI 后（与 `layers_at` 同思路）或轮询 `allContexts`；③ 延迟后 `allContexts` 列表 × 层树 155x155 host id 对照，对候选逐个 `createImageSlot:hasAlpha:` 快照取 nonzero>0；④ 仍失败按放弃条件转 fallback。**不要盲调未知 selector。**
 
-**不要写**：D1 成功 / P3 完成 / widget 正确。P2-C2 已失败；P0 仍 2/3。
+**不要写**：D1 成功 / P3 完成 / widget 正确。P2-C2 已失败；P0 最终 3/3。
 
 ---
 
@@ -2167,7 +2167,7 @@ UIWindowLayer "colour ( 0 1 )"
 - **交付已走 guest-side**：`inject_sb.c` 的 `widget_placeholder=1` 在 UI 后插圆角 UIView（棋盘+白框+黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`；**fallback5 PASS**。
 - 这是 **fallback 交付项**，截图验收前不要写成 P3 可行/已完成。
 
-**不要写**：P3 真路径通过 / widget 已正确 / P2 已修复。P3 真路径不可行，fallback 已交付（占位）；P0 仍 2/3；P1 暂停。
+**不要写**：P3 真路径通过 / widget 已正确 / P2 已修复。P3 真路径不可行，fallback 已交付（占位）；P0 最终 3/3；P1 暂停/未修复（C）。
 
 
 ### 4.30 s19o-p3-surface-enum 实测：widget 面不在 MiniIOSurface 表里
@@ -2259,6 +2259,31 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - 视觉：`logs/s19o-p3-fallback5/widget-area.png`（463x463）清晰 24px 棋盘 + 白框 + 两条黄对角线；无绿屏/白底覆盖。
 - 判定：**PASS（视觉 + 日志）**；这是拉面占位，**不是真 widget 内容**，P3 不写「可行/真路径通过」。
 
+### 4.32 P1 终局 C：点带是 42 高 glyph/label tile 的底部行（不是 A/B）
+
+> **结论：P1 终局 C/other。** 点带是 **42 高 glyph/label tile 的底部行**，不是 A（750x200 平铺），也不是 B（背板采样未裁到 glyph rect）。P1 **未修复、暂停/不续**；不再为 P1 起 boot（除非 owner 另定）。
+> 来源：`docs/gpu-acceleration-stage19-p0-3-results.md`、`docs/gpu-acceleration-stage19-p1-backdrop-or-tile.md`。
+
+- UI-time Weather label（host log frame 117）：`text draw #549 prog13 178x90`、`#550 prog15 130x42`。
+- tile dump：178x90 label tile 的 row34–52 是字形，**row61 = 54 px 虚线**，rows62–89 = 0。row61 是 **130x42 glyph 纹理最后一行**（42 行映射到 tile 的 row20–61），不是 178x90 背板底（底是 row89）。
+- P1c 的 **101x42 Notes** 底部 8 行每行 29–30 px，是同源证据：42 高 tile 已直接贡献。
+- 早帧 750x200：`readrect 0,0 184x90`、`texmat 1,1,0,0`，**无 wrap/repeat**；750x200 只是早帧 label-tile 纹理/采样，不是被平铺的 backdrop。
+- 90 高 tile 底缘可能还有**第二来源**点线，但**不能归因于 750x200**；`host_backdrop_fill()` 只在 `GLWIRE_BACKDROP=1` 且目标 ≤256x256 时 blit，P1c 没开、750x200 超限，host 从未填它。
+- **续查条件**：只有「90 高 tile 定向 trim 后，至少两个 90 高标签带下降 ≥50% 且 42 高 Notes 不变」才续查 90 高生成；否则保持暂停。**当前：不续。**
+- **修法方向**：guest glyph/label tile 生成，不要把点线写进 42/90 高 tile；host 侧底行 discard 只能作为验证后的兜底，且不能削 descender/背板圆角。
+- **P1 仍未修复**；不要写「P1 已通过」。
+
+### 4.33 P0 第三发 p0-3：3/3 PASS
+
+> **P0 最终 3/3 PASS**（原判据是 ≥2/3）。三发：v7 330,931 B / 10+2 / 99.85%；v9 326,461 B / 10+2 / 99.98%；**p0-3 327,177 B / ≥14 / 98.81%**。
+> 来源：`docs/gpu-acceleration-stage19-p0-3-results.md`；归档 `logs/s19o-p0-3/`。
+
+- p0-3：`end=ui ui=660s ui_bytes=310605 hostframes=1080 panic=0 biggest=327177`；`diffdump f-n1` tol 8 = **98.81% SAME**（missing 0、cross 100%、f/f-n1 md5 不同）；panel 8455 色 / green 0 / `0x502`=0；`check_panel` same-index 98.82%。
+- **不是 v8 89.53%**：本发 missing 0、cross 100%；extra **14,555 px（1.19%，box 54,1092,173,1253）**只是一个小 UI 元素，不是加载动画采样错位。
+- 截图有 `rdar:45025538` overlay + 右缘首帧竞态；800s dump 是更晚的干净 pair，**不影响 P0 三条判据**。
+- 首发作废：18:51 误用 root-local（无 `GLREMOTE`，host 0 帧）；19:01 换 `/tmp/root-byref.apfs` 3207a35e（v9 同类）重起；P0 渲染 flag 未改。
+- **P0 3/3 PASS**；不要再用 v8 89.53% 当反例，也不要写「2/3」。
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
@@ -2331,14 +2356,14 @@ NaN->I=<条> diff=<百分比/SAME|NOT> names=<个数: ...> => <PASS|FAIL: 原因
 三发汇总：
 
 ```text
-P0: <2/3 或 3/3> PASS；阻塞：<几何/scissor 的哪一处>；下一发：<具体改动或实验>
+P0: 3/3 PASS（或 2/3 时写 2/3）；阻塞：<几何/scissor 的哪一处>；下一发：<具体改动或实验>
 ```
 
 **P4 四格表**：`tools/glwire/harness/four-cell.sh` 是 **dry-run 骨架**，镜像由外部构建，未跑 QEMU；不要把它 `--dry-run` 读旧日志算出的表格当成一次实测四格表。
 
 ## 七、P2 壁纸重建配方（已执行一次；结果见 §4.15）
 
-> **本配方已按 §4.15 跑过一次。** 首次执行结果：lookup 修好、PosterBoard 启动并 running，但**壁纸未出现**（无 1125x2436/全屏非 panel 纹理，背景纯黑），P2 未达成。构建/重建 `system.apfs` 期间跑测量会触发 tick-spinlock panic；必须等 **P1d 与当前测量全部结束、无 qemu** 后再做（§2.2 的 `ps` 检查）。P2 不改变 P0 的 2/3 结论。
+> **本配方已按 §4.15 跑过一次。** 首次执行结果：lookup 修好、PosterBoard 启动并 running，但**壁纸未出现**（无 1125x2436/全屏非 panel 纹理，背景纯黑），P2 未达成。构建/重建 `system.apfs` 期间跑测量会触发 tick-spinlock panic；必须等 **P1d 与当前测量全部结束、无 qemu** 后再做（§2.2 的 `ps` 检查）。P2 不改变 P0 的最终 3/3 结论。
 > 任务文里写的 `com.apple.PostBoard.plist` 是简写/笔误；实际文件名是 **`com.apple.PosterBoard.plist`**，命令按实际名写。
 
 ### 7.1 前置与备份
@@ -2751,7 +2776,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 
 ## 附录 D：阶段 19 收口决定 D1–D7（摘要）
 
-完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**。
+完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**；一页状态/未达成/移交/复现见 **`docs/gpu-acceleration-stage19-closure.md`**。
 
 | ID | 决定 | 一句话依据 |
 |---|---|---|
