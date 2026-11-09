@@ -1892,9 +1892,43 @@ UIWindowLayer "colour ( 0 1 )"
 | 3 | 截图 rect 有变化（允许拉伸/旧内容） | **⚠️ 无可见内容** | 区域是**纯白圆角块**，与占位块外观一致；rect 46,142 309x309 已按参数拉伸应用 |
 | 4 | 尺寸/语义记录 | **❌ 语义不对** | surface 3 = 184x124（92x62 pt），层树 widget host = 155x155 pt；链路通但 surface 3 不代表当前 widget |
 
-**判读**：guest 侧 `hakios: widget surface 3 184x124 bpr 736 -> texture 0xffff1003 rect 46,142 309x309 scale 1.000` 出现 1 次；host 上传 1 次、合成 4 次；`widget texture removed`=0。**链路（surface→202→host compose）验证通过**；像素内容是空白白块，说明 surface 3 是旧 snapshot/空白面。下一步要拿**当前 widget 的快照/surface**（或走 CALayerHost/CAContext snapshot），不是继续调 rect。本发无绿色 1/4 伪影（0 纯绿像素）。
+**判读**：guest 侧 `hakios: widget surface 3 184x124 bpr 736 -> texture 0xffff1003 rect 46,142 309x309 scale 1.000` 出现 1 次；host 上传 1 次、合成 4 次；`widget texture removed`=0。**链路（surface→202→host compose）验证通过**；像素内容是空白白块，说明 surface 3 是旧 snapshot/空白面。下一步见 **§4.27**：拿当前 widget 的 CAContext snapshot，不再调 rect。本发无绿色 1/4 伪影（0 纯绿像素）。
 
 **不要写**：P3 已完成 / widget 已正确 / P2 已修复。P2-C2 已失败；P0 仍 2/3。
+
+---
+
+### 4.27 P3b 计划：CAContext snapshot D1 探针（未执行）
+
+> **状态：计划，未执行。** P3a 已证明 `surface→opcode 202→host compose` 链路通，但 surface 3 是空白白块；不再调 rect，转 **CAContext snapshot** 拿当前 widget 内容。
+
+**D1 探针（code，先证明对象/快照可得）**
+
+- 运行时探测（不假设私有 API 一定存在）：
+  - `NSClassFromString("CAContext")` / 相关类是否存在；
+  - `respondsToSelector:` 检查 `contextWithOptions:`、`layer`、`contents`、`createImage`/`snapshot` 等候选 selector；
+  - 从 SpringBoard 层树的 `CALayerHost` / `_UISceneLayerHostContainerView` 拿到 context id，再 `CAContext contextWithContextId:`（若存在）。
+- 先只做**日志探针**：打印类名、selector 可用性、context id、layer/contents 类型；不改合成。
+- 快照要求：拿到**非空** bitmap（宽高与当前 widget host 一致，或至少非全黑/非全白），并记录 bytes/mean/nonblack。
+- **放弃条件（明确）**：
+  1. `CAContext` 类或所需 selector 不存在；
+  2. 能拿对象但 `contents/createImage/snapshot` 全空/全黑，连续 N 次（建议 3 次）无改善；
+  3. 调用阻塞主线程/崩溃，或只能拿到 155x155 的空白层；
+  4. 超过 **1–2 天** 时间盒。
+  → 命中任一：写「需要更多信息/不可行」，不要再盲试私有 selector。
+
+**P3b（D1 成功后）**
+
+- 把 snapshot 作为纹理，走现有 host opcode 202 / `GLWIRE_WIDGET`；rect 用当前层树 widget frame（不是 surface 3 的 46,142,309,309）。
+- 判据：
+  1. snapshot 非空、尺寸与当前 widget host 一致；
+  2. host 收到对应纹理并 compose；
+  3. 截图 widget 区域出现**当前内容**（不是纯白/旧内容）；
+  4. 允许缩放/位置小偏差，但必须记录；语义正确才算 P3 达成。
+- 若 D1 失败：P3 交付「拉面」最小实现或记录不可行；**不要写 P3 已交付**。
+
+**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3a 只证明链路；P3b 未执行；P0 仍 2/3。
+
 
 ## 五、铁律与提交
 
