@@ -1853,6 +1853,65 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ---
 
+## 4.14（2026-11-09）编译环境验证 + P2c/P2d：`layers_at` 定时器与壁纸层树
+
+> 本节补 P2c/P2d。P2b 的 rc 后台 `rwtouch notify` 零输出；P2c-alt 的 LaunchDaemon 通知也只 `posted`、handler 没跑，跨进程 Darwin notify 判定不可用。owner 随后在容器里装好 clang 19 / ld64.lld / THEOS SDK / cctools，改走**进程内 `layers_at=SECONDS` dispatch_after 定时器**（`inject_sb.c` §1264–1300，提交 `c056fb6`）。
+
+### 4.14.1 编译环境（已验证）
+
+| 组件 | 位置 |
+|---|---|
+| clang 19.1.7 | `/usr/bin/clang`（→ llvm-19） |
+| ld64.lld | `/usr/bin/ld64.lld` |
+| THEOS SDK | `/host/iosvm-work/toolchain/theos/sdks/iPhoneOS16.5.sdk` |
+| cctools ld64 | `/host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld` |
+| 运行时库 | `/host/iosvm-work/toolchain/lib` |
+| xnu-clang 包装器 | `/host/iosvm-work/hakios-xnu-kernel/xnu-deps/host/bin/xnu-clang` |
+
+- 规则：guest 构建一律 **`IOSVM_USE_LLD=1`**；不再试 `IOSVM_USE_LLD=0`。缺 clang/SDK 先查 `.zshrc` 的 `THEOS`/`CCTOOLS_LD64`/`LD_LIBRARY_PATH`/`PATH`。
+- 验证 1（P2c-timer 用的 sb 库）：
+  ```
+  THEOS=/host/iosvm-work/toolchain/theos IOSVM_USE_LLD=1 \
+    xnu-clang -arch arm64 -isysroot $THEOS/sdks/iPhoneOS16.5.sdk -O1 -dynamiclib \
+    -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework IOKit \
+    -framework IOSurface -lobjc -o /tmp/libhakios.sb.test.dylib src/inject_sb.c
+  ```
+  → 0.57s，Mach-O arm64 magic `cffaedfe`，**108,248 B**（旧 108,040），strings 含 `layers_at` 与 `hakios: layers timer %lus fired|scheduled`；旧库备份 `/tmp/libhakios.sb.old.dylib`。
+- 验证 2（P3 guest 侧目标库）：
+  - `src/inject.c` → `libhakios.dylib`：**89,856 B**，`cffaedfe`，编译通过；
+  - `src/eagl.c src/gl_osmesa.c src/eagl_remote.c` → `libhakios.gl.dylib`：**400,656 B**，编译通过。
+  - 两者与镜像内 11-07 旧库（90,128 / 401,816）大小略异（clang/lld 版本不同，md5 不同），说明**工具链能产出 P3 patch 的两个目标库**；换库进镜像等 P3 GO 再做。
+- P2c-timer 镜像：`root.apfs` **`dbf1c3d85d9cb35eb121af4401d02d51`**（03:35Z，5,902,336 B；镜像内 sb 库 108,248 B / `1cd3053c0e127be55204e861f36e4047`）；`system.apfs` 仍 `b75d80caaa5e276a58a4d45307d2165b` 未动。备份 `/tmp/root.apfs.bak-P2c-timer`。
+
+### 4.14.2 P2c-timer boot
+
+`XCMD="glwire_local=1 layers_at=900"`、`HOST_ENV=GLWIRE_NO_PANEL=1`、`UI_GRACE=900 MAXSECS=3000`：
+
+```
+xb: s19o-p2c-timer end=ui ui=690s ui_bytes=314818 hostframes=3640
+    SIGSEGV=0 usertrap=0 panic=0 biggest=333347
+```
+
+- timer：`hakios: layers timer 900s scheduled` → **`hakios: layers timer 900s fired`**；**404 行**层树、**9 个 window**、以 `hakios: layers: end` 结束。
+- **关键层树**（`_SBWallpaperSecureWindow`，level −3，context `0x44de26d9`，secure，429 commits，scene `com.apple.springboard`）：
+  ```
+  UIWindowLayer "colour ( 0 1 )"
+    CALayer "VC:PBUIPosterWallpaperRemoteViewController" 375x812 opacity 1
+      CALayer "-" 375x812
+        CALayer "VC:PBUIPosterWallpaperViewController" 375x812
+          CALayer "VC:PBUIPosterViewController" 375x812     ← 无 contents、无子层
+    CALayer "-" colour ( 0 0 ) 375x812                      ← 黑层
+  ```
+- 壁纸子树内 `contents` = **0 处**，也没有 `CALayerHost`/`_UIRemoteView`；全树 7 个 `CALayerHost` 都在 `SBRootSceneWindow` 的 `_UISceneLayerHostContainerView` 下，host 的是 SpringBoard 自己的 window context（`0x44de26d9`/`0x15ae970`/`0xc0763e2d`/`0xdfcc84cb`/`0x32541f82`/`0x3dfc1379`），**没有 PosterBoard 的 context**。
+- 宿主：1,261 张 750x1624 全为 panel `4294901761`（+启动期 1/4/7/10）；**无第二张持续非 panel 全屏纹理、无 1125x2436**；截图 shot/final 左右边缘 0/36,000 非黑 → **背景纯黑**。
+- PosterBoard：`user/501/com.apple.PosterBoard [45]`，03:46:19 `Successfully spawned ... running`，无 app 级日志/崩溃。
+
+**结论**：壁纸 window 与 `PBUIPoster*` 远程 VC 链**已经存在**，但**内容是空的**（无 contents、无 PosterBoard 的 CALayerHost、无壁纸纹理）→ 按判据属于**内容/快照问题**，不是 scene 没接上。P2c 之前「lookup 失败/无 wallpaper」的结论已被推翻一半：job 与 window 都到位，剩下的是远程 poster 内容。
+
+### 4.14.3 P2d（下一发，待执行）
+
+单变量：在 `build.sh` 的 `DARWIN_JOBS` 里加 4 个 job（`com.apple.managedconfiguration.profiled`、`com.apple.powerlog.plxpc` 相关、`com.apple.photos.VideoConversionService`/`ImageConversionService` 的 XPC），其余不变，看 PosterBoard 是否建立 scene 并产生 content。判据：层树里 `PBUIPosterWallpaperRemoteViewController` 下出现 PosterBoard 的 `CALayerHost`/`contents`、宿主出现第二张 750x1624 非 panel 纹理、截图背景非纯黑。**不要同时改 trim/其它变量。**
+
 ## 附录 A：本手册引用的数字出处
 
 | 数字/结论 | 出处 |
