@@ -43,6 +43,9 @@ struct client {
 	GLuint framebuffer;
 	int width, height;
 	struct glstate names;
+	unsigned char *dirty_previous;
+	size_t dirty_previous_bytes;
+	int dirty_previous_width, dirty_previous_height;
 };
 
 static EGLDisplay display;
@@ -3530,8 +3533,96 @@ dump_textures(struct client *client, const char *prefix)
 	fflush(stdout);
 }
 
-/* One frame: "R <w> <h> <records bytes> <picture bytes>\n", the records, then the picture:
- * "R <picture bytes>\n" and the BGRA pixels. */
+/* Dirty upload: compare the picture with the previous frame in fixed 64x64 tiles and send only the
+ * changed ones.  The guest patches its full remote_frame, so frame_end still copies the whole picture.
+ * The first frame (or a size change) sends every tile, which is exactly the old full payload. */
+struct dirty_tile {
+	int x, y, w, h;
+	size_t bytes;
+};
+
+static int
+host_send_dirty(struct client *client, const unsigned char *picture, int width, int height,
+    size_t frame_bytes)
+{
+	struct dirty_tile tiles[1024];
+	int count = 0;
+	size_t total = 0;
+	int previous_ok;
+	char line[64];
+
+	previous_ok = client->dirty_previous != NULL &&
+	    client->dirty_previous_bytes == frame_bytes &&
+	    client->dirty_previous_width == width && client->dirty_previous_height == height;
+	if (!previous_ok) {
+		free(client->dirty_previous);
+		client->dirty_previous = malloc(frame_bytes);
+		client->dirty_previous_bytes = client->dirty_previous != NULL ? frame_bytes : 0;
+		client->dirty_previous_width = width;
+		client->dirty_previous_height = height;
+		previous_ok = 0;
+	}
+	if (client->dirty_previous == NULL) {
+		return -1;
+	}
+	for (int ty = 0; ty < height; ty += 64) {
+		int th = height - ty < 64 ? height - ty : 64;
+
+		for (int tx = 0; tx < width; tx += 64) {
+			int tw = width - tx < 64 ? width - tx : 64;
+			int changed = !previous_ok;
+
+			if (!changed) {
+				for (int y = 0; y < th && !changed; y++) {
+					if (memcmp(picture + ((size_t)(ty + y) * width + tx) * 4,
+					    client->dirty_previous + ((size_t)(ty + y) * width + tx) * 4,
+					    (size_t)tw * 4) != 0) {
+						changed = 1;
+					}
+				}
+			}
+			if (changed && count < (int)(sizeof(tiles) / sizeof(tiles[0]))) {
+				tiles[count].x = tx;
+				tiles[count].y = ty;
+				tiles[count].w = tw;
+				tiles[count].h = th;
+				tiles[count].bytes = (size_t)tw * (size_t)th * 4;
+				total += tiles[count].bytes;
+				count++;
+			}
+		}
+	}
+	snprintf(line, sizeof(line), "D %d %zu\n", count, total);
+	if (!send_all(client->fd, line, strlen(line))) {
+		return -1;
+	}
+	for (int i = 0; i < count; i++) {
+		uint32_t header[4];
+
+		header[0] = (uint32_t)tiles[i].x;
+		header[1] = (uint32_t)tiles[i].y;
+		header[2] = (uint32_t)tiles[i].w;
+		header[3] = (uint32_t)tiles[i].h;
+		if (!send_all(client->fd, header, sizeof(header))) {
+			return -1;
+		}
+		for (int y = 0; y < tiles[i].h; y++) {
+			if (!send_all(client->fd,
+			    picture + ((size_t)(tiles[i].y + y) * width + tiles[i].x) * 4,
+			    (size_t)tiles[i].w * 4)) {
+				return -1;
+			}
+		}
+	}
+	memcpy(client->dirty_previous, picture, frame_bytes);
+	printf("host_glwire: dirty upload %d/%d tiles, %zu of %zu B\n", count,
+	    ((width + 63) / 64) * ((height + 63) / 64), total, frame_bytes);
+	fflush(stdout);
+	return 0;
+}
+
+/* One frame: "R <w> <h> <records bytes> <picture bytes>\\n", the records, then the picture:
+ * "R <picture bytes>\\n" and the BGRA pixels. */
 static int
 serve_frame(struct client *client)
 {
@@ -3539,6 +3630,7 @@ serve_frame(struct client *client)
 	int at = 0;
 	int width = 0, height = 0, segment_count = 0, row_bytes = 0;
 	int version = 0;                /* the record layout the guest speaks (stage fifteen: 2 = with context) */
+	int dirty_wanted = 0;           /* the guest asks for D <tiles> instead of the full picture */
 	/* P1'''': a frame may name a second panel-sized surface (the display presents two in turn). */
 	int segment_count2 = 0, row_bytes2 = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
@@ -3570,8 +3662,8 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
-	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version) < 4) {
+	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
+	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version, &dirty_wanted) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
@@ -4102,6 +4194,15 @@ serve_frame(struct client *client)
 		unsigned char *packed = NULL;
 		int length;
 
+		if (dirty_wanted && !in_place) {
+			if (host_send_dirty(client, picture, width, height, frame_bytes) != 0) {
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+		} else {
 		if (upload_scale > 1) {
 			size_t w = (size_t)width / (size_t)upload_scale;
 			size_t h = (size_t)height / (size_t)upload_scale;
@@ -4134,6 +4235,8 @@ serve_frame(struct client *client)
 			return -1;
 		}
 		free(packed);
+		}
+
 	}
 	{
 		static double last_frame;
@@ -4204,6 +4307,10 @@ close_client(struct client *client)
 	if (client->fd < 0) {
 		return;
 	}
+	free(client->dirty_previous);
+	client->dirty_previous = NULL;
+	client->dirty_previous_bytes = 0;
+	client->dirty_previous_width = client->dirty_previous_height = 0;
 	if (client->context != EGL_NO_CONTEXT) {
 		eglMakeCurrent(display, client->surface, client->surface, client->context);
 		if (client->framebuffer != 0) {
