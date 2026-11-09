@@ -3592,20 +3592,6 @@ host_send_dirty(struct client *client, const unsigned char *picture, int width, 
 			}
 		}
 	}
-	/* A nearly-full dirty set is worse than one frame: 310 tiles means 310 headers and 19,840
-	 * small sends, which cost more than the saved bytes.  Fall back to the old full R frame. */
-	if (count > 8 && total * 2 >= frame_bytes) {
-		snprintf(line, sizeof(line), "R %zu\n", frame_bytes);
-		if (!send_all(client->fd, line, strlen(line)) ||
-		    !send_all(client->fd, picture, frame_bytes)) {
-			return -1;
-		}
-		memcpy(client->dirty_previous, picture, frame_bytes);
-		printf("host_glwire: dirty fallback %d/%d tiles, %zu of %zu B -> full R\n", count,
-		    ((width + 63) / 64) * ((height + 63) / 64), total, frame_bytes);
-		fflush(stdout);
-		return 0;
-	}
 	snprintf(line, sizeof(line), "D %d %zu\n", count, total);
 	if (!send_all(client->fd, line, strlen(line))) {
 		return -1;
