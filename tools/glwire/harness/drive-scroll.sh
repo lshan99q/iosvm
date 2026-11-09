@@ -165,7 +165,7 @@ for _ in $(seq 1 90); do
 	sleep 2
 done
 sleep 2
-( cd "$GLWIRE" && env ${HOST_ENV:-} ${HOST_BIN:-./host_glwire} $HOSTARGS 9110 "$IOSVM/qemu/ram.img" > "$HLOG" 2>&1 ) &
+( cd "$GLWIRE" && exec env ${HOST_ENV:-} ${HOST_BIN:-./host_glwire} $HOSTARGS 9110 "$IOSVM/qemu/ram.img" > "$HLOG" 2>&1 ) &
 hpid=$!
 SHOTIN=/tmp/xb-$LABEL-$$.png
 ui=0
@@ -185,7 +185,7 @@ done
 if [ "$ui" -eq 0 ]; then
 	echo "drive: no interface" >> "$DRIVE"
 	kill_tree "$qpid"
-	kill -9 "$hpid" 2>/dev/null
+	kill_tree "$hpid"
 	echo "drive: $LABEL ui=0"; exit 0
 fi
 sleep 4
@@ -268,5 +268,5 @@ PY
 fi
 
 kill_tree "$qpid"
-kill -9 "$hpid" 2>/dev/null
+kill_tree "$hpid"
 tail -2 "$DRIVE"
