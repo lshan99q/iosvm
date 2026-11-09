@@ -2531,7 +2531,9 @@ tools/glwire/harness/four-cell.sh
 - 只数**宿主日志**里的 `glerror 0x502`：脚本 `grep -c 'glerror 0x502' <label>-host.log`，填表列 `host 0x502`。
 - P4 判据是 **`host 0x502` = 0**；脚本正常情况应为 0；某格 host log 缺失/没跑起来 → 写 `SKIP` 或 `-`，不写 0。
 - 表列固定为：`cell | ui | frames | fps | span | shot B | host 0x502`；`ui`/`frames`/`fps`/`span` 取 `drive:` 行，`shot B` 取最大截图字节数。
-- 纯本地格可能 host 0 帧/超时；如实写，不把 guest 帧数当 host fps。
+- **cell1 纯本地无 recorder，host 0 帧是设计，不是失败**：four-cell.sh 对 cell1 默认
+  `REQUIRE_HOST_FRAMES=0`，截图仍按 `MINSHOT` 验收；不要把 cell1 的 0 帧写成 SKIP 或错误。
+- 纯本地格也可能窗口超时；如实写，不把 guest 帧数当 host fps。
 
 ### 8.4 `make test`
 

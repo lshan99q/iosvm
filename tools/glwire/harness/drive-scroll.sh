@@ -134,10 +134,25 @@ fi
 LABEL=$1; ROOT=$2; MAXSECS=${3:-900}; shift 3 || true
 HOSTARGS="$*"
 LOG=/tmp/$LABEL.log; HLOG=/tmp/$LABEL-host.log; DRIVE=/tmp/$LABEL-drive.txt
+
+# Kill only this launch's process tree (outer timeout -> run-darwin -> run.sh -> timeout -> qemu);
+# never a name-wide pkill: another cell may already be starting.
+kill_tree() {
+	local pid=$1 child
+	for child in $(ps -o pid= --ppid "$pid" 2>/dev/null); do
+		kill_tree "$child"
+	done
+	kill -9 "$pid" 2>/dev/null
+}
 rm -f "$LOG" "$HLOG" /tmp/xb-$LABEL-$$.png "$DRIVE"
-for pid in $(ps -eo pid,comm | awk '$2 ~ /^qemu-system-aar/ {print $1}'); do kill -9 "$pid" 2>/dev/null; done
-for pid in $(ps -eo pid,comm | awk '$2 ~ /^host_glwire/ {print $1}'); do kill -9 "$pid" 2>/dev/null; done
-sleep 1
+if ps -eo comm= | grep -q '^qemu-system-aar'; then
+	echo "drive: another qemu-system is already running; refusing to start a second VM" >&2
+	exit 1
+fi
+if ps -eo comm= | grep -q '^host_glwire'; then
+	echo "drive: another host_glwire is already running; refusing to start" >&2
+	exit 1
+fi
 [ "$ZERO_RAM" = 1 ] && rm -f "$IOSVM/qemu/ram.img"
 cd "$IOSVM" || exit 1
 QEMU_SMP=${QEMU_SMP:-4} QEMU_TB_MB=${QEMU_TB_MB:-1536} QEMU_RAM_GB=12 QEMU_NET=1 QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img \
@@ -168,9 +183,10 @@ for tick in $(seq 1 $((MAXSECS / 10))); do
 	[ $((tick * 10)) -ge "$NOUI_BY" ] && break
 done
 if [ "$ui" -eq 0 ]; then
-	echo "drive: no interface" >> "$DRIVE"; kill "$qpid" 2>/dev/null
-	for pid in $(ps -eo pid,comm | awk '$2 ~ /^qemu-system-aar/ {print $1}'); do kill -9 "$pid" 2>/dev/null; done
-	kill -9 "$hpid" 2>/dev/null; echo "drive: $LABEL ui=0"; exit 0
+	echo "drive: no interface" >> "$DRIVE"
+	kill_tree "$qpid"
+	kill -9 "$hpid" 2>/dev/null
+	echo "drive: $LABEL ui=0"; exit 0
 fi
 sleep 4
 python3 qemu/touch.py tap 0.656 0.729 >/dev/null 2>&1     # the Settings icon, as rc.touch1's first action
@@ -251,8 +267,6 @@ print(f"drive: ui={ui}s window {span:.2f}s frames {int(n1)-int(n0)} -> {host:.2f
 PY
 fi
 
-kill "$qpid" 2>/dev/null
-for pid in $(ps -eo pid,comm | awk '$2 ~ /^qemu-system-aar/ {print $1}'); do kill -9 "$pid" 2>/dev/null; done
-for pid in $(ps -eo pid,comm | awk '$2 ~ /^host_glwire/ {print $1}'); do kill -9 "$pid" 2>/dev/null; done
+kill_tree "$qpid"
 kill -9 "$hpid" 2>/dev/null
 tail -2 "$DRIVE"
