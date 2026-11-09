@@ -119,6 +119,8 @@
 - 四份构建定义与命令见 runbook §八：cell1 纯本地（`GL=1 CONFIGD=1`）、cell2 按引用（`GLWIRE_LOCAL=1`）、cell3 W1.5（`GLWIRE_NO_INPLACE=1`）、cell4 W1.5+W3（in-place 开）。
 - 每格同 `QEMU_SMP=1`、同触摸脚本、`WINDOW_AFTER=60`、`WINDOW_FRAMES=0`（约 20s）；`host 0x502` 只数宿主日志，判据 0；`make test` = `test-open` + `test-gpu`。
 - `four-cell.sh` 的 `--dry-run` 只验证调度/记账，**不是实测**；四发真 QEMU 后才填四格表。驱动 `e8a8ee7`；dry-run 自检见 `9ce6e5b`。
+- 四份镜像当前都不存在（`/tmp/root-local.apfs`、`root-byref.apfs`、`root-w15.apfs`、`root-w15w3.apfs`），必须先按 runbook §8.1 构建。
+- `make test-open` PASS；`make test` 的 `test-gpu` 当前因 `/usr/share/vulkan/icd.d/lvp_icd.json` 缺失失败，是环境问题，补 lavapipe ICD 后重跑；不阻塞四格。
 
 **影响**：
 
@@ -131,6 +133,15 @@
 2. owner 重新排期，优先 D4 的 extension 实验。
 
 ---
+
+## 阶段 20 移交接手清单（D4）
+
+- **输入证据**：`logs/s19o-p2e/`（C1 limits）、`logs/s19o-p2e-c2/`（force xpcproxy）、`logs/s19o-p3b-d3/`（CAContext 枚举）、`logs/s19o-p3-fallback3/`（host offscreen）、`logs/s19o-p3-surface-enum/`；runbook §4.23–§4.25、§4.28、§4.30、附录 extension check-in；本文件 D4。
+- **第一个实验（30 分钟限时）**：`ExtensionWatchdog=false`（bool，不是 timeout），看是否能暴露 extension 的真实 exit code / `CheckIn` 失败点；不要先加 timeout、不要先改 job。
+- **需要的权限/工具**：能改/注入 extension 侧或 launchd 侧；当前只有 guest 工具链（`IOSVM_USE_LLD=1`）和 launchd limits plist 路径，**没有直接改 extension 二进制的产物**。
+- **判定点**：launchd 等的是 `CheckIn` 消息；C2 已见 `exec` 后 ~0.5s `EXC_CORPSE_NOTIFY error 5`，不是「动作慢」。
+- **退出标准**：extension 活过 60s 且 `checked in as alive` 出现 → 可回到 P2/P3；暴露明确 exit code/bug → 评估 30 分钟内能否修；两者都没有 → 写「不可行/需更多信息」，不再投入。
+- **不做**：不在 stage 19 内继续加 `ExtensionWatchdogTimeout`、不盲调 `createImageSlot:`、不重复 P2d job 对照。
 
 ## 追溯表
 

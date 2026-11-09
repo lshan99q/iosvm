@@ -2448,7 +2448,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ## 八、P4 四格表与收尾（可直接执行，结果待填）
 
-> **状态：脚本就绪，未跑四格。** `tools/glwire/harness/four-cell.sh` 可执行，四格 pure-local/by-reference/w15/w15-w3；20s 窗口；列 `ui/frames/fps/span/shot B/host 0x502`；`--dry-run` 四行验证、不碰 QEMU；`0x502` 只数 host log，正常为 0；README 已加。**不要预设四格结果。**
+> **状态：脚本就绪、四格未跑。** 四份镜像 **当前都不存在**（需按 §8.1 分别构建，不能用同一镜像冒充四格）；`tools/glwire/harness/four-cell.sh` 可执行，四格 pure-local/by-reference/w15/w15-w3；20s 窗口；列 `ui/frames/fps/span/shot B/host 0x502`；`--dry-run` 四行验证、不碰 QEMU；`0x502` 只数 host log，正常为 0。**dry-run 不算实测，结果待 exp 四发后填。**
 
 ### 8.1 四份构建定义（镜像外部构建）
 
@@ -2461,7 +2461,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 - 所有 guest 构建统一 `PREBUILT=1 IOSVM_USE_LLD=1 RC=rc.vtop`；不要在一个 boot 里换镜像。
 - `GLWIRE_LOCAL=1` 的构建把 `/redwood/etc/glwire_local` 写进镜像（guest 本地绘制）；cell3/4 的 host 需要 `GLWIRE_NO_PANEL=1` 走重放。
-- 镜像尺寸/内容不同，**四格必须各用各的 image**；不能用同一个 root.apfs 冒充四格。
+- 镜像尺寸/内容不同，**四格必须各用各的 image**；当前 `/tmp/root-local.apfs`、`root-byref.apfs`、`root-w15.apfs`、`root-w15w3.apfs` **均不存在**，先按下面命令构建；不能用同一个 root.apfs 冒充四格。
 
 **构建命令（每格一份 root.apfs；system.apfs 不参与四格）**
 
@@ -2505,6 +2505,8 @@ tools/glwire/harness/four-cell.sh
 ```
 
 - 只跑单格时给对应 `CELLn_IMAGE` 即可；缺 image 的格子会写 `SKIP`，不要用旧日志充数。
+- **cell1 无 recorder、host 0 帧**：`four-cell.sh` 默认 `CELL1_REQUIRE_HOST_FRAMES=0`，其余格为 1；可用 `CELLn_REQUIRE_HOST_FRAMES=0/1` 逐格覆盖。
+- `WINDOW_FRAMES=0`（八次滑动，约 20s）是脚本默认；`WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800` 由命令行给出。
 - `--dry-run` 只读已有 `/tmp/<label>-{host.log,log,shot.png,drive.txt}` 重算表，不跑 QEMU；当前已做四行验证；**dry-run 数字不是新实测**。
 - 每格产物写到 `OUT`（默认 `/tmp/four-cell`）：`four-cell.md`、`four-cell.csv`、每格日志/截图/drive。
 
@@ -2525,6 +2527,7 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - `make test` 不跑 QEMU、不覆盖四格表；它只证明仓库的 open 检查与 host Vulkan probe 通过。
 - 若 `host/vkbridge` 未取，先 `make submodule`；若只想跑不依赖 GPU 的门，用 `make test-open` 并记录原因。
 - 记录完整命令、退出码与关键输出；失败不要用「应该没问题」代替。
+- `make test` 通过前不要写「收尾完成」；`make test-open` 通过可先记，但 test-gpu 的 lavapipe 缺失要单列。
 - 2026-11-09 当前环境：`make test-open` **PASS**；`make test` 在 `test-gpu` 失败，
   `VK_ICD_FILENAMES` 指向的 `/usr/share/vulkan/icd.d/lvp_icd.json` 不存在（lavapipe 未配置），
   不是代码失败；需要补 ICD 后再重跑 `make test`，不要把 `test-open` 当完整 `make test`。

@@ -42,7 +42,7 @@
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
 | P2 | 壁纸（**关闭/未达成**：P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in；不再投入（D3）） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
 | P3 | widget（**真路径不可行（D1，提前收口）+ fallback 交付（D2，待 fallback4 截图）**：surface 枚举 30 面无候选、allContexts 按进程隔离、无零参 snapshot、extension CheckIn 未发出；host fallback2/3 截图不可见，转 guest-side `widget_placeholder=1`；不写「可行」） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
-| P4 | 收尾（**D5：剩余时间全部转四格实跑**；脚本就绪、未跑四格；执行配方见 runbook §八） | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
+| P4 | 收尾（**D5：剩余时间全部转四格实跑**；四份镜像当前不存在、需先构建；脚本就绪、未跑四格；`make test-open` PASS，`test-gpu` 缺 lavapipe ICD；执行配方见 runbook §八） | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
 
 ---
 
