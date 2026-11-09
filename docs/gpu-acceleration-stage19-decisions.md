@@ -1,4 +1,4 @@
-# Stage 19 收口决定（D1–D6）
+# Stage 19 收口决定（D1–D7）
 
 - **Status:** Accepted
 - **Date:** 2026-11-09
@@ -158,6 +158,30 @@
 1. 120 帧窗口仍无法在合理时长内完成（guest 送帧太慢）→ 改帧计数/更长时间窗口并记录原因；
 2. 有证据表明 20s 窗口已处于稳定态（需连续帧间隔/UI marker 证明）。
 
+## D7. P4 收口口径固定：纯本地可用，by-reference / w15 不具可用性
+
+**决定**：P4 最终结论固定为 **「纯本地可用；by-reference / w15 在 TCG 单核 + softpipe 下不具可用性（guest 送帧停摆，不是没测）」**；不写「性能达标」。
+
+**依据**（最终数字）：
+
+- **cell1-pure**：**120 帧 / 11.00s = 10.91 fps（guest 时钟）**，是四格中**唯一可用数字**。
+- **cell2-by-reference**：跑到 1800s 只到 **183/343** 帧（≈**0.04 fps**）。
+- **cell3-w15**：guest 驱动行 **2 帧 / 772,366 ms（≈0.003 fps）**；host 只到 **frame 250**。
+- **cell4-w15w3**：**未跑是判决，不是漏跑**——远端路径（by-reference/w15）已证不可用，再跑 cell4 只会重复同一送帧停摆，省约 50 分钟 GPU。
+- **`0x502` 四格全 0**（cell4 为早前 20s 跑，0；attempt3 未补跑）（判据通过）；这是唯一通过的 P4 判据。
+- 见 runbook §8.0/§8.7、`logs/s19o-p4-cells/attempt3-framewindow/`；代码 `93f5d2a`。
+
+**影响**：
+
+- P4 收口：纯本地画是可用路径；by-reference/w15 在 TCG 单核 + softpipe 下不具可用性。
+- **本阶段不再为 by-reference / w15 追加性能实验**，除非换配置（多核/真 GPU 直通）另立项。
+- 不写「性能达标」；cell4 不补跑，除非配置变化或 owner 重新立项。
+
+**何时可推翻**：
+
+1. 换成多核/真 GPU 直通配置，重跑 by-reference/w15 得到不同的送帧/可用性结果；
+2. cell1 的 10.91 fps 在复跑中不成立，或 guest 时钟口径被证明有误。
+
 ## 阶段 20 移交接手清单（D4）
 
 - **最终证据编号**：**E5**（fallback5 PASS，P3 fallback 已交付）；E1–E4 见 D1（真路径不可行）。
@@ -178,3 +202,4 @@
 | D4 | 18 extension 被 5–13s 杀；timeout/xpcproxy/job 负结果 | §4.24、§4.25、附录 extension check-in | `9ce6e5b`、`f1261b4`、`eac8128` |
 | D5 | 四格口径/脚本/dry-run | §八 | `e8a8ee7`、`9ce6e5b`、`b07d2da` |
 | D6 | 20s fps 不可比；改 120 帧窗口、cell1 guest 时钟 | §8.0 | `ea835b7` |
+| D7 | P4 终局：纯本地可用；byref/w15 不具可用性；cell4 未跑是判决 | §8.0、§8.7 | `93f5d2a`、`logs/s19o-p4-cells/attempt3-framewindow` |
