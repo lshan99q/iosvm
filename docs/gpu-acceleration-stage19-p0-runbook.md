@@ -2503,7 +2503,7 @@ CELL1_IMAGE=/tmp/root-local.apfs  CELL1_LABEL=cell1-pure \
 CELL2_IMAGE=/tmp/root-byref.apfs  CELL2_LABEL=cell2-byref \
 CELL3_IMAGE=/tmp/root-w15.apfs    CELL3_LABEL=cell3-w15 \
 CELL4_IMAGE=/tmp/root-w15.apfs    CELL4_LABEL=cell4-w15w3 \
-CELL3_HOST_ENV="GLWIRE_NO_PANEL=1" \
+CELL3_HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1" \
 CELL4_HOST_ENV="GLWIRE_NO_PANEL=1" \
 WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800 \
 tools/glwire/harness/four-cell.sh
