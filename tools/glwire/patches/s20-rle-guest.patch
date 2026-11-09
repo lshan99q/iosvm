@@ -1,6 +1,6 @@
 --- a/userland/src/eagl_remote.c
 +++ b/userland/src/eagl_remote.c
-@@ -633,6 +633,28 @@
+@@ -741,6 +741,28 @@
  	return on;
  }
  
@@ -29,7 +29,7 @@
  static void
  expand_565_row(unsigned char *dst, const uint16_t *src, int width)
  {
-@@ -856,10 +878,11 @@
+@@ -964,10 +986,11 @@
  		remote_surface2_segments_count = 0;
  		remote_surface2_row = 0;
  	}
@@ -43,7 +43,7 @@
  	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
  	    (remote_picture_segments_count > 0 &&
  	     send(remote_fd, remote_picture_segments,
-@@ -960,6 +983,107 @@
+@@ -1068,6 +1091,126 @@
  		close(remote_fd);
  		remote_fd = -1;
  		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
@@ -84,15 +84,34 @@
 +
 +			if ((code & 0x80) != 0) {
 +				size_t run = (code & 0x7f) + 3;
++				uint32_t value = 0;
 +
 +				if (in + pixel_bytes > packed_size) {
 +					break;
 +				}
-+				while (run-- > 0 && out + pixel_bytes <= raw) {
-+					memcpy(pixels + out, packed_bytes + in, (size_t)pixel_bytes);
-+					out += (size_t)pixel_bytes;
++				if (out + run * (size_t)pixel_bytes > raw) {
++					run = (raw - out) / (size_t)pixel_bytes;
 +				}
++				memcpy(&value, packed_bytes + in, (size_t)pixel_bytes);
 +				in += (size_t)pixel_bytes;
++				if (pixel_bytes == 4) {
++					if (value == 0 || value == 0xffffffffu) {
++						memset(pixels + out, (int)(value & 0xff), run * 4);
++					} else {
++						uint32_t *dst = (uint32_t *)(void *)(pixels + out);
++
++						for (size_t i = 0; i < run; i++) {
++							dst[i] = value;
++						}
++					}
++				} else {
++					uint16_t *dst = (uint16_t *)(void *)(pixels + out);
++
++					for (size_t i = 0; i < run; i++) {
++						dst[i] = (uint16_t)value;
++					}
++				}
++				out += run * (size_t)pixel_bytes;
 +			} else {
 +				size_t literal = code + 1;
 +

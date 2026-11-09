@@ -28,10 +28,15 @@ byte-run loop, no per-pixel channel work.
 - guest `upload-rle bgra raw 4872000 -> packed N B (Z%), unpack X ms`
 - target packed **≤800 KB**, host pack **<50 ms**, guest back to 10–14 fps, host frames grow,
   screenshot colors exact for BGRA (no 565 quantization; 565 optional).
-- If guest still starves after packed is small, the guest unpack loop is the next worker candidate;
-  log `unpack ms` decides.
+- RLE3: unpack 84–105 ms (target met).  The host actually logged **106 frames** (the "3 frames"
+  report counted only the sparse frame lines); guest `upload-rle` also 106.  The guest display
+  showed only 3 because the fast/RLE path wrote the first panel surface and the display alternates
+  with the second panel surface; `eagl.c` now copies the fast frame to the second surface before
+  the swap.  If display still stalls, the next issue is present/second-surface, not unpack.
+- If guest still starves after packed is small and the second surface is filled, the guest unpack
+  loop is the next worker candidate; log `unpack ms` decides.
 
-Lib **419,072 B / md5 86468b1107404959482f39c1e5e44cd8**; host **124,000 B / md5
+Lib **419,072 B / md5 2daf37f0e72e528c0b7066e58e417de0**; host **124,000 B / md5
 d80f7ca34e49216c2d31fce7b7e8d169**.  RLE2: packed **51,202 B (1% of 4.87 MB, ~95x)**, host pack 1 ms, but guest unpack was **396–451 ms** because the repeat path did a 4-byte `memcpy` per pixel.  The repeat path now uses `memset` for 0/0xffffffff and a 32-bit fill otherwise; literals stay one `memcpy`.  If unpack is still >150 ms, the next step is a worker, not another RLE tweak.
 
 Options observability: init now logs
