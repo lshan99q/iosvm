@@ -2101,9 +2101,9 @@ UIWindowLayer "colour ( 0 1 )"
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
 - **P3 未完成；P2 仍未达成。**
 
-> **状态：正式决定 D1–D5 已下（见 `docs/gpu-acceleration-stage19-decisions.md`）。真路径判定为「不可行」并提前收口；fallback 转 guest-side placeholder，fallback5 截图待回填。**
+> **状态：正式决定 D1–D6 已下（见 `docs/gpu-acceleration-stage19-decisions.md`）。真路径判定为「不可行」并提前收口；fallback 转 guest-side placeholder，fallback5 截图待回填。**
 
-> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D5**。P3 最终结论写「不可行（真路径）+ fallback 交付（待 fallback5 截图）」，不要写「可行」。 P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
+> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D6**。P3 最终结论写「不可行（真路径）+ fallback 交付（待 fallback5 截图）」，不要写「可行」。 P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2247,6 +2247,19 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - 找不到才退 wallpaper / Home / keyWindow root（`bounds≥300x500`、root subviews>1）。
 - 每 5s `bringToFront`，最多 **240 次**；日志带 parent/window class + level。
 - 结果待填；fallback5 未跑，不能写「占位已通过」。
+
+#### fallback5 回填槽位（待 exp 出图）
+
+| 项 | 待填 |
+|---|---|
+| root.apfs / sb 库 md5 | |
+| boot / end=ui / shot B | |
+| placeholder 日志时间 vs UI marker | |
+| 截图 widget 区 mean / top color / yellow / 棋盘 | |
+| 判定 | 可见 = fallback 已交付（占位，不是真 widget）；不可见 = 未交付 |
+| §4.29 第 7 条 / D2 | 回填为 ✅/❌ |
+
+> fallback5 未跑前，`§4.29` 第 7 条保持「待 fallback5」，不要写「fallback 已通过」。
 
 ## 五、铁律与提交
 
@@ -2490,7 +2503,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 - 20s 窗口内 host 只收到 cell2 2 帧、cell3 9 帧、cell4 4 帧；但 host 单帧回放耗时 **29.6–59.0 ms**（16–33 fps 能力）。
 - 瓶颈在 **guest 送帧**：cell3 窗口内帧间隔 0.77–25.87s，cell4 0.38–17.99s；TCG 单核 + softpipe/UI 重建导致 20s 窗口只抓到 2–9 帧。
-- `WINDOW_AFTER=60` 仍落在 UI 重建期；要“稳定态”对比需另起一发 `WINDOW_AFTER=300`（或帧计数窗口），本次不改口径。**本次数字只用于 0x502 判据，不用于性能结论。**
+- `WINDOW_AFTER=60` 仍落在 UI 重建期；**60s/20s 窗口的 fps 不可比**。按 D6，P4 的 fps 判据改用 **`WINDOW_FRAMES=120` 帧计数窗口**，cell1 用 **`WINDOW_CLOCK=guest`**；当前 20s 表只用于 `0x502`，不写性能达标。
 
 ### 8.1 三份构建 / 四格定义（镜像外部构建）
 
@@ -2711,7 +2724,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 `host 0x502` 只数宿主日志 `glerror 0x502` 行；`ui/frames/fps/span/shot B` 与 CSV 同表。正式四格仍等 P4 镜像。
 
 
-## 附录 D：阶段 19 收口决定 D1–D5（摘要）
+## 附录 D：阶段 19 收口决定 D1–D6（摘要）
 
 完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**。
 
@@ -2722,5 +2735,6 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | D3 | **P2 = 关闭，记未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in |
 | D4 | **extension check-in 移交阶段 20 候选** | 18 个 extension 5–13s 被杀；timeout 120 无效、force xpcproxy 仍死、job 无关；唯一值得试 `ExtensionWatchdog=false` 暴露真实 exit code |
 | D5 | **剩余时间全部转 P4 四格表实跑** | 三份镜像/四格 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
+| D6 | **P4 fps 判据改 120 帧计数窗口** | 20s 窗口只有 2–9 帧、仍在 UI 重建期，fps 不可比；改用 `WINDOW_FRAMES=120`，cell1 `WINDOW_CLOCK=guest`；当前只写 0x502 通过，不写性能达标 |
 
 > 追溯：D1 见 §4.28/§4.30/附录 extension check-in；D2 见 §4.29/§4.31；D3 见 §4.22–§4.25；D4 见 §4.24/§4.25/附录 extension check-in；D5 见 §八。提交列表见 decisions.md 的追溯表。

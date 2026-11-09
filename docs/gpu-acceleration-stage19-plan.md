@@ -265,7 +265,9 @@ glwire: label draw #74 ...  866 nonzero pixels
 
 ### P4：四格表与收尾（1 天）
 
-三份镜像/四格各一次 20 s 滚动窗口（cell3=cell4 同镜像，仅 host env 不同；同 `QEMU_SMP=1`、同触摸脚本）；`0x502` 按「宿主侧 0」记账；`make test`；文档；推送。
+三份镜像/四格（cell3=cell4 同镜像，仅 host env 不同；同 `QEMU_SMP=1`、同触摸脚本）；**`0x502` 按「宿主侧 0」记账**（第二次实跑已全 0）。
+
+**fps 判据（D6）**：60s/20s 滚动窗口的 fps **不可比**（窗口内 2–9 帧，仍在 UI 重建期）；fps 改用 **`WINDOW_FRAMES=120` 帧计数窗口**，cell1 用 **`WINDOW_CLOCK=guest`**。当前 20s 表只用于 `0x502`，不写性能达标。`make test`；文档；推送。
 
 ---
 
@@ -301,7 +303,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 | D3 | 三发验证 | ≥2/3 发标签为文字、截图 ≥300 KB、diff ≥95%；**实际 v7 99.85%、v9 99.98%（2/3）；v8 89.53% 因 dump 落在 UI 加载动画，不计入** |
 | D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；P2c-timer 层树通但 contents=0；P2d 依赖对照失败；P2e C1 limits 未生效；C2 `launchd_proxyless_spawn=0` 生效但 extension 仍 7–11s 被杀（16 CHECK_IN_TIMEOUT、0 alive）；5,249 张 750x1624 全 panel；991,040 B 截图右下 1/4 纯绿伪影（683,954 px），不是壁纸；不是 elision；P2 未达成/性价比低** |
 | D5–D6 | P3 widget（时间盒） | 可行/不可行结论；**实际 P3a：链路通、surface 3 空白白块；D1 未成功（9 行探针全在 init；`allContexts` 被精确编码挡住、`contextWithId:` 大小写不匹配、widget context UI 后才出现；无对象/快照/nonzero）；D2 失败（`allContexts` 在 backboardd 只看到自己的 0xc0cfe455，非 950s 层树 155x155 host 0xbf11dcae/0x7702cd25）；D3 探针移到 SpringBoard（第三次尝试），结果待填** |
-| D7 | P4 四格表 + 收尾 | 四个数字 + `make test` + 推送；**实际：四格已跑，0x502 全 0；低 fps 为 guest 送帧限制；test-open PASS，test-gpu 缺 lavapipe ICD** |
+| D7 | P4 四格表 + 收尾 | 四个数字 + `make test` + 推送；**实际：四格已跑，0x502 全 0；20s fps 不可比，按 D6 改 120 帧窗口重跑；test-open PASS，test-gpu 缺 lavapipe ICD** |
 
 ### 6.1 下一阶段入口（P0 之后）
 
