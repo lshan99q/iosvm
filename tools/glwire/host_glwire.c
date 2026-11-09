@@ -3631,6 +3631,7 @@ serve_frame(struct client *client)
 	int width = 0, height = 0, segment_count = 0, row_bytes = 0;
 	int version = 0;                /* the record layout the guest speaks (stage fifteen: 2 = with context) */
 	int dirty_wanted = 0;           /* the guest asks for D <tiles> instead of the full picture */
+	int rgb565_wanted = 0;          /* the guest asks for 16-bit RGB565 instead of 32-bit BGRA */
 	/* P1'''': a frame may name a second panel-sized surface (the display presents two in turn). */
 	int segment_count2 = 0, row_bytes2 = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
@@ -3662,8 +3663,9 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
-	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version, &dirty_wanted) < 4) {
+	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
+	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version, &dirty_wanted,
+	    &rgb565_wanted) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
@@ -4194,7 +4196,40 @@ serve_frame(struct client *client)
 		unsigned char *packed = NULL;
 		int length;
 
-		if (dirty_wanted && !in_place) {
+		if (rgb565_wanted && !in_place) {
+			size_t bytes565 = (size_t)width * (size_t)height * 2;
+			uint16_t *pixels565 = malloc(bytes565);
+			size_t at = 0;
+
+			if (pixels565 == NULL) {
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+			for (int y = 0; y < height; y++) {
+				for (int x = 0; x < width; x++) {
+					const unsigned char *p = picture + ((size_t)y * width + x) * 4;
+					unsigned r = p[2], g = p[1], b = p[0];
+
+					pixels565[at++] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+				}
+			}
+			snprintf(done, sizeof(done), "R %zu\n", bytes565);
+			if (!send_all(client->fd, done, strlen(done)) ||
+			    !send_all(client->fd, pixels565, bytes565)) {
+				free(pixels565);
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+			free(pixels565);
+			printf("host_glwire: rgb565 sends %zu of %zu picture B\n", bytes565, frame_bytes);
+			fflush(stdout);
+		} else if (dirty_wanted && !in_place) {
 			if (host_send_dirty(client, picture, width, height, frame_bytes) != 0) {
 				free(records);
 				free(picture);
