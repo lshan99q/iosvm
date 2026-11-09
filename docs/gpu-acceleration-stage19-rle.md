@@ -31,8 +31,13 @@ byte-run loop, no per-pixel channel work.
 - If guest still starves after packed is small, the guest unpack loop is the next worker candidate;
   log `unpack ms` decides.
 
-Lib **418,872 B / md5 673a2560185c1225ced47b381f48b36d**; host **124,000 B / md5
-d80f7ca34e49216c2d31fce7b7e8d169**; patch `logs/s19o-p1-rle.patch` (153 lines).
+Lib **419,072 B / md5 86468b1107404959482f39c1e5e44cd8**; host **124,000 B / md5
+d80f7ca34e49216c2d31fce7b7e8d169**.  RLE2: packed **51,202 B (1% of 4.87 MB, ~95x)**, host pack 1 ms, but guest unpack was **396–451 ms** because the repeat path did a 4-byte `memcpy` per pixel.  The repeat path now uses `memset` for 0/0xffffffff and a 32-bit fill otherwise; literals stay one `memcpy`.  If unpack is still >150 ms, the next step is a worker, not another RLE tweak.
+
+Options observability: init now logs
+`options raw="<kern.bootargs>" parsed local=... fast=... 565=... rle=... dirty=... ack=... scale=...`;
+`/tmp/glwire_opts` (or `/redwood/etc/glwire_opts`) is read at init as `key=value` lines and overrides
+the environment.  `strings libhakios.gl.dylib | grep upload-rle` is part of the build check.
 
 First RLE run (565+rle) exposed a **request format-string bug**: the format had 10 specifiers while
 the argument list had 12, so `remote_upload_565()`/`remote_upload_rle()` were dropped and host saw
