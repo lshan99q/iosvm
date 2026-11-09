@@ -2751,7 +2751,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 
 ## 附录 D：阶段 19 收口决定 D1–D7（摘要）
 
-完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**。
+完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**；一页状态/未达成/移交/复现见 **`docs/gpu-acceleration-stage19-closure.md`**。
 
 | ID | 决定 | 一句话依据 |
 |---|---|---|
