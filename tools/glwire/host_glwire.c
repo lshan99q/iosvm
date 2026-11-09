@@ -2131,6 +2131,9 @@ static int frame_delay_ms;          /* (stage 15: a deliberate per-frame delay, 
 /* GLWIRE_POLL_MS: bound the main loop's otherwise infinite poll.  It is a measurement knob, not a
  * frame source: the host can only replay a frame after the guest sends it.  -1 keeps the old poll. */
 static int poll_timeout_ms = -1;
+/* GLWIRE_UPLOAD_SCALE=2 sends the top-left quarter of the picture (1/4 bytes), for the payload
+ * experiment.  1, the default, sends the whole frame exactly as before. */
+static int upload_scale = 1;
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
 static unsigned fbo_note_count;
@@ -4094,17 +4097,43 @@ serve_frame(struct client *client)
 	}
 	{
 		char done[64];
-		int length = in_place ? snprintf(done, sizeof(done), "R 0\n")
-		    : snprintf(done, sizeof(done), "R %zu\n", frame_bytes);
+		size_t sent_bytes = frame_bytes;
+		unsigned char *upload = picture;
+		unsigned char *packed = NULL;
+		int length;
+
+		if (upload_scale > 1) {
+			size_t w = (size_t)width / (size_t)upload_scale;
+			size_t h = (size_t)height / (size_t)upload_scale;
+
+			if (w != 0 && h != 0) {
+				sent_bytes = w * h * 4;
+				packed = malloc(sent_bytes);
+				if (packed != NULL) {
+					for (size_t y = 0; y < h; y++) {
+						memcpy(packed + y * w * 4,
+						    picture + y * (size_t)width * 4, w * 4);
+					}
+					upload = packed;
+				}
+				printf("host_glwire: upload scale %d sends %zu of %zu picture B\n",
+				    upload_scale, sent_bytes, frame_bytes);
+				fflush(stdout);
+			}
+		}
+		length = in_place ? snprintf(done, sizeof(done), "R 0\n")
+		    : snprintf(done, sizeof(done), "R %zu\n", sent_bytes);
 
 		if (!send_all(client->fd, done, (size_t)length) ||
-		    (!in_place && !send_all(client->fd, picture, frame_bytes))) {
+		    (!in_place && !send_all(client->fd, upload, sent_bytes))) {
+			free(packed);
 			free(records);
 			free(picture);
 			free(segments);
 		free(segments2);
 			return -1;
 		}
+		free(packed);
 	}
 	{
 		static double last_frame;
@@ -4270,6 +4299,17 @@ main(int argc, char **argv)
 	}
 	frame_delay_ms = getenv("GLWIRE_FRAME_DELAY_MS") != NULL ? atoi(getenv("GLWIRE_FRAME_DELAY_MS")) : 0;
 	{
+		const char *value = getenv("GLWIRE_UPLOAD_SCALE");
+
+		if (value != NULL) {
+			int parsed = atoi(value);
+
+			if (parsed == 2 || parsed == 4) {
+				upload_scale = parsed;
+			}
+		}
+	}
+	{
 		const char *value = getenv("GLWIRE_POLL_MS");
 
 		if (value != NULL && value[0] != '\0') {
@@ -4350,8 +4390,9 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
-	printf("host_glwire: build marker uniform-ring-v2 (poll %d ms%s, frame delay %d ms)\n",
-	    poll_timeout_ms, poll_timeout_ms < 0 ? ", infinite = wait for guest" : "", frame_delay_ms);
+	printf("host_glwire: build marker uniform-ring-v2 (poll %d ms%s, frame delay %d ms, "
+	    "upload scale %d)\n", poll_timeout_ms,
+	    poll_timeout_ms < 0 ? ", infinite = wait for guest" : "", frame_delay_ms, upload_scale);
 	fflush(stdout);
 	printf("host_glwire: listening on %d%s%s\n", port,
 	    no_in_place ? " (GLWIRE_NO_INPLACE: the picture travels back instead)" : "",
