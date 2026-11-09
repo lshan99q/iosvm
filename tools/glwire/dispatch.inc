@@ -697,9 +697,33 @@ switch (opcode) {
 		printf("glwire: upload texture %u target %#x internal %#x %dx%d format %#x type %#x row %d pixel %d bytes %d\n",
 		    texture, target, internal, width, height, format, type, row_bytes, pixel_bytes, bytes);
 		fflush(stdout);
-		if (width == trace_width && height == trace_height && target == GL_TEXTURE_2D) {
-			panel_upload_texture = texture;
-			panel_upload_frame = (int)frames_replayed + 1;
+		if (width == trace_width && height == trace_height && target == GL_TEXTURE_2D &&
+		    data != NULL && bytes >= (height - 1) * row_bytes + width * 4) {
+			int nonblack = 0;
+
+			for (int i = 0; i < bytes; i += 4096) {
+				if (((const unsigned char *)data)[i] != 0) {
+					nonblack = 1;
+					break;
+				}
+			}
+			if (nonblack) {
+				free(panel_upload_copy);
+				panel_upload_copy = malloc((size_t)width * (size_t)height * 4);
+				panel_upload_copy_bytes = panel_upload_copy != NULL ?
+				    (size_t)width * (size_t)height * 4 : 0;
+				if (panel_upload_copy != NULL) {
+					for (int y = 0; y < height; y++) {
+						memcpy(panel_upload_copy + (size_t)y * width * 4,
+						    (const unsigned char *)data + (size_t)y * row_bytes,
+						    (size_t)width * 4);
+					}
+					panel_upload_texture = texture;
+					panel_upload_frame = (int)frames_replayed + 1;
+					printf("host_glwire: stored nonblack panel upload texture %u\n", texture);
+					fflush(stdout);
+				}
+			}
 		}
 		names_texture_upload(g, texture, target, internal, width, height, format, type,
 		    row_bytes, pixel_bytes, data);

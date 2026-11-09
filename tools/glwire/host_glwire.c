@@ -2132,6 +2132,8 @@ static int frame_readback_ok = 1;   /* viewport nonzero: a frame with no panel d
 static GLuint panel_drawn_fbo;      /* the panel-sized target this frame last had a draw */
 static GLuint panel_upload_texture; /* a full-panel opcode-201 upload this frame: the fallback picture */
 static int panel_upload_frame;
+static unsigned char *panel_upload_copy;
+static size_t panel_upload_copy_bytes;
 static int panel_drawn_frame = -1;
 static int frame_delay_ms;          /* (stage 15: a deliberate per-frame delay, for the timing question) */
 /* GLWIRE_POLL_MS: bound the main loop's otherwise infinite poll.  It is a measurement knob, not a
@@ -3788,6 +3790,9 @@ serve_frame(struct client *client)
 	trace_height = height;
 	panel_upload_texture = 0;
 	panel_upload_frame = 0;
+	free(panel_upload_copy);
+	panel_upload_copy = NULL;
+	panel_upload_copy_bytes = 0;
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	{
 		wire_buffer upload;
@@ -4032,6 +4037,20 @@ serve_frame(struct client *client)
 			 * before the read-back, so the picture includes the widgets) */
 			glBindFramebuffer(GL_FRAMEBUFFER, target);
 		}
+	}
+	if (!frame_readback_ok && panel_upload_copy != NULL &&
+	    panel_upload_copy_bytes == (size_t)width * (size_t)height * 4) {
+		memcpy(picture, panel_upload_copy, panel_upload_copy_bytes);
+		frame_readback_ok = 1;
+		printf("host_glwire: read-back fallback nonblack panel upload\n");
+		fflush(stdout);
+	}
+	if (!frame_readback_ok && client->names.panel != NULL &&
+	    client->names.panel_width == width && client->names.panel_height == height) {
+		memcpy(picture, client->names.panel, (size_t)width * (size_t)height * 4);
+		frame_readback_ok = 1;
+		printf("host_glwire: read-back fallback panel (uploaded panel surface)\n");
+		fflush(stdout);
 	}
 	if (!frame_readback_ok && panel_upload_texture != 0 &&
 	    panel_upload_frame == (int)frames_replayed + 1) {
