@@ -31,5 +31,9 @@ byte-run loop, no per-pixel channel work.
 - If guest still starves after packed is small, the guest unpack loop is the next worker candidate;
   log `unpack ms` decides.
 
-Lib **418,872 B / md5 974a0e52c05e33aee1b19edfab531775**; host **124,000 B / md5
-d80f7ca34e49216c2d31fce7b7e8d169**; patch `logs/s19o-p1-rle.patch` (149 lines).
+Lib **418,872 B / md5 673a2560185c1225ced47b381f48b36d**; host **124,000 B / md5
+d80f7ca34e49216c2d31fce7b7e8d169**; patch `logs/s19o-p1-rle.patch` (153 lines).
+
+First RLE run (565+rle) exposed a **request format-string bug**: the format had 10 specifiers while
+the argument list had 12, so `remote_upload_565()`/`remote_upload_rle()` were dropped and host saw
+rgb565=0/rle=0.  The format now has 12 `%d` fields; guest logs `upload565=1` and `upload-rle=1`.
