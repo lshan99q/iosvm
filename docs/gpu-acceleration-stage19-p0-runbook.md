@@ -2465,9 +2465,34 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ## 八、P4 四格表与收尾（可直接执行，结果待填）
 
-> **状态：四格跑中，结果待填。** 四份镜像：cell1 `408dd87e…`、cell2 `cd86a2b4…`、cell3=cell4 `911c2e3a…`；当前 cell1 host 0 帧、`REQUIRE_HOST_FRAMES=0`；`make test-open` PASS、`test-gpu` 缺 lavapipe ICD（环境问题）。`tools/glwire/harness/four-cell.sh` 可执行，四格 pure-local/by-reference/w15/w15-w3；20s 窗口；列 `ui/frames/fps/span/shot B/host 0x502`；`0x502` 只数 host log，正常为 0。**dry-run 不算实测，四发真 QEMU 后填表。**
+> **状态：第二次实跑已完成（2026-11-09 13:25–14:27Z）。** `host 0x502` **四格全 0，P4 判据通过**；但 20s 窗口 fps 很低（0.00/0.10/0.46/0.20），**只是 0x502 判据通过，不写性能达标**。稳定态窗口未做，见 §8.0 说明。
 
-### 8.1 四份构建定义（镜像外部构建）
+### 8.0 实测结果（第二次实跑）
+
+三份镜像、四个 cell（cell3=cell4 同镜像，仅 host env 不同）：
+
+| cell | ui | frames | fps | span | shot B | host 0x502 |
+|---|---|---|---|---|---|---|
+| cell1-pure | 980s | 0 | 0.00 | 19.77s | 439,849 | **0** |
+| cell2-byref | 700s | 2 | 0.10 | 19.74s | 439,712 | **0** |
+| cell3-w15 | 700s | 9 | 0.46 | 19.76s | 319,093 | **0** |
+| cell4-w15w3 | 640s | 4 | 0.20 | 19.76s | 311,354 | **0** |
+
+- `frames/fps` 是 **host_glwire 帧**（`drive:` 行）；cell1 无 recorder，host 0 帧是设计，不是漏计。
+- **`0x502` 判据通过**：四格 host log 的 `glerror 0x502` 都为 0。
+- 镜像（三份，大小都是 5,918,720 B）：cell1 `/tmp/root-local.apfs` **`f39b910543189be4934a48c4d495e928`**；cell2 `root-byref.apfs` **`3207a35ec42ac1d17c1b398de73d9a67`**（`glwire_local=1`）；cell3=cell4 `root-w15.apfs` **`785bcbac82c9a117684b2d40b7375d48`**。
+- guest 库：libhakios **92,872** / gl **400,720** / sb **110,656**（`abc8f4f1…`，A1）；system.apfs 未动 `8bf5f838…`。
+- cell3/4：cell4 host log 有 **192 行 `in-place rows`**，cell3 **0**；两者的 panel/picture 都是 DIFF，差异就在 in-place 行写。
+- harness：repo `fe521de` + `/tmp/p4-harness/run-four-cell.sh`（只补 `QEMU_EFI`/`QEMU_VARS`，无本地语义改动）；副本归档 `logs/s19o-p4-cells/harness/`。
+- 上一轮 cell1 被杀复盘：上一轮 cell4 的 `drive-scroll.sh` 退出时全局 `kill -9` 误杀新一轮 cell1（实际存活 13s）；本轮 launcher 已加残留进程前置检查，未再发生（见 `attempt1-1256/postmortem-cell1-kill.md`）。
+
+**低 fps 的解释（不掩盖）**
+
+- 20s 窗口内 host 只收到 cell2 2 帧、cell3 9 帧、cell4 4 帧；但 host 单帧回放耗时 **29.6–59.0 ms**（16–33 fps 能力）。
+- 瓶颈在 **guest 送帧**：cell3 窗口内帧间隔 0.77–25.87s，cell4 0.38–17.99s；TCG 单核 + softpipe/UI 重建导致 20s 窗口只抓到 2–9 帧。
+- `WINDOW_AFTER=60` 仍落在 UI 重建期；要“稳定态”对比需另起一发 `WINDOW_AFTER=300`（或帧计数窗口），本次不改口径。**本次数字只用于 0x502 判据，不用于性能结论。**
+
+### 8.1 三份构建 / 四格定义（镜像外部构建）
 
 | cell | 定义 | 关键构建 env | 建议镜像 |
 |---|---|---|---|
@@ -2479,7 +2504,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 - 所有 guest 构建统一 `PREBUILT=1 IOSVM_USE_LLD=1 RC=rc.vtop`；不要在一个 boot 里换镜像。
 - **`GLWIRE_NO_INPLACE` 是 host 运行 env，不是 build env**：cell3/cell4 用**同一份镜像**是预期；cell3 的 `HOST_ENV` 带 `GLWIRE_NO_INPLACE=1`，cell4 不带。four-cell 不要求两份不同镜像。
 - `GLWIRE_LOCAL=1` 的构建把 `/redwood/etc/glwire_local` 写进镜像（guest 本地绘制）；cell3/4 的 host 需要 `GLWIRE_NO_PANEL=1` 走重放。
-- 当前镜像：cell1 `/tmp/root-local.apfs` **408dd87e…**、cell2 `/tmp/root-byref.apfs` **cd86a2b4…**、cell3=cell4 `/tmp/root-w15.apfs` **911c2e3a…**；若不存在先按下面命令构建。**cell3/cell4 同镜像是预期**，不要为了凑四份复制成假镜像；cell1/2/3 三份不同镜像即可。
+- 本次实测镜像：cell1 `f39b9105…`、cell2 `3207a35e…`、cell3=cell4 `785bcbac…`；若本地不存在先按下面命令构建。**cell3/cell4 同镜像是预期**，不要为了凑四份复制成假镜像；cell1/2/3 三份不同镜像即可。
 
 **构建命令（每格一份 root.apfs；system.apfs 不参与四格）**
 
@@ -2546,17 +2571,15 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - 若 `host/vkbridge` 未取，先 `make submodule`；若只想跑不依赖 GPU 的门，用 `make test-open` 并记录原因。
 - 记录完整命令、退出码与关键输出；失败不要用「应该没问题」代替。
 - `make test` 通过前不要写「收尾完成」；`make test-open` 通过可先记，但 test-gpu 的 lavapipe 缺失要单列。
-- 2026-11-09 当前环境：`make test-open` **PASS**；`make test` 在 `test-gpu` 失败，
-  `VK_ICD_FILENAMES` 指向的 `/usr/share/vulkan/icd.d/lvp_icd.json` 不存在（lavapipe 未配置），
-  不是代码失败；需要补 ICD 后再重跑 `make test`，不要把 `test-open` 当完整 `make test`。
+- 2026-11-09 实测：`make test-open` **PASS**（rc=0，provenance clean + proto pass）；`make test` **rc=2**，在 `test-gpu` 失败，`VK_ICD_FILENAMES` 指向的 `/usr/share/vulkan/icd.d/lvp_icd.json` 不存在（lavapipe 未配置），**不是代码失败**；补 ICD 后重跑 `make test`，不要把 `test-open` 当完整 `make test`。
 
 ### 8.5 收尾清单
 
-1. 四格表 `four-cell.md`/`csv`（四份镜像各一行，`0x502` 列）；
+1. 四格表 `four-cell.md`/`csv`（四行、三份镜像；`0x502` 列）；
 2. `make test` 输出与退出码；
 3. 文档更新（runbook 本节 + plan 的 P4/D7）；
 4. 只提交 `.md`/证据图，不提交 `.apfs`/日志/截图；
-5. **P4 未执行前不要写四格数字**；不要用 dry-run 数字当结果。
+5. **P4 已出四格数字，但只证明 `0x502`=0 判据**；低 fps 是已知限制，不写性能达标；稳定态需另起窗口重跑。
 
 
 ## 附录 A：本手册引用的数字出处
@@ -2698,6 +2721,6 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | D2 | **P3 交付 = guest-side placeholder（拉面）** | host fallback2/3 在截图里不可见（guest scanout vs offscreen picture）；唯一可见路径是 `inject_sb.c` 的 `widget_placeholder=1`；结论写「不可行 + fallback 交付（待 fallback5 截图）」，不写可行 |
 | D3 | **P2 = 关闭，记未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in |
 | D4 | **extension check-in 移交阶段 20 候选** | 18 个 extension 5–13s 被杀；timeout 120 无效、force xpcproxy 仍死、job 无关；唯一值得试 `ExtensionWatchdog=false` 暴露真实 exit code |
-| D5 | **剩余时间全部转 P4 四格表实跑** | 四份构建 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
+| D5 | **剩余时间全部转 P4 四格表实跑** | 三份镜像/四格 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
 
 > 追溯：D1 见 §4.28/§4.30/附录 extension check-in；D2 见 §4.29/§4.31；D3 见 §4.22–§4.25；D4 见 §4.24/§4.25/附录 extension check-in；D5 见 §八。提交列表见 decisions.md 的追溯表。

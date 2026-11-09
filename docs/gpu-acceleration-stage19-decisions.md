@@ -113,25 +113,25 @@
 
 ## D5. 剩余时间全部转 P4 四格表实跑
 
-**决定**：stage 19 剩余时间全部转 **P4 四格表实跑**（四份构建 × 20s 滚动窗口、host `0x502` 记账、`make test`、文档/推送）。
+**决定**：stage 19 剩余时间全部转 **P4 四格表实跑**（三份镜像/四格 × 20s 滚动窗口、host `0x502` 记账、`make test`、文档/推送）。
 
 **依据/口径**：
 
-- 四份构建定义与命令见 runbook §八：cell1 纯本地（`GL=1 CONFIGD=1`）、cell2 按引用（`GLWIRE_LOCAL=1`）、cell3 W1.5（`GLWIRE_NO_INPLACE=1`）、cell4 W1.5+W3（in-place 开）。
+- 三份镜像、四格定义与命令见 runbook §八：cell1 纯本地（`GL=1 CONFIGD=1`）、cell2 按引用（`GLWIRE_LOCAL=1`）、cell3 W1.5（host `GLWIRE_NO_INPLACE=1`）、cell4 W1.5+W3（同 cell3 镜像，host 不带 NO_INPLACE）。
 - 每格同 `QEMU_SMP=1`、同触摸脚本、`WINDOW_AFTER=60`、`WINDOW_FRAMES=0`（约 20s）；`host 0x502` 只数宿主日志，判据 0；`make test` = `test-open` + `test-gpu`。
 - `four-cell.sh` 的 `--dry-run` 只验证调度/记账，**不是实测**；四发真 QEMU 后才填四格表。驱动 `e8a8ee7`；dry-run 自检见 `9ce6e5b`。
-- 镜像：cell1 `/tmp/root-local.apfs` 408dd87e…、cell2 `root-byref.apfs` cd86a2b4…、cell3=cell4 `root-w15.apfs` 911c2e3a…；`GLWIRE_NO_INPLACE` 是 **host 运行 env**，cell3/cell4 同镜像是预期。
+- 实测镜像：cell1 `/tmp/root-local.apfs` f39b9105…、cell2 `root-byref.apfs` 3207a35e…、cell3=cell4 `root-w15.apfs` 785bcbac…；`GLWIRE_NO_INPLACE` 是 **host 运行 env**，cell3/cell4 同镜像是预期。
 - `drive-scroll.sh` 第 39 行硬编码 `IOSVM` 会覆盖 four-cell 传入；exp 用 `/tmp/p4-harness/` 副本，code 正修 `${IOSVM:-...}`；数字来自副本/补丁要注明。
 - `make test-open` PASS；`make test` 的 `test-gpu` 当前因 `/usr/share/vulkan/icd.d/lvp_icd.json` 缺失失败，是环境问题，补 lavapipe ICD 后重跑；不阻塞四格。
 
 **影响**：
 
 - P2/P3/D 系列不再新增实验；P4 是 stage 19 的最终交付项。
-- 四格结果未出前，不写「P4 完成/四格数字」。
+- 第二次实跑（13:25–14:27Z）已完成：四格 `host 0x502` 全 0，**P4 的 0x502 判据通过**；但 20s 窗口 fps 0.00/0.10/0.46/0.20，瓶颈是 guest 送帧（host 单帧 29.6–59.0ms），**不写性能达标**；稳定态需另起 `WINDOW_AFTER=300` 窗口。cell1 上一轮被误杀已复盘，本轮加了残留检查。
 
 **何时可推翻**：
 
-1. 四份镜像无法构建/无 GPU 资源，P4 被硬阻塞（需 owner 决定）；
+1. 三份镜像无法构建/无 GPU 资源，P4 被硬阻塞（需 owner 决定）；
 2. owner 重新排期，优先 D4 的 extension 实验。
 
 ---
