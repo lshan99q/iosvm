@@ -1893,7 +1893,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 ### 4.26 s19o-p3a 实测：surface 3 → opcode 202 → host 合成链路已通（内容为空白白块）
 
-> **状态：已回填（2026-11-09 07:20Z）。MVP 链路验证通过；像素语义不对。** guest `IOSurfaceLookup(3)` → `_eagl_remote_widget_upload`（opcode 202）→ host `widget upload texture` → `widget compose` 到 750x1624 fbo，rect 46,142 309x309 全部按参数发生；但 surface 3 的内容是**纯白圆角块**，不是当前 widget 内容。P3 未完成、widget 未正确。
+> **状态：已回填（2026-11-09 07:20Z）。MVP 链路验证通过；像素语义不对。** guest `IOSurfaceLookup(3)` → `_eagl_remote_widget_upload`（opcode 202）→ host `widget upload texture` → `widget compose` 到 750x1624 fbo，rect 46,142 309x309 全部按参数发生；但 surface 3 的内容是**纯白圆角块**，不是当前 widget 内容。P3 真路径未完成、widget 未正确（最终 fallback5 PASS 见 §4.31）。
 
 **镜像/库**
 
@@ -1924,7 +1924,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 ### 4.27 P3b D1→D3 结果：widget context 属于 extension，零参快照前提不成立
 
-> **状态：D1/D2/D3 均已跑，D3 失败（第三次，到放弃线）；P3 未完成。** P3a 的 `surface→202→host` 链路通，但 surface 3 是空白白块；D1 证明 CAContext 能力面在，D2 证明 `+allContexts` 按进程隔离，D3 证明 **widget host 的 CAContext 属于 widget extension 进程**，SpringBoard 也看不到。
+> **状态：D1/D2/D3 均已跑，D3 失败（第三次，到放弃线）；P3 真路径未完成（最终收口见 §4.29/§4.31）。** P3a 的 `surface→202→host` 链路通，但 surface 3 是空白白块；D1 证明 CAContext 能力面在，D2 证明 `+allContexts` 按进程隔离，D3 证明 **widget host 的 CAContext 属于 widget extension 进程**，SpringBoard 也看不到。
 
 **三次探针的结果**
 
@@ -1950,7 +1950,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 - **P3 不再继续 D 系列探针**：按时间盒转 fallback——静态/占位 widget（拉面最小实现），或记录「需更多信息/不可行」。
 - 若 owner 决定再攻 **extension check-in timeout**，那是 P2/P3 的共同前置；修好后再回来做实时 widget 内容。
-- **P3 未完成；P2 未达成；不要写 P3 已交付 / widget 正确。**
+- **P3 真路径不可行；fallback5 已交付（占位，不是真 widget）；不要写 P3 真路径通过 / widget 正确。**
 
 ### 4.28 s19o-p3b-d1 实测：CAContext 探针拿到能力面，但没拿到对象/快照（D1 未成功）
 
@@ -2099,11 +2099,11 @@ UIWindowLayer "colour ( 0 1 )"
 - CAContext 这代没有零参 `createImage`/`createCGImage`/`snapshot`，只有 `createImageSlot:hasAlpha:`（创建 slot，不是快照）；「零参快照」前提不成立。
 - 要拿 widget 内容只剩 **CARenderServer*（render server）** 或把 id 跨进程传到创建它的进程，成本/风险高、超出 D1 时间盒。
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
-- **P3 未完成；P2 仍未达成。**
+- **P3 真路径不可行（提前收口）；fallback5 已交付（占位，不是真 widget）；P2 仍未达成。**
 
-> **状态：正式决定 D1–D6 已下（见 `docs/gpu-acceleration-stage19-decisions.md`）。真路径判定为「不可行」并提前收口；fallback 转 guest-side placeholder，fallback5 截图待回填。**
+> **状态：正式收口。** 真路径判定 **不可行**（D1）；guest-side placeholder **fallback5 PASS**（D2），已交付。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不写「可行」。
 
-> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D6**。P3 最终结论写「不可行（真路径）+ fallback 交付（待 fallback5 截图）」，不要写「可行」。 P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
+> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D6**。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不要写「可行」。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2115,7 +2115,7 @@ UIWindowLayer "colour ( 0 1 )"
 - **没有 155x155 pt（310x310 @2x / 465x465 @3x）或任何 widget 尺寸候选**；同 boot 950s 层树 155x155 `CALayerHost` = **`0x500b566f`/`0x7f535c4c`**，与枚举表任何 id 无对应。
 - → **widget 内容面不是 MiniIOSurface，而是 widget extension 的远程 CAContext**；`surface → opcode 202 → 真实 widget` 的 surface 路径**不可行**（没有可点的 id）。
 - 同 boot 试合成 id3/id4 时，host 收到的是全零 202（`widget upload texture 0 ... 0x0 rect 0,0`），截图 widget 区仍 mean 251 白块；这是主队列调 `eagl_remote_widget_upload` 的编码/remote 状态技术问题（P3a 从 widget 线程调用正常），不影响枚举结论。
-- fallback2 没出图（local panel vs replay fbo）；fallback3 host-replay 也没出图（QEMU 截图是 guest scanout，host fallback 是 offscreen picture）；**host-side fallback 不可视觉交付**，转 guest-side placeholder。P3 真实路径不可行，最终三选一只剩 guest-side fallback 验收状态待填。
+- fallback2/3 host 侧不可见；fallback4 占位加早被盖；**fallback5 PASS**：guest-side 占位日志 1 条、截图 24px 棋盘 + 白框 + 两条黄对角线。P3 真路径不可行；fallback 已交付。
 
 **判据逐条对照**
 
@@ -2127,10 +2127,10 @@ UIWindowLayer "colour ( 0 1 )"
 | 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | **❌** |
 | 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | **❌** |
 | 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | **❌** |
-| 7 | fallback（拉面最小实现）可交付 | **host fallback 不可见；guest-side fallback4 占位加早被盖，待 fallback5**：fallback2 画了但 panel 看不到；fallback3 host-replay 仍看不到（截图=guest scanout，host fallback=offscreen picture）；fallback4 guest-side 日志 1 条但在 UI marker 前、被白底/窗口盖住，yellow 0；code 修延迟/bringToFront/打印 root class，待 fallback5。host 侧实现细节：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B（fallback2 md5 `68d89e54…`；fallback3 实际 `28f484a1…`） | 待 fallback5 截图验收（不是 P3 通过） |
+| 7 | fallback（拉面最小实现）可交付 | **guest-side fallback5 已验收 PASS**：日志 `static widget placeholder at 0.0,155.0 155.0x155.0 parent BSUIScrollView window SBHomeScreenWindow level -2 (NOT the real widget path)`；截图 widget 区 24px 棋盘 + 白框 + 两条黄对角线，yellow 13,733 / white 11,174 / black 1,825。host 侧 fallback2/3 不可见（guest scanout vs offscreen picture）；fallback4 加早被盖；A1c 修后在 host view 层成功。**是占位，不是真 widget。** | **✅ 已交付** |
 | 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | **❌** |
 
-**三选一判定（已填到只剩 fallback5）**
+**三选一判定（最终）**
 
 - **不可行（真路径）——当前判定，证据链完整**：
   1. **surface 枚举 30 个面无候选**：id3 是 184x124 旧 snapshot、id4 是 312x202 LA08；无 155x155/310x310/465x465；950s 层树 155x155 host `0x500b566f/0x7f535c4c` 无对应 id。
@@ -2139,10 +2139,10 @@ UIWindowLayer "colour ( 0 1 )"
   4. **extension 5–13s 被 check-in timeout 杀**（P2e/P2e-C2；18 个扩展），P3 实时 widget 内容在 extension 修复前不可得。
   → 结论：**P3 真路径（surface/CAContext 实时内容）不可行**；不要再用 rect/selector/surface 3 重试。
 
-- **可行（仅指 fallback，不是真路径）——只在 guest-side placeholder 出图时成立**：
-  - guest-side `widget_placeholder=1` 截图里 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**；
-  - 必须注明 **“这是拉面占位，不是真 widget 内容”**；不能写成 P3 真路径可行。
-  - fallback2/fallback3 已证明 host 侧 fallback 在截图里不可见；guest-side 结果待填。
+- **fallback（独立交付项，不是真路径）——已验收 PASS**：
+  - guest-side `widget_placeholder=1` 截图 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**（yellow 13,733、white 11,174、black 1,825）；
+  - 日志 `static widget placeholder ... parent BSUIScrollView window SBHomeScreenWindow level -2 (NOT the real widget path)`；
+  - 这是 **拉面占位，不是真 widget 内容**；P3 仍不写「可行/真路径通过」。
 
 - **需要更多信息**：
   - 只缺一个具体测量：**extension check-in 修复后再跑一次 P3**（能拿到 widget extension 的实时内容/CAContext 快照）。
@@ -2152,11 +2152,11 @@ UIWindowLayer "colour ( 0 1 )"
 
 | 项 | 值 |
 |---|---|
-| 判定时间 | 2026-11-10 14:06（到期后填实际） |
+| 判定时间 | 2026-11-09 14:49Z（提前收口；原时间盒 2026-11-10 14:06） |
 | 真路径结论 | **不可行**（证据链见上：surface 枚举/allContexts/无零参 snapshot/extension timeout） |
-| 最终三选一 | **不可行（真路径）+ fallback 交付（待 fallback5 截图）**；若 owner 选择再攻 extension，则改为「需要更多信息」 |
-| fallback 交付 | 待 guest-side fallback5：出图 = 已交付（占位，不是真 widget）；不出图 = 未交付 |
-| 需要 owner 决定 | 是否再攻 extension check-in timeout（P2/P3 共同前置） |
+| 最终三选一 | **不可行（真路径）+ fallback 已交付（fallback5 PASS）**；若 owner 选择再攻 extension，另立阶段 20（D4） |
+| fallback 交付 | **已交付（fallback5 PASS）**：guest-side 占位可见；是占位，不是真 widget |
+| 需要 owner 决定 | 是否在阶段 20 再攻 extension check-in timeout（D4）；不影响 P3 收口 |
 
 **fallback 实现（不是 P3 通过）**
 
@@ -2164,10 +2164,10 @@ UIWindowLayer "colour ( 0 1 )"
 - 没有 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画占位。
 - `widget_test` 5 例 PASS；host binary **119,552 B**（fallback2 md5 `68d89e541eba0fd34f0f671a21e24659`；fallback3 实际使用了 blank 修复版 `28f484a1ed55da720cb7b78e4eb0f602`）。
 - **host 侧 fallback 已证明不可视觉交付**（fallback2/3：截图是 guest scanout，host 画在 offscreen picture）；保留作分析用。
-- **交付改走 guest-side**：`inject_sb.c` 的 `widget_placeholder=1` 在 UI 后插圆角 UIView（棋盘+白框+黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`；待实现/验收。
+- **交付已走 guest-side**：`inject_sb.c` 的 `widget_placeholder=1` 在 UI 后插圆角 UIView（棋盘+白框+黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`；**fallback5 PASS**。
 - 这是 **fallback 交付项**，截图验收前不要写成 P3 可行/已完成。
 
-**不要写**：P3 已交付 / widget 已正确 / P2 已修复。P3 未完成；P0 仍 2/3；P1 暂停。
+**不要写**：P3 真路径通过 / widget 已正确 / P2 已修复。P3 真路径不可行，fallback 已交付（占位）；P0 仍 2/3；P1 暂停。
 
 
 ### 4.30 s19o-p3-surface-enum 实测：widget 面不在 MiniIOSurface 表里
@@ -2196,9 +2196,9 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 
 **结论**：P3 的「surface → opcode 202 → 真实 widget」路线**不可行**（没有可点的 surface id）；widget host 的像素在 extension 的远程 context 里，不在 MiniIOSurface 表。
 
-### 4.31 s19o-p3-fallback 验收：fallback4 占位加早被盖住，待 fallback5
+### 4.31 s19o-p3-fallback 验收：fallback5 PASS（guest-side 占位可见）
 
-> **状态：fallback2/3 host 侧不可见；fallback4 guest-side 占位加早被白底/窗口盖住；待 fallback5。P3 未完成。** 第一发（11:18Z）：host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。
+**状态：fallback5 PASS（视觉 + 日志）。** fallback2/3 host 侧不可见；fallback4 占位加早被盖；A1c 修后 guest-side 占位在 `BSUIScrollView` 上显示。P3 交付达成，但仍是占位、不是真 widget。 第一发（11:18Z）：host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。
 
 **配置**：root `f29594ab…`；host_glwire **119,552 B / md5 `68d89e541eba0fd34f0f671a21e24659`**（含 `GLWIRE_WIDGET_FALLBACK`）；`XCMD="glwire_local=1 widget_surface=3 widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1"`；`end=ui ui=750s biggest=356986 panic=0`。
 
@@ -2206,7 +2206,7 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 
 **根因（host 侧）**：`host_widget_blank()` 要求 ≥90% 像素 **B,G,R,A 全部 >235**；surface 3 是未绘制的 184x124 BGRA（全 0/透明或 alpha<235）→ `blank=0` → fallback 分支不触发。
 
-**下一步**：① 用 lead 已给的备选——只开 fallback + `GLWIRE_WIDGET_RECT=46,142,309,309`、**不带 widget_surface**（无 202），`widget_count==0 && have_env_rect` 无条件画占位；② 或 code 修 `host_widget_blank()` 把全 0/alpha=0 也算 blank 后再跑 202 版。**fallback 目前未通过验收，P3 未完成。**
+**下一步**：① 只开 fallback + `GLWIRE_WIDGET_RECT=46,142,309,309`、**不带 widget_surface**（无 202），`widget_count==0 && have_env_rect` 无条件画占位；② 或 code 修 `host_widget_blank()` 把全 0/alpha=0 也算 blank 后再跑 202 版。**当时 fallback 未通过；后续 fallback5 已 PASS（见下）。**
 
 #### fallback2（已跑，日志画了、截图看不到）
 
@@ -2225,11 +2225,11 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - dump：只在 **11:47（frame 2/3）** 写 picture/panel，当时启动黑屏、widget 区 0；11:56 转出的 PNG 同样黑——**UI 后没有 dump**。
 - **定性**：QEMU 截图来自 **guest scanout（SpringBoard/panel）**；host `host_widgets_compose()`/fallback 只进自己的 **offscreen picture**，二者不是同一块像素。**host-replay 也改不了**；host 侧 fallback 无法视觉交付，P3a 的白块同理。
 
-#### guest-side placeholder（已派 code，待实现/验收）
+#### guest-side placeholder（已跑，fallback5 PASS）
 
 - `inject_sb.c` 加 **`widget_placeholder=1`**：UI 后在 `_SBWallpaperSecureWindow` / root view 的 widget 区域插一个圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 **`static widget placeholder ... (NOT the real widget path)`**。
 - exp 换 sb 库，boot `XCMD="glwire_local=1 widget_placeholder=1"` 验收；截图应能看到占位，**这是 guest scanout 上的拉面，不是真 widget 路径**。
-- 结果待填；fallback 仍未验收通过，P3 未完成。
+- **fallback5 PASS**：占位可见，fallback 已交付（占位，不是真 widget）。
 
 #### fallback4（已跑，占位加早被盖住）
 
@@ -2239,27 +2239,25 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - 截图：widget 区 mean **252**、top `(255,255,255)×210,322`、黄 0、无棋盘/白框/对角线、纯绿 0 → **占位不可见**。
 - 判定：占位加**太早**（UI 未布局），随后 widget host 白底/窗口盖住；或 root 选在 `_SBWallpaperSecureWindow`（在图标/widget 层后面）。code 正修：延迟到 UI 后、每次重试 `bringToFront`、打印 root class/level；待 **fallback5**。
 
-#### A1c / fallback5（已改，未跑）
+#### A1c / fallback5（已跑，PASS）
 
 - sb 库：**110,656 B / md5 `abc8f4f149fdfd0528b6b8cc30d68e48`**；patch **322 行**（code 侧）。
 - 30s 首试；每 3s 重试，最多 **300 次**；可用 `widget_placeholder_at=SECONDS` 覆盖首试时间。
 - 先找 **150–160 / 305–315 pt 且 class/layer 含 `Remote`/`Host`/`Widget`/`Context`** 的 155x155 host；加到 `host.superview`，`frame = host.frame`，叠在 host 之上。
 - 找不到才退 wallpaper / Home / keyWindow root（`bounds≥300x500`、root subviews>1）。
 - 每 5s `bringToFront`，最多 **240 次**；日志带 parent/window class + level。
-- 结果待填；fallback5 未跑，不能写「占位已通过」。
+- **fallback5 结果：PASS**，见下。
 
-#### fallback5 回填槽位（待 exp 出图）
+#### fallback5 实测（PASS）
 
-| 项 | 待填 |
-|---|---|
-| root.apfs / sb 库 md5 | |
-| boot / end=ui / shot B | |
-| placeholder 日志时间 vs UI marker | |
-| 截图 widget 区 mean / top color / yellow / 棋盘 | |
-| 判定 | 可见 = fallback 已交付（占位，不是真 widget）；不可见 = 未交付 |
-| §4.29 第 7 条 / D2 | 回填为 ✅/❌ |
-
-> fallback5 未跑前，`§4.29` 第 7 条保持「待 fallback5」，不要写「fallback 已通过」。
+- 镜像：`/tmp/root-local.apfs` **`f39b9105…`**（GL=1，只换 sb **110,656 / abc8f4f1…**；libhakios 92,872 / gl 400,720 未动）。
+- boot：`XCMD="glwire_local=1 widget_placeholder=1"`、`HOST_ENV="GLWIRE_NO_PANEL=1"`、`UI_GRACE=600`、`MAXSECS=2400`、`MINFRAMES=99999`、`NOUI_BY=1800`。
+- 收尾：`end=noframes ui=0s ui_bytes=0`、`guestframes=35 hostframes=0`、`biggest=465,843`、无 panic/SIGSEGV/usertrap。**`end=noframes` 是 NO_PANEL + glwire_local 本地绘制时 hostframes=0 的记账，不是没到 UI**；最大截图 465,843 B 是完整主屏。
+- 日志（1 条）：
+  `hakios: static widget placeholder at 0.0,155.0 155.0x155.0 parent BSUIScrollView window SBHomeScreenWindow level -2 (NOT the real widget path)`
+- 截图 widget 区（750-space 46,142,309,309；crop 69,213,463,463）：mean RGB **139/116/104**；**yellow 13,733 / white 11,174 / black 1,825**；主色 teal `(25,140,166)`、red `(229,51,25)`、yellow `(255,242,51)`、white。
+- 视觉：`logs/s19o-p3-fallback5/widget-area.png`（463x463）清晰 24px 棋盘 + 白框 + 两条黄对角线；无绿屏/白底覆盖。
+- 判定：**PASS（视觉 + 日志）**；这是拉面占位，**不是真 widget 内容**，P3 不写「可行/真路径通过」。
 
 ## 五、铁律与提交
 
@@ -2731,7 +2729,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | ID | 决定 | 一句话依据 |
 |---|---|---|
 | D1 | **P3 真路径 = 不可行，提前收口** | surface 枚举 30 面无候选；`+allContexts` 按进程隔离；无零参 snapshot；extension exec 后 ~0.5s 死亡、`CheckIn` 未发出（`EXC_CORPSE_NOTIFY` error 5） |
-| D2 | **P3 交付 = guest-side placeholder（拉面）** | host fallback2/3 在截图里不可见（guest scanout vs offscreen picture）；唯一可见路径是 `inject_sb.c` 的 `widget_placeholder=1`；结论写「不可行 + fallback 交付（待 fallback5 截图）」，不写可行 |
+| D2 | **P3 交付 = guest-side placeholder（拉面）** | host fallback2/3 在截图里不可见（guest scanout vs offscreen picture）；唯一可见路径是 `inject_sb.c` 的 `widget_placeholder=1`；fallback5 PASS（棋盘+白框+黄线，yellow 13,733）；结论写「不可行 + fallback 已交付」，不写可行 |
 | D3 | **P2 = 关闭，记未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in |
 | D4 | **extension check-in 移交阶段 20 候选** | 18 个 extension 5–13s 被杀；timeout 120 无效、force xpcproxy 仍死、job 无关；唯一值得试 `ExtensionWatchdog=false` 暴露真实 exit code |
 | D5 | **剩余时间全部转 P4 四格表实跑** | 三份镜像/四格 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |

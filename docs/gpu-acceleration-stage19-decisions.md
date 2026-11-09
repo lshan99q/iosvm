@@ -38,23 +38,24 @@
 
 ## D2. P3 交付物 = guest-side placeholder（拉面）
 
-**决定**：P3 的交付物定为 **guest-side placeholder**（拉面），不是真 widget 内容。P3 最终结论写 **「不可行（真路径）+ 已交付 fallback」**，不写「可行」；fallback5 截图未回填前，写作「fallback 交付（待 fallback5 截图）」或「已交付 fallback（待验收）」，不要写「P3 通过」。
+**决定**：P3 的交付物定为 **guest-side placeholder**（拉面），不是真 widget 内容。P3 最终结论写 **「不可行（真路径）+ 已交付 fallback」**，不写「可行」。**fallback5 已 PASS**，fallback 交付完成；仍不要写「P3 真路径通过」。
 
 **依据**：
 
 - host 侧 fallback2/3 都执行了（日志 `widget fallback ...`），但 **QEMU 截图来自 guest scanout（SpringBoard/panel），host fallback 画在 offscreen picture**，两者不是同一块像素；host-replay 模式也改不了。见 runbook §4.31；提交 `c3b0371`；代码 `e8a8ee7`、`2de8e65`/`baa0283`。
 - 因此唯一能在 QEMU 截图里看到的路径是 **guest 侧画**：`inject_sb.c` 的 `widget_placeholder=1`，UI 后在 `_SBWallpaperSecureWindow`/root view 的 widget 区域插圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`。
-- fallback4 已证明占位加太早（12:25:47，早于 UI marker 12:27:00）会被盖住；A1c 改成 30s 首试/每 3s 最多 300 次、找 155x155 host 加到 host.superview 并 bringToFront，sb 110,656 B/md5 `abc8f4f1…`，待 fallback5。
-- 验收判据：fallback5 截图的 widget 区出现 **24px 棋盘 + 3px 白框 + 两条黄对角线**；必须标注 **「占位，不是真 widget 内容」**。
+- fallback4 已证明占位加太早（12:25:47，早于 UI marker 12:27:00）会被盖住；A1c 改成 30s 首试/每 3s 最多 300 次、找 155x155 host 加到 host.superview 并 bringToFront，sb 110,656 B/md5 `abc8f4f1…`。
+- **E5 — fallback5 PASS**：日志 `static widget placeholder at 0.0,155.0 155.0x155.0 parent BSUIScrollView window SBHomeScreenWindow level -2 (NOT the real widget path)`；截图 widget 区 24px 棋盘 + 白框 + 两条黄对角线，yellow 13,733 / white 11,174 / black 1,825；见 §4.31、`logs/s19o-p3-fallback5/report.md`。
+- 验收判据：截图 widget 区出现 **24px 棋盘 + 3px 白框 + 两条黄对角线**；必须标注 **「占位，不是真 widget 内容」**。
 
 **影响**：
 
-- P3 可交付一个可见占位，但不得冒充真 widget；P3 状态是「真路径不可行 + fallback 交付（待截图）」。
+- P3 交付完成：**真路径不可行 + fallback 已交付（fallback5 PASS）**；可见占位不得冒充真 widget。
 - host 侧 fallback 保留为分析用，不再作为视觉交付路径。
 
 **何时可推翻**：
 
-1. fallback5 截图不出现占位 → fallback 未交付，D2 需重开；
+1. fallback5 回归为不可见（截图无棋盘/白框/黄线）→ fallback 交付失效，D2 需重开；
 2. D1 的推翻条件成立，真 widget 内容可得 → 用真内容替代占位，D2 失效。
 
 ---
@@ -159,7 +160,8 @@
 
 ## 阶段 20 移交接手清单（D4）
 
-- **输入证据**：`logs/s19o-p2e/`（C1 limits）、`logs/s19o-p2e-c2/`（force xpcproxy）、`logs/s19o-p3b-d3/`（CAContext 枚举）、`logs/s19o-p3-fallback3/`（host offscreen）、`logs/s19o-p3-surface-enum/`；runbook §4.23–§4.25、§4.28、§4.30、附录 extension check-in；本文件 D4。
+- **最终证据编号**：**E5**（fallback5 PASS，P3 fallback 已交付）；E1–E4 见 D1（真路径不可行）。
+- **输入证据**：`logs/s19o-p2e/`（C1 limits）、`logs/s19o-p2e-c2/`（force xpcproxy）、`logs/s19o-p3b-d3/`（CAContext 枚举）、`logs/s19o-p3-fallback3/`（host offscreen）、`logs/s19o-p3-fallback5/`（E5：P3 fallback 已交付）、`logs/s19o-p3-surface-enum/`；runbook §4.23–§4.25、§4.28、§4.30、附录 extension check-in；本文件 D4。
 - **第一个实验（30 分钟限时）**：`ExtensionWatchdog=false`（bool，不是 timeout），看是否能暴露 extension 的真实 exit code / `CheckIn` 失败点；不要先加 timeout、不要先改 job。
 - **需要的权限/工具**：能改/注入 extension 侧或 launchd 侧；当前只有 guest 工具链（`IOSVM_USE_LLD=1`）和 launchd limits plist 路径，**没有直接改 extension 二进制的产物**。
 - **判定点**：launchd 等的是 `CheckIn` 消息；C2 已见 `exec` 后 ~0.5s `EXC_CORPSE_NOTIFY error 5`，不是「动作慢」。
@@ -171,7 +173,7 @@
 | 决定 | 主要证据 | runbook 章节 | 关键提交 |
 |---|---|---|---|
 | D1 | E1 surface 枚举；E2 allContexts；E3 无零参 snapshot；E4 CheckIn 未发出 | §4.28、§4.30、附录 extension check-in | `44f602a`、`2acbd0d`、`64c8896`、`f339014`、`9ce6e5b` |
-| D2 | host fallback2/3 offscreen；guest-side placeholder | §4.29、§4.31 | `e8a8ee7`、`2de8e65`、`c3b0371` |
+| D2 | host fallback2/3 offscreen；E5 fallback5 PASS（guest-side 可见） | §4.29、§4.31 | `e8a8ee7`、`2de8e65`、`c3b0371`、`logs/s19o-p3-fallback5` |
 | D3 | P2d/P2e C1/C2 四路径 | §4.22–§4.25 | `fdf964a`、`f1261b4`、`eac8128`、`b07d2da` |
 | D4 | 18 extension 被 5–13s 杀；timeout/xpcproxy/job 负结果 | §4.24、§4.25、附录 extension check-in | `9ce6e5b`、`f1261b4`、`eac8128` |
 | D5 | 四格口径/脚本/dry-run | §八 | `e8a8ee7`、`9ce6e5b`、`b07d2da` |
