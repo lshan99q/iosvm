@@ -144,6 +144,28 @@ def main():
         print(output)
 
     picture, output = run(args.map_test,
+                          [widget(bytes(WIDTH * HEIGHT * 4), 0, 0, WIDTH, HEIGHT)],
+                          {"GLWIRE_WIDGET_FALLBACK": "1"})
+    centre = pixel(picture, 2, 2)
+    if centre != bytes([0, 0, 0, 255]) and centre != BASELINE:
+        print("widget_test: all-zero fallback PASS")
+    else:
+        failures += 1
+        print("widget_test: all-zero fallback FAIL: centre %s" % list(centre))
+        print(output)
+
+    picture, output = run(args.map_test,
+                          [widget(bytes([10, 20, 30, 0]) * (WIDTH * HEIGHT), 0, 0, WIDTH, HEIGHT)],
+                          {"GLWIRE_WIDGET_FALLBACK": "1"})
+    centre = pixel(picture, 2, 2)
+    if centre != bytes([0, 0, 0, 255]) and centre != BASELINE:
+        print("widget_test: low-alpha fallback PASS")
+    else:
+        failures += 1
+        print("widget_test: low-alpha fallback FAIL: centre %s" % list(centre))
+        print(output)
+
+    picture, output = run(args.map_test,
                           [widget(RED * (WIDTH * HEIGHT), 0, 0, WIDTH, HEIGHT)],
                           {"GLWIRE_WIDGET_FALLBACK": "1"})
     if pixel(picture, 2, 2) == RED_BGRA:

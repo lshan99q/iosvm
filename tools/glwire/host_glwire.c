@@ -556,19 +556,27 @@ static int
 host_widget_blank(const unsigned char *data, GLsizei bytes, GLint w, GLint h, GLsizei row_bytes,
     GLsizei pixel_bytes)
 {
-	long pixels, white = 0;
+	long pixels, blank = 0;
 
 	if (data == NULL || bytes <= 0 || w <= 0 || h <= 0 || row_bytes <= 0 || pixel_bytes <= 0) {
 		return 1;
 	}
 	pixels = (long)w * (long)h;
+	/* A surface that was never drawn can be white, fully transparent, or all zero.  Count all
+	 * three as blank, but require 90% so a real widget with a transparent corner is not replaced.
+	 * For 4-byte pixels the byte order does not matter for the all-zero/alpha tests; for the white
+	 * test it does not matter either (all three colour bytes must be high). */
 	if (pixel_bytes >= 4) {
 		for (GLint y = 0; y < h; y++) {
 			const unsigned char *line = data + (size_t)y * (size_t)row_bytes;
 			for (GLint x = 0; x < w; x++) {
 				const unsigned char *p = line + (size_t)x * 4;
-				if (p[0] > 235 && p[1] > 235 && p[2] > 235 && p[3] > 235) {
-					white++;
+				int transparent = p[3] < 10;
+				int black = p[0] == 0 && p[1] == 0 && p[2] == 0;
+				int white = p[0] > 235 && p[1] > 235 && p[2] > 235 && p[3] > 235;
+
+				if (transparent || black || white) {
+					blank++;
 				}
 			}
 		}
@@ -577,15 +585,15 @@ host_widget_blank(const unsigned char *data, GLsizei bytes, GLint w, GLint h, GL
 			const unsigned char *line = data + (size_t)y * (size_t)row_bytes;
 			for (GLint x = 0; x < w; x++) {
 				const unsigned char *p = line + (size_t)x * 2;
-				if (p[0] > 235 && p[1] > 235) {
-					white++;
+				if (p[1] < 10 || p[0] == 0 || (p[0] > 235 && p[1] > 235)) {
+					blank++;
 				}
 			}
 		}
 	} else {
 		return 0;
 	}
-	return pixels > 0 && white * 100 >= pixels * 90;
+	return pixels > 0 && blank * 100 >= pixels * 90;
 }
 
 static void
