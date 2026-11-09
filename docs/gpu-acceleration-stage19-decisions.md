@@ -38,13 +38,14 @@
 
 ## D2. P3 交付物 = guest-side placeholder（拉面）
 
-**决定**：P3 的交付物定为 **guest-side placeholder**（拉面），不是真 widget 内容。P3 最终结论写 **「不可行（真路径）+ 已交付 fallback」**，不写「可行」；fallback4 截图未回填前，写作「fallback 交付（待 fallback4 截图）」或「已交付 fallback（待验收）」，不要写「P3 通过」。
+**决定**：P3 的交付物定为 **guest-side placeholder**（拉面），不是真 widget 内容。P3 最终结论写 **「不可行（真路径）+ 已交付 fallback」**，不写「可行」；fallback5 截图未回填前，写作「fallback 交付（待 fallback5 截图）」或「已交付 fallback（待验收）」，不要写「P3 通过」。
 
 **依据**：
 
 - host 侧 fallback2/3 都执行了（日志 `widget fallback ...`），但 **QEMU 截图来自 guest scanout（SpringBoard/panel），host fallback 画在 offscreen picture**，两者不是同一块像素；host-replay 模式也改不了。见 runbook §4.31；提交 `c3b0371`；代码 `e8a8ee7`、`2de8e65`/`baa0283`。
 - 因此唯一能在 QEMU 截图里看到的路径是 **guest 侧画**：`inject_sb.c` 的 `widget_placeholder=1`，UI 后在 `_SBWallpaperSecureWindow`/root view 的 widget 区域插圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`。
-- 验收判据：fallback4 截图的 widget 区出现 **24px 棋盘 + 3px 白框 + 两条黄对角线**；必须标注 **「占位，不是真 widget 内容」**。
+- fallback4 已证明占位加太早（12:25:47，早于 UI marker 12:27:00）会被盖住；code 正修延迟/bringToFront/root class，待 fallback5。
+- 验收判据：fallback5 截图的 widget 区出现 **24px 棋盘 + 3px 白框 + 两条黄对角线**；必须标注 **「占位，不是真 widget 内容」**。
 
 **影响**：
 
@@ -53,7 +54,7 @@
 
 **何时可推翻**：
 
-1. fallback4 截图不出现占位 → fallback 未交付，D2 需重开；
+1. fallback5 截图不出现占位 → fallback 未交付，D2 需重开；
 2. D1 的推翻条件成立，真 widget 内容可得 → 用真内容替代占位，D2 失效。
 
 ---
@@ -119,7 +120,8 @@
 - 四份构建定义与命令见 runbook §八：cell1 纯本地（`GL=1 CONFIGD=1`）、cell2 按引用（`GLWIRE_LOCAL=1`）、cell3 W1.5（`GLWIRE_NO_INPLACE=1`）、cell4 W1.5+W3（in-place 开）。
 - 每格同 `QEMU_SMP=1`、同触摸脚本、`WINDOW_AFTER=60`、`WINDOW_FRAMES=0`（约 20s）；`host 0x502` 只数宿主日志，判据 0；`make test` = `test-open` + `test-gpu`。
 - `four-cell.sh` 的 `--dry-run` 只验证调度/记账，**不是实测**；四发真 QEMU 后才填四格表。驱动 `e8a8ee7`；dry-run 自检见 `9ce6e5b`。
-- 四份镜像当前都不存在（`/tmp/root-local.apfs`、`root-byref.apfs`、`root-w15.apfs`、`root-w15w3.apfs`），必须先按 runbook §8.1 构建。
+- 镜像：cell1 `/tmp/root-local.apfs` 408dd87e…、cell2 `root-byref.apfs` cd86a2b4…、cell3=cell4 `root-w15.apfs` 911c2e3a…；`GLWIRE_NO_INPLACE` 是 **host 运行 env**，cell3/cell4 同镜像是预期。
+- `drive-scroll.sh` 第 39 行硬编码 `IOSVM` 会覆盖 four-cell 传入；exp 用 `/tmp/p4-harness/` 副本，code 正修 `${IOSVM:-...}`；数字来自副本/补丁要注明。
 - `make test-open` PASS；`make test` 的 `test-gpu` 当前因 `/usr/share/vulkan/icd.d/lvp_icd.json` 缺失失败，是环境问题，补 lavapipe ICD 后重跑；不阻塞四格。
 
 **影响**：

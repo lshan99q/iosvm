@@ -2101,9 +2101,9 @@ UIWindowLayer "colour ( 0 1 )"
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
 - **P3 未完成；P2 仍未达成。**
 
-> **状态：正式决定 D1–D5 已下（见 `docs/gpu-acceleration-stage19-decisions.md`）。真路径判定为「不可行」并提前收口；fallback 转 guest-side placeholder，fallback4 截图待回填。**
+> **状态：正式决定 D1–D5 已下（见 `docs/gpu-acceleration-stage19-decisions.md`）。真路径判定为「不可行」并提前收口；fallback 转 guest-side placeholder，fallback5 截图待回填。**
 
-> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D5**。P3 最终结论写「不可行（真路径）+ fallback 交付（待 fallback4 截图）」，不要写「可行」。 P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
+> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D5**。P3 最终结论写「不可行（真路径）+ fallback 交付（待 fallback5 截图）」，不要写「可行」。 P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2127,10 +2127,10 @@ UIWindowLayer "colour ( 0 1 )"
 | 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | **❌** |
 | 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | **❌** |
 | 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | **❌** |
-| 7 | fallback（拉面最小实现）可交付 | **host fallback 不可见；guest-side fallback 待实现/验收**：fallback2 画了但 panel 看不到；fallback3 host-replay 仍看不到（截图=guest scanout，host fallback=offscreen picture）；转 `inject_sb.c` 的 `widget_placeholder=1`，待实现/验收。host 侧实现细节：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B（fallback2 md5 `68d89e54…`；fallback3 实际 `28f484a1…`） | 待 guest-side placeholder 截图验收（不是 P3 通过） |
+| 7 | fallback（拉面最小实现）可交付 | **host fallback 不可见；guest-side fallback4 占位加早被盖，待 fallback5**：fallback2 画了但 panel 看不到；fallback3 host-replay 仍看不到（截图=guest scanout，host fallback=offscreen picture）；fallback4 guest-side 日志 1 条但在 UI marker 前、被白底/窗口盖住，yellow 0；code 修延迟/bringToFront/打印 root class，待 fallback5。host 侧实现细节：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B（fallback2 md5 `68d89e54…`；fallback3 实际 `28f484a1…`） | 待 fallback5 截图验收（不是 P3 通过） |
 | 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | **❌** |
 
-**三选一判定（已填到只剩 fallback3）**
+**三选一判定（已填到只剩 fallback5）**
 
 - **不可行（真路径）——当前判定，证据链完整**：
   1. **surface 枚举 30 个面无候选**：id3 是 184x124 旧 snapshot、id4 是 312x202 LA08；无 155x155/310x310/465x465；950s 层树 155x155 host `0x500b566f/0x7f535c4c` 无对应 id。
@@ -2154,8 +2154,8 @@ UIWindowLayer "colour ( 0 1 )"
 |---|---|
 | 判定时间 | 2026-11-10 14:06（到期后填实际） |
 | 真路径结论 | **不可行**（证据链见上：surface 枚举/allContexts/无零参 snapshot/extension timeout） |
-| 最终三选一 | **不可行（真路径）+ fallback 交付（待 fallback4 截图）**；若 owner 选择再攻 extension，则改为「需要更多信息」 |
-| fallback 交付 | 待 guest-side fallback4：出图 = 已交付（占位，不是真 widget）；不出图 = 未交付 |
+| 最终三选一 | **不可行（真路径）+ fallback 交付（待 fallback5 截图）**；若 owner 选择再攻 extension，则改为「需要更多信息」 |
+| fallback 交付 | 待 guest-side fallback5：出图 = 已交付（占位，不是真 widget）；不出图 = 未交付 |
 | 需要 owner 决定 | 是否再攻 extension check-in timeout（P2/P3 共同前置） |
 
 **fallback 实现（不是 P3 通过）**
@@ -2196,9 +2196,9 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 
 **结论**：P3 的「surface → opcode 202 → 真实 widget」路线**不可行**（没有可点的 surface id）；widget host 的像素在 extension 的远程 context 里，不在 MiniIOSurface 表。
 
-### 4.31 s19o-p3-fallback 验收：host fallback 在截图里始终不可见，转 guest-side placeholder
+### 4.31 s19o-p3-fallback 验收：fallback4 占位加早被盖住，待 fallback5
 
-> **状态：fallback2/fallback3 都已跑、host 侧 fallback 视觉不可交付；guest-side placeholder 待实现/验收。P3 未完成。** 第一发（11:18Z）：host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。
+> **状态：fallback2/3 host 侧不可见；fallback4 guest-side 占位加早被白底/窗口盖住；待 fallback5。P3 未完成。** 第一发（11:18Z）：host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。
 
 **配置**：root `f29594ab…`；host_glwire **119,552 B / md5 `68d89e541eba0fd34f0f671a21e24659`**（含 `GLWIRE_WIDGET_FALLBACK`）；`XCMD="glwire_local=1 widget_surface=3 widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1"`；`end=ui ui=750s biggest=356986 panic=0`。
 
@@ -2230,6 +2230,14 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - `inject_sb.c` 加 **`widget_placeholder=1`**：UI 后在 `_SBWallpaperSecureWindow` / root view 的 widget 区域插一个圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 **`static widget placeholder ... (NOT the real widget path)`**。
 - exp 换 sb 库，boot `XCMD="glwire_local=1 widget_placeholder=1"` 验收；截图应能看到占位，**这是 guest scanout 上的拉面，不是真 widget 路径**。
 - 结果待填；fallback 仍未验收通过，P3 未完成。
+
+#### fallback4（已跑，占位加早被盖住）
+
+- 镜像：root **`f3fd3bd6b5f5b740bb77723b3543b159`**（12:14，5,918,720 B；备份 `/tmp/root.apfs.bak-p3-fallback4` = f29594ab…）；镜像内 libhakios 92,872、gl 400,720、sb **110,200**（md5 `16ce2907280dcb4836f4d2043658c930`，旧日志字符串 `hakios: placeholder:`）。
+- 配置：`XCMD="glwire_local=1 widget_placeholder=1"`；`HOST_ENV="GLWIRE_NO_PANEL=1"`；`end=ui ui=690s biggest=326115 hostframes=2069 panic=0`。
+- 日志：**1 条** `hakios: placeholder: static widget placeholder at 23.0,71.0 155.0x155.0 (NOT the real widget path)`；在 **12:25:47**，**早于 UI marker 12:27:00**（SpringBoard init 后 ~15s）。
+- 截图：widget 区 mean **252**、top `(255,255,255)×210,322`、黄 0、无棋盘/白框/对角线、纯绿 0 → **占位不可见**。
+- 判定：占位加**太早**（UI 未布局），随后 widget host 白底/窗口盖住；或 root 选在 `_SBWallpaperSecureWindow`（在图标/widget 层后面）。code 正修：延迟到 UI 后、每次重试 `bringToFront`、打印 root class/level；待 **fallback5**。
 
 ## 五、铁律与提交
 
@@ -2448,7 +2456,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ## 八、P4 四格表与收尾（可直接执行，结果待填）
 
-> **状态：脚本就绪、四格未跑。** 四份镜像 **当前都不存在**（需按 §8.1 分别构建，不能用同一镜像冒充四格）；`tools/glwire/harness/four-cell.sh` 可执行，四格 pure-local/by-reference/w15/w15-w3；20s 窗口；列 `ui/frames/fps/span/shot B/host 0x502`；`--dry-run` 四行验证、不碰 QEMU；`0x502` 只数 host log，正常为 0。**dry-run 不算实测，结果待 exp 四发后填。**
+> **状态：四格跑中，结果待填。** 四份镜像：cell1 `408dd87e…`、cell2 `cd86a2b4…`、cell3=cell4 `911c2e3a…`；当前 cell1 host 0 帧、`REQUIRE_HOST_FRAMES=0`；`make test-open` PASS、`test-gpu` 缺 lavapipe ICD（环境问题）。`tools/glwire/harness/four-cell.sh` 可执行，四格 pure-local/by-reference/w15/w15-w3；20s 窗口；列 `ui/frames/fps/span/shot B/host 0x502`；`0x502` 只数 host log，正常为 0。**dry-run 不算实测，四发真 QEMU 后填表。**
 
 ### 8.1 四份构建定义（镜像外部构建）
 
@@ -2456,12 +2464,13 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 |---|---|---|---|
 | cell1 纯本地 | 没有记录器，guest 自己画 | `GL=1 CONFIGD=1`（无 `GLREMOTE`/`GLWIRE_*`） | `/tmp/root-local.apfs` |
 | cell2 按引用 | guest 也画，surface 按引用上传 | `GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1` | `/tmp/root-byref.apfs` |
-| cell3 W1.5 | remote_only，host `--no-panel` 重放 | `GL=1 GLREMOTE=1 GLWIRE_NO_INPLACE=1 CONFIGD=1` | `/tmp/root-w15.apfs` |
-| cell4 W1.5+W3 | 同 W1.5，打开 in-place 行写 | `GL=1 GLREMOTE=1 CONFIGD=1`（不要 `GLWIRE_NO_INPLACE`） | `/tmp/root-w15w3.apfs` |
+| cell3 W1.5 | remote_only，host `--no-panel` 重放 | `GL=1 GLREMOTE=1 CONFIGD=1`（**`GLWIRE_NO_INPLACE` 是 host 运行 env**） | `/tmp/root-w15.apfs` |
+| cell4 W1.5+W3 | 同 W1.5，host 打开 in-place 行写 | `GL=1 GLREMOTE=1 CONFIGD=1`（同 cell3；差异只在 host env） | `/tmp/root-w15.apfs`（**与 cell3 同一份**） |
 
 - 所有 guest 构建统一 `PREBUILT=1 IOSVM_USE_LLD=1 RC=rc.vtop`；不要在一个 boot 里换镜像。
+- **`GLWIRE_NO_INPLACE` 是 host 运行 env，不是 build env**：cell3/cell4 用**同一份镜像**是预期；cell3 的 `HOST_ENV` 带 `GLWIRE_NO_INPLACE=1`，cell4 不带。four-cell 不要求两份不同镜像。
 - `GLWIRE_LOCAL=1` 的构建把 `/redwood/etc/glwire_local` 写进镜像（guest 本地绘制）；cell3/4 的 host 需要 `GLWIRE_NO_PANEL=1` 走重放。
-- 镜像尺寸/内容不同，**四格必须各用各的 image**；当前 `/tmp/root-local.apfs`、`root-byref.apfs`、`root-w15.apfs`、`root-w15w3.apfs` **均不存在**，先按下面命令构建；不能用同一个 root.apfs 冒充四格。
+- 当前镜像：cell1 `/tmp/root-local.apfs` **408dd87e…**、cell2 `/tmp/root-byref.apfs` **cd86a2b4…**、cell3=cell4 `/tmp/root-w15.apfs` **911c2e3a…**；若不存在先按下面命令构建。**cell3/cell4 同镜像是预期**，不要为了凑四份复制成假镜像；cell1/2/3 三份不同镜像即可。
 
 **构建命令（每格一份 root.apfs；system.apfs 不参与四格）**
 
@@ -2476,16 +2485,12 @@ cp root.apfs /tmp/root-local.apfs
 PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1 RC=rc.vtop ./build.sh
 cp root.apfs /tmp/root-byref.apfs
 
-# cell3 W1.5（W3 关）
-PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 GLWIRE_NO_INPLACE=1 CONFIGD=1 RC=rc.vtop ./build.sh
-cp root.apfs /tmp/root-w15.apfs
-
-# cell4 W1.5+W3（in-place 开）
+# cell3/cell4 共用（W1.5；NO_INPLACE 是 host 运行 env，不进镜像）
 PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
-cp root.apfs /tmp/root-w15w3.apfs
+cp root.apfs /tmp/root-w15.apfs
 ```
 
-> 每次 `build.sh` 也会处理 system.apfs；四格只用 root.apfs。不要把一个 root.apfs 复制成四份冒充四格；四个 env 组合必须分别构建。
+> 每次 `build.sh` 也会处理 system.apfs；四格只用 root.apfs。**cell3/cell4 同一份 `/tmp/root-w15.apfs` 是预期**（`GLWIRE_NO_INPLACE` 只在 host env）；不要复制成四份假镜像。
 
 
 ### 8.2 20s 滚动窗口（同一触摸脚本）
@@ -2497,7 +2502,7 @@ cd /host/iosvm
 CELL1_IMAGE=/tmp/root-local.apfs  CELL1_LABEL=cell1-pure \
 CELL2_IMAGE=/tmp/root-byref.apfs  CELL2_LABEL=cell2-byref \
 CELL3_IMAGE=/tmp/root-w15.apfs    CELL3_LABEL=cell3-w15 \
-CELL4_IMAGE=/tmp/root-w15w3.apfs  CELL4_LABEL=cell4-w15w3 \
+CELL4_IMAGE=/tmp/root-w15.apfs    CELL4_LABEL=cell4-w15w3 \
 CELL3_HOST_ENV="GLWIRE_NO_PANEL=1" \
 CELL4_HOST_ENV="GLWIRE_NO_PANEL=1" \
 WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800 \
@@ -2506,9 +2511,11 @@ tools/glwire/harness/four-cell.sh
 
 - 只跑单格时给对应 `CELLn_IMAGE` 即可；缺 image 的格子会写 `SKIP`，不要用旧日志充数。
 - **cell1 无 recorder、host 0 帧**：`four-cell.sh` 默认 `CELL1_REQUIRE_HOST_FRAMES=0`，其余格为 1；可用 `CELLn_REQUIRE_HOST_FRAMES=0/1` 逐格覆盖。
+- **cell3/cell4 同 image**：`CELL3_IMAGE` 和 `CELL4_IMAGE` 都指向 `/tmp/root-w15.apfs`；差异只在 host env（`GLWIRE_NO_INPLACE`）。
 - `WINDOW_FRAMES=0`（八次滑动，约 20s）是脚本默认；`WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800` 由命令行给出。
 - `--dry-run` 只读已有 `/tmp/<label>-{host.log,log,shot.png,drive.txt}` 重算表，不跑 QEMU；当前已做四行验证；**dry-run 数字不是新实测**。
 - 每格产物写到 `OUT`（默认 `/tmp/four-cell`）：`four-cell.md`、`four-cell.csv`、每格日志/截图/drive。
+- **drive-scroll 路径补丁**：当前 `drive-scroll.sh` 第 39 行硬编码 `IOSVM=/home/lshan/DSH-desktop/...`，four-cell 传入的 `IOSVM` 会被覆盖；exp 目前用 `/tmp/p4-harness/` 的副本跑。code 正修 `${IOSVM:-/host/iosvm-work/hakios-xnu-kernel}`；文档中的四格数字若来自副本/补丁，要注明；repo 修好后可原样复跑。
 
 ### 8.3 `0x502` 记账口径
 
@@ -2677,7 +2684,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | ID | 决定 | 一句话依据 |
 |---|---|---|
 | D1 | **P3 真路径 = 不可行，提前收口** | surface 枚举 30 面无候选；`+allContexts` 按进程隔离；无零参 snapshot；extension exec 后 ~0.5s 死亡、`CheckIn` 未发出（`EXC_CORPSE_NOTIFY` error 5） |
-| D2 | **P3 交付 = guest-side placeholder（拉面）** | host fallback2/3 在截图里不可见（guest scanout vs offscreen picture）；唯一可见路径是 `inject_sb.c` 的 `widget_placeholder=1`；结论写「不可行 + fallback 交付（待 fallback4 截图）」，不写可行 |
+| D2 | **P3 交付 = guest-side placeholder（拉面）** | host fallback2/3 在截图里不可见（guest scanout vs offscreen picture）；唯一可见路径是 `inject_sb.c` 的 `widget_placeholder=1`；结论写「不可行 + fallback 交付（待 fallback5 截图）」，不写可行 |
 | D3 | **P2 = 关闭，记未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in |
 | D4 | **extension check-in 移交阶段 20 候选** | 18 个 extension 5–13s 被杀；timeout 120 无效、force xpcproxy 仍死、job 无关；唯一值得试 `ExtensionWatchdog=false` 暴露真实 exit code |
 | D5 | **剩余时间全部转 P4 四格表实跑** | 四份构建 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
