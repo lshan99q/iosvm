@@ -1,6 +1,6 @@
 # Stage 20 计划与 E1 收口：extension check-in
 
-> **状态：E1 已跑，终局 C/需更多信息；P2/P3 未重开，计划其余未执行。** 本文件定义目标、E1、退出标准、不做清单、重开判据，并记录 E1 结果（§8）；**不预写 P2/P3 结论**。
+> **状态：E1 已跑，终局 C（不可判/不可行），control 完成；P2/P3 未重开，system 恢复 6be494f1。** 本文件定义目标、E1、退出标准、不做清单、重开判据，并记录 E1 结果（§8）；**不预写 P2/P3 结论**。
 > 输入来自 stage 19 的 D4 移交：`docs/gpu-acceleration-stage19-decisions.md`、`docs/gpu-acceleration-stage19-closure.md`。
 
 ## 1. 目标
@@ -98,22 +98,22 @@
 4. 若 C：一句「不可行或需更多信息」+ 已试边界；
 5. 文档更新（本文件 + stage 19 closure 的状态引用）；不提交日志/截图/二进制。
 
-## 8. E1 结果（终局 C / 需更多信息）
+## 8. E1 结果（终局 C：不可判/不可行；control 完成）
 
-> **判定：C/需更多信息，不是 A/B，也不是「不可行」。** E1 没有到达 extension 阶段，`ExtensionWatchdog=false` 是否解锁 extension **未能判定**。
-> 来源：`docs/gpu-acceleration-stage20-e1-watchdog.md`；归档 `logs/s20-e1-watchdog/`（`s20-e1` 同目录）。
+> **判定：C（不可判/不可行）。** `ExtensionWatchdog=false` 不让 extension 活到 CheckIn，反而让 boot/extension 阶段停住；C1-limits control 正常到 UI 且 extension 阶段重演 10 次 timeout、0 alive。check-in timeout **未解决**，不是单个 limits 布尔能修。
+> 来源：`docs/gpu-acceleration-stage20-e1-watchdog.md`、`docs/gpu-acceleration-stage20-e1-control.md`、`docs/gpu-acceleration-stage20-e1-rebuild-confound.md`；归档 `logs/s20-e1-watchdog/`、`logs/s20-e1-control/`。
 
-### 8.1 构建 / 配置
+### 8.1 E1 构建 / 配置
 
-- `system.apfs`：**15167c8a01fe2e074caad610686df895**（20:51:10Z，2,476,752,896 B；旧 `8bf5f838`），用 `SYSTEM=1` 重建。
-- 镜像内 limits plist：`ExtensionWatchdog=false`、`ExtensionWatchdogTimeout=120`，另有 **`CrashOnSIGTERMTimeout=false`**（C1 是 true；code 20:45 改的，**第二变量**）。
-- root 未动（`785bcbac`）；本 boot 用 `/tmp/root-byref.apfs` `3207a35e`（C1 的 P2d root 已不在）。
+- `system.apfs`：**15167c8a01fe2e074caad610686df895**（20:51:10Z，2,476,752,896 B；旧 `8bf5f838`），`SYSTEM=1` 重建。
+- limits：`ExtensionWatchdog=false`、`ExtensionWatchdogTimeout=120`、**`CrashOnSIGTERMTimeout=false`**（C1 是 true；第二变量）。
+- root 未动（`785bcbac`）；boot 用 `/tmp/root-byref.apfs` `3207a35e`。
 
-### 8.2 boot 实测
+### 8.2 E1 boot（700s，未到 extension）
 
-`end=qemu-exited ui=0 biggest=24960 guestframes=2 hostframes=2 panic=0`（700s）。SpringBoard 21:00:34 spawn，但无 UI；kernel 见 `Full corpse enqueued for configd`、`configd[22] Corpse failure, too many faults 2`（143/166s）。
+`end=qemu-exited ui=0 biggest=24960 guestframes=2 hostframes=2 panic=0`；SpringBoard 21:00:34 spawn 但无 UI；configd corpse/faults 143/166s。
 
-| 项 | E1 | 旧 system 同 root（对照） |
+| 项 | E1（false/false） | 旧 system 同 root |
 |---|---|---|
 | UI | **0s / 24,960 B（boot logo）** | 660s / 327,177 B |
 | host frames | **2** | 1,080 |
@@ -121,24 +121,32 @@
 | `Extension is hanging` | **0** | **12**（first 611s） |
 | `CHECK_IN_TIMEOUT` | **0** | **11** |
 | `EXC_CORPSE_NOTIFY` | **4，全是 configd pid22** | configd 类 |
-| extension 服务名（mobilecal/news.tag/ScreenTime/WidgetExtension） | **0** | present |
+| extension 服务名 | **0** | present |
 
-- `WILL_SPAWN` 68 条全是 system jobs；**extension 根本没 spawn**。所以 0/0 不是「watchdog 生效」的证据，只是没进入 extension 阶段。
-- configd 的 corpse/faults 伴随新 system boot，不是 extension exit code。
+- `WILL_SPAWN` 68 条全是 system jobs；**extension 根本没 spawn**，0/0 不是 watchdog 生效证据。
 
-### 8.3 为什么是 C（不是 A/B）
+### 8.3 Control（C1 limits，system 6be494f1）：重建不是瓶颈
 
-- 新 system（15167c8a）停在 2 帧/无 UI；旧 system 同 root 660s 到 UI、611s 出现首次 extension hanging。**`SYSTEM=1` 重建是 confound**：无法区分是 `ExtensionWatchdog=false`、`CrashOnSIGTERMTimeout=false`，还是重建本身导致 boot 停住。
-- 30 分钟到点（21:13:46），没有做 control，也没有更长 boot；按既定退出标准收口 C，不再投入。
+- system **6be494f1**（23:07:50Z，2,476,752,896 B）；plist `CrashOnSIGTERMTimeout=true`、`ExtensionWatchdog=true`、`Timeout=120`（C1 三键）。
+- boot 900s：`ui=720s ui_bytes=309280 guestframes=32 hostframes=304 MATCH=56 DIFF=248 panic=0 biggest=456750`。
+- extension：hanging **10**（first PhotosReliveWidget[45]，666s）、CHECK_IN_TIMEOUT **10**、**checked in as alive 0**；exit `XPC_EXIT_REASON_EXTENSION_CHECK_IN_TIMEOUT 0x3`；EXC_CORPSE 含 configd pid22 + extension 47–50。
+- → **`SYSTEM=1` 重建本身不是瓶颈**：control 正常到 UI，extension 阶段也正常重演 timeout。
 
-### 8.4 下一步 control（未执行；当前不跑）
+### 8.4 单变量旁证：`ExtensionWatchdog=false` 是坏键
 
-1. **Control**：新 system + 旧 plist（`ExtensionWatchdog=true` / `CrashOnSIGTERMTimeout=true`），700–900s。若仍停 2 帧 → 重建/镜像问题，不是 watchdog；若到 UI/extension → 再做 false 组。
-2. **False 组（仅 control 到 UI/extension 后）**：900–1200s，等 611s 首次 hanging 后再 **≥60s**，记录 `checked in as alive` / hanging / CHECK_IN_TIMEOUT / exit code。
-3. 不并发 boot；不改 job/timeout；一次只动 `ExtensionWatchdog`。
+- system `a3a895b0`：`ExtensionWatchdog=true`、`CrashOnSIGTERMTimeout=false`、Timeout 120；与 E1 **只差 Watchdog**。
+- 650s 已出现第一条 hanging（`PeopleViewService.LockScreenPeopleWidget[44]`），共 6 条；E1（false/false）700s 仍 2 帧/无 UI/无 extension。
+- 所以 **`CrashOnSIGTERMTimeout=false` 和重建都不是**；**`ExtensionWatchdog=false` 让 boot/extension 停住**。
 
-### 8.5 当前影响
+### 8.5 为什么最终是 C
 
-- **P2/P3 不重开**：E1 是 C，没有 A，§5 重开判据不触发。
-- **P3 fallback5 仍是交付项**：不因 E1 回退，也不写 P3 真路径通过。
+- E1 false/false：700s 仍 2 帧/无 UI/无 extension，**没有** `checked in as alive`，也没有 extension exit code；watchdog=false 不是解锁，而是坏键。
+- Control 正常到 UI，但仍 **0 alive + 10 CHECK_IN_TIMEOUT / 0x3**：check-in timeout 未解决，不是单 limits 布尔能修。
+- 30 分钟盒内无法再分辨「干净单变量 Watchdog=false（Crash 保持 true）」；按退出标准收口 **C（不可判/不可行）**，不再投入。
+
+### 8.6 当前状态 / 下一步（未执行，当前不做）
+
+- **system 已恢复 `6be494f1`**（C1 等价、可复现）；坏 `15167c8a` 备份 `/tmp/system.apfs.bak-s20-bad`，**不要复用**。
+- **P2/P3 保持关闭、不重开**；P3 fallback5 仍是交付项，不回退。
+- 若 owner 仍要干净单变量：working C1 base + **只改 `ExtensionWatchdog=false`**（`CrashOnSIGTERMTimeout=true`）900–1200s；预计仍 C，当前不做。
 - 不写「watchdog 已修」「extension 已活」「P2/P3 已通过」。
