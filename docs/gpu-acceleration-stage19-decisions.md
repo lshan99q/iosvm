@@ -186,7 +186,7 @@
 
 - **最终证据编号**：**E5**（fallback5 PASS，P3 fallback 已交付）；E1–E4 见 D1（真路径不可行）。
 - **输入证据**：`logs/s19o-p2e/`（C1 limits）、`logs/s19o-p2e-c2/`（force xpcproxy）、`logs/s19o-p3b-d3/`（CAContext 枚举）、`logs/s19o-p3-fallback3/`（host offscreen）、`logs/s19o-p3-fallback5/`（E5：P3 fallback 已交付）、`logs/s19o-p3-surface-enum/`；runbook §4.23–§4.25、§4.28、§4.30、附录 extension check-in；本文件 D4。
-- **第一个实验（30 分钟限时）**：`ExtensionWatchdog=false`（bool，不是 timeout），看是否能暴露 extension 的真实 exit code / `CheckIn` 失败点；不要先加 timeout、不要先改 job。
+- **第一个实验（30 分钟限时）**：`ExtensionWatchdog=false`（bool，不是 timeout），看是否能暴露 extension 的真实 exit code / `CheckIn` 失败点；不要先加 timeout、不要先改 job。计划骨架：`docs/gpu-acceleration-stage20-plan.md`。
 - **需要的权限/工具**：能改/注入 extension 侧或 launchd 侧；当前只有 guest 工具链（`IOSVM_USE_LLD=1`）和 launchd limits plist 路径，**没有直接改 extension 二进制的产物**。
 - **判定点**：launchd 等的是 `CheckIn` 消息；C2 已见 `exec` 后 ~0.5s `EXC_CORPSE_NOTIFY error 5`，不是「动作慢」。
 - **退出标准**：extension 活过 60s 且 `checked in as alive` 出现 → 可回到 P2/P3；暴露明确 exit code/bug → 评估 30 分钟内能否修；两者都没有 → 写「不可行/需更多信息」，不再投入。
