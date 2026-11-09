@@ -1977,49 +1977,55 @@ UIWindowLayer "colour ( 0 1 )"
 
 ---
 
-#### D2（已 GO，结果待填）：修选择器/编码 + `widget_cacontext_at` 延迟
+#### D2 实测：延迟 `allContexts` 可用，但只看到 backboardd 自己的 context（D1 仍未成功）
 
-> **状态：exp 已 GO、结果待填。** D1 未成功不代表 CAContext 不可用；D2 只修探针自身问题，仍**不自动接 opcode 202**。
+> **状态：已回填（2026-11-09 09:14Z）。D1 仍未成功。** 延迟触发、容错 selector、`+allContexts` 都验证可用；但 `+allContexts` 在 backboardd 里**按进程隔离**——只有 backboardd 自己的 1 个 context（cid `0xc0cfe455`），看不到 SpringBoard 的 widget host context（同 boot 950s 层树 155x155 = `0xbf11dcae` / `0x7702cd25`，不匹配）。`createImageSlot:hasAlpha:` 只打印 encoding、未调用；无快照/nonzero。
 
-**修正**
-
-- **不要求精确 `@@:`**：用 `method_getNumberOfArguments` / return type 判断，允许 `@16@0:8`、`@20@0:8I16` 这类带偏移的 encoding。
-- selector 表加真实 **`contextWithId:`**（小写 d）。
-- 新增 **`widget_cacontext_at=SECONDS`**：backboardd **main queue** 上 `dispatch_after` 到 UI 之后再跑（与 `layers_at` 同思路）。
-
-**D2 行为**
-
-- `+allContexts`（或 `contexts` / `allContextIDs`）逐项打印 class / contextId。
-- **只对零参、返回对象的** `createImage` / `createCGImage` / `snapshot` 做快照；打印 W/H/bpp/bpr/bytes/前 16 字节/nonzero。
-- `createImageSlot:hasAlpha:` / `createImageWithOptions:` **只打印 responds/encoding，不调用**。
-- `nonzero>0` 且 **32 ≤ W,H ≤ 4096** 才打印 **`widget candidate`**。
-- 仍不接 202（host 不开 `GLWIRE_WIDGET`）；候选只做日志。
-
-**库**
+**镜像/库**
 
 | 项 | 值 |
 |---|---|
-| `libhakios.dylib` | **92,872 B**，md5 **`e7e33614e307a985227c7f7d47a36184`**；strings 含 `widget_cacontext_at=`、`contextWithId:`、`widget candidate` |
-| `libhakios.gl.dylib` | 仍 **400,720 B** |
-| 备份 | `/tmp/libhakios.d1.dylib`（92,208，D1 版）等（exp 侧） |
+| root.apfs | 2026-11-09 08:43Z，5,910,528 B，md5 **`fc1787e46cd26bf6d20fa4571ec17ba5`** |
+| system.apfs | 未动：2,476,752,896 B，md5 `8bf5f838d52e46d6c8bf77f13a5ad946` |
+| 镜像内库 | `libhakios.dylib` **92,872 B**（md5 `e7e33614e307a985227c7f7d47a36184`；strings `widget_cacontext_at=`/`contextWithId:`/`widget candidate`）、`libhakios.gl.dylib` **400,720 B** |
+| 备份 | `/tmp/root.apfs.bak-P3b-d2`（b8c686ef…，D1 版） |
 
-**exp 流程（已 GO）**
+**Boot**：`XCMD="glwire_local=1 widget_cacontext_at=900 layers_at=950"`；`GLWIRE_NO_PANEL=1`；`UI_GRACE=900`、`MAXSECS=2400`；`end=ui`、`ui=690s`、`biggest=330924`、`hostframes=3923`、panic=0。
 
-- P3b-D1 的 root.apfs 换 `libhakios.dylib` 92,872 B，重打 root；不设 `SYSTEM`，system.apfs 不动。
-- boot：`widget_cacontext_at=900 layers_at=950`；host **不开 `GLWIRE_WIDGET`**；`GLWIRE_NO_PANEL=1`；`UI_GRACE=600`。
+**探针输出（14 行）**
 
-**判据**
+- `timer 900s scheduled` → **`timer 900s fired`** ✅（延迟生效）。
+- CAContext class/9 class methods/53 instance methods；`CARenderServer*` 全部 present。
+- **`allContexts -> __NSSingleObjectArrayI`，count 1**：
+  ```
+  [0] CAContext 0x141dd2f00
+  context object CAContext cid 0xc0cfe455
+  context 0xc0cfe455 has createImageSlot:hasAlpha: types I36@0:8{CGSize=dd}16B32 (not called: slot/options not guessed)
+  ```
+- **没有** `widget candidate` / `image WxH … nonzero` / `snapshot object` 行。
 
-1. `widget_cacontext_at` timer 到点后，`+allContexts` 真的被调用（不是 init 一次）；
-2. 至少一个 context 对象被打印；
-3. 至少一个快照 `nonzero>0` 且尺寸在 32–4096，打印 `widget candidate`；
-4. 与 **950s 层树**的 155x155 host id 对照（同 boot 的 id，不用上一 boot 的）；
-5. 全空/全黑按 §4.28 的放弃条件处理，不盲调未知 selector。
+**同 boot 950s 层树对照**
 
-- 只有 selector/符号、或纯白/纯黑 → 不算成功。
-- D2 成功后才进 P3b：snapshot 走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。
-- **结果待填；P3 未完成，不要写 D2 成功 / widget 正确。**
+- 155x155 widget host context：**0xbf11dcae、0x7702cd25**；全部 8 个 CALayerHost context：`0xbf11dcae 0x7702cd25 0xd90683b8 0x7354affb 0xbc29fb4 0x5429f1d8 0x774b1266 0x82f51f58`。
+- `allContexts` 的 `0xc0cfe455` **不在其中** → 它是 backboardd 自己的 context，不是 SpringBoard/widget 的。
 
+**判据（逐条）**
+
+| # | 判据 | 结果 |
+|---|---|---|
+| 1 | `widget_cacontext_at` timer 到点后 `+allContexts` 被调用 | **✅** |
+| 2 | 至少一个 context 对象被打印 | **✅（count 1，0xc0cfe455）** |
+| 3 | 至少一个快照 `nonzero>0`、尺寸 32–4096、打印 `widget candidate` | **❌**（`createImageSlot:hasAlpha:` 未调用，slot 未猜；无 image/nonzero） |
+| 4 | 与 950s 层树 155x155 host id 对照 | **❌ 不匹配**（0xc0cfe455 vs 0xbf11dcae/0x7702cd25） |
+| 5 | 全空/全黑按放弃条件处理 | 记录；不盲调未知 selector |
+
+- 截图无绿色 1/4 伪影（0 纯绿）；左右边缘 0/36,000 非黑。
+
+**结论与下一步（D3 建议）**
+
+- **D1 仍未成功**：延迟/selector/`allContexts` 可用，但 `+allContexts` 在 backboardd 里只看得到本进程的 context；**架构上 backboardd 不能枚举 SpringBoard 的 CAContext**。
+- **D3 建议**：把 CAContext 探针移到 **SpringBoard（`inject_sb.c`）**，在同样的 900s 延迟里跑（SpringBoard 是 widget host 的 client，`allContexts` 应能看到 155x155 的 context）；对候选调 `createImageSlot:hasAlpha:`/`createImage` 取 nonzero>0。或继续用显式 id，但必须同 boot 传递（成本更高）。
+- 这是第 2 次 D1 尝试（auto@init、auto@900）；未到 3 次放弃线。**P3 未完成，不要写 D2 成功 / widget 正确。**
 
 ## 五、铁律与提交
 
