@@ -44,7 +44,7 @@
 
 - host 侧 fallback2/3 都执行了（日志 `widget fallback ...`），但 **QEMU 截图来自 guest scanout（SpringBoard/panel），host fallback 画在 offscreen picture**，两者不是同一块像素；host-replay 模式也改不了。见 runbook §4.31；提交 `c3b0371`；代码 `e8a8ee7`、`2de8e65`/`baa0283`。
 - 因此唯一能在 QEMU 截图里看到的路径是 **guest 侧画**：`inject_sb.c` 的 `widget_placeholder=1`，UI 后在 `_SBWallpaperSecureWindow`/root view 的 widget 区域插圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`。
-- fallback4 已证明占位加太早（12:25:47，早于 UI marker 12:27:00）会被盖住；code 正修延迟/bringToFront/root class，待 fallback5。
+- fallback4 已证明占位加太早（12:25:47，早于 UI marker 12:27:00）会被盖住；A1c 改成 30s 首试/每 3s 最多 300 次、找 155x155 host 加到 host.superview 并 bringToFront，sb 110,656 B/md5 `abc8f4f1…`，待 fallback5。
 - 验收判据：fallback5 截图的 widget 区出现 **24px 棋盘 + 3px 白框 + 两条黄对角线**；必须标注 **「占位，不是真 widget 内容」**。
 
 **影响**：

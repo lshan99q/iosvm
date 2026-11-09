@@ -2239,6 +2239,15 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - 截图：widget 区 mean **252**、top `(255,255,255)×210,322`、黄 0、无棋盘/白框/对角线、纯绿 0 → **占位不可见**。
 - 判定：占位加**太早**（UI 未布局），随后 widget host 白底/窗口盖住；或 root 选在 `_SBWallpaperSecureWindow`（在图标/widget 层后面）。code 正修：延迟到 UI 后、每次重试 `bringToFront`、打印 root class/level；待 **fallback5**。
 
+#### A1c / fallback5（已改，未跑）
+
+- sb 库：**110,656 B / md5 `abc8f4f149fdfd0528b6b8cc30d68e48`**；patch **322 行**（code 侧）。
+- 30s 首试；每 3s 重试，最多 **300 次**；可用 `widget_placeholder_at=SECONDS` 覆盖首试时间。
+- 先找 **150–160 / 305–315 pt 且 class/layer 含 `Remote`/`Host`/`Widget`/`Context`** 的 155x155 host；加到 `host.superview`，`frame = host.frame`，叠在 host 之上。
+- 找不到才退 wallpaper / Home / keyWindow root（`bounds≥300x500`、root subviews>1）。
+- 每 5s `bringToFront`，最多 **240 次**；日志带 parent/window class + level。
+- 结果待填；fallback5 未跑，不能写「占位已通过」。
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
@@ -2515,7 +2524,7 @@ tools/glwire/harness/four-cell.sh
 - `WINDOW_FRAMES=0`（八次滑动，约 20s）是脚本默认；`WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800` 由命令行给出。
 - `--dry-run` 只读已有 `/tmp/<label>-{host.log,log,shot.png,drive.txt}` 重算表，不跑 QEMU；当前已做四行验证；**dry-run 数字不是新实测**。
 - 每格产物写到 `OUT`（默认 `/tmp/four-cell`）：`four-cell.md`、`four-cell.csv`、每格日志/截图/drive。
-- **drive-scroll 路径补丁**：当前 `drive-scroll.sh` 第 39 行硬编码 `IOSVM=/home/lshan/DSH-desktop/...`，four-cell 传入的 `IOSVM` 会被覆盖；exp 目前用 `/tmp/p4-harness/` 的副本跑。code 正修 `${IOSVM:-/host/iosvm-work/hakios-xnu-kernel}`；文档中的四格数字若来自副本/补丁，要注明；repo 修好后可原样复跑。
+- **drive-scroll 路径修正**：`drive-scroll.sh` 第 39 行原先硬编码 `IOSVM=/home/lshan/DSH-desktop/...`，four-cell 传入会被覆盖；code `fe521de` 已改为 `${IOSVM:-/host/iosvm-work/hakios-xnu-kernel}`。当前四格数字若来自 `/tmp/p4-harness/` 副本，要注明；repo 现在可原样复跑。
 
 ### 8.3 `0x502` 记账口径
 
