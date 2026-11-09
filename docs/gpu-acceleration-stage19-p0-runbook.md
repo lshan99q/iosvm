@@ -1840,39 +1840,32 @@ UIWindowLayer "colour ( 0 1 )"
 
 ---
 
-### 4.25 s19o-p2e-c2（跑中）：`launchd_proxyless_spawn=0` 强制走 xpcproxy
+### 4.25 s19o-p2e-c2 实测：强制 xpcproxy 后 extension 仍超时（不是 elision；P2 未达成）
 
-> **状态：已派、跑中；结果未回填。** 这一发只验证「是不是 elision 省掉了 xpcproxy」；不改镜像。P2 仍未达成。
+> **状态：已回填（2026-11-09 06:50Z）。C2 失败；P2 未达成。** boot-arg 确实关掉了 elision（extension 全部 `xpcproxy spawned`），但 Gradient 等仍在 spawn 后 **7–11s** 被 `Extension is hanging on launch. Killing.`，`CHECK_IN_TIMEOUT` 共 16 次、`checked in as alive` 0 次。1800s 层树壁纸 subtree 仍 contents=0；截图晚段出现绿色伪影（不是壁纸）。
 
-**镜像**
+**镜像（未重建）**
 
 | 项 | 值 |
 |---|---|
-| system.apfs | 不变：`8bf5f838d52e46d6c8bf77f13a5ad946`（P2e 的 limits 版） |
-| root.apfs | 不变：P2d `b59fcf668707da64c716c3bb76dffab1` |
-| 改动 | **只加 boot-arg** `launchd_proxyless_spawn=0`（强制 extension 走 xpcproxy）；不重建镜像、不改 plist |
+| system.apfs | `8bf5f838d52e46d6c8bf77f13a5ad946`（P2e limits 版，未动） |
+| root.apfs | P2d `b59fcf668707da64c716c3bb76dffab1`（未动） |
+| 改动 | 只加 boot-arg `launchd_proxyless_spawn=0` |
 
-**Boot**
+**Boot**：`XCMD="glwire_local=1 launchd_proxyless_spawn=0 layers_at=1800"`；`GLWIRE_NO_PANEL=1`；`UI_GRACE=1500`、`MAXSECS=3600`；`end=ui`、`ui=690s`、`biggest=991040`、`hostframes=5703`、panic=0。
 
-- `XCMD="glwire_local=1 launchd_proxyless_spawn=0 layers_at=1800"`；`HOST_ENV=GLWIRE_NO_PANEL=1`；`UI_GRACE=1500`、`MAXSECS=3600`。
-- 其余同 P2e：`ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MINSHOT=200000`。
-
-**判据（逐条填，未出结果前不要写通过）**
+**判据（逐条）**
 
 | # | 判据 | 结果 | 证据 |
 |---|---|---|---|
-| 1 | extension 日志出现 **`xpcproxy spawned`**（或明确 xpcproxy 路径） | 待填 | GradientPoster 等 |
-| 2 | 不再在 **~9s** 出现 `Extension is hanging on launch. Killing.` | 待填 | |
-| 3 | 出现 **`checked in as alive`**（>0 次） | 待填 | |
-| 4 | 层树出现 PosterBoard 的 `CALayerHost` / `contents` | 待填 | |
-| 5 | 宿主第二张 **750x1624 非 panel** 纹理 | 待填 | 非 `4294901761` |
-| 6 | 截图背景非纯黑 | 待填 | 左右边缘 __/36,000 |
+| 1 | extension 日志出现 `xpcproxy spawned` | **✅** | `service will always use xpcproxy, elision was disabled by boot-arg`；`xpcproxy spawned with pid 9/45/47/57…`；`elide xpcproxy` = 0 |
+| 2 | 不再在 ~9s 出现 `hanging on launch` | **❌** | Batteries 7.2s（06:20:40.2→06:20:47.4）、News ~10s、**Gradient 11.4s**（06:37:02.2→06:37:13.6） |
+| 3 | `checked in as alive` >0 | **❌** | 0 次；全 log `hanging on launch` 32 次、`CHECK_IN_TIMEOUT` 16 次 |
+| 4 | 层树 PosterBoard `CALayerHost`/`contents` | **❌** | 1800s：405 行、9 window；壁纸 subtree `contents=0`、旁黑层；8 个 CALayerHost 全是 SpringBoard 自己的 context |
+| 5 | 宿主第二张 750x1624 非 panel 纹理 | **❌** | 5,249 张全为 panel `4294901761`（+启动期 1/4/7/10）；无 1125x2436 |
+| 6 | 截图背景非纯黑 | **❌/伪影** | 991,040 B 截图右下 1/4 为**纯绿 `#00FF00`**（750-space x≥375.3、y≥812.7，683,954 px），左边是模糊主屏；绿色是渲染伪影，不是壁纸 |
 
-**判读**
-
-- 若 1–3 成立、4–6 有改善 → elision 是原因之一，继续沿 xpcproxy/check-in 方向；仍不算 P2 达成。
-- 若仍 ~9s 被杀 / `checked in as alive` 仍 0 → **不是 elision**；按约定写「P2 性价比低/需要更多信息」，不要继续加 timeout/改 plist。
-- C2 未出结果前，P2 保持未达成；不要写「P2 已修复」。
+**判读**：命中「仍 ~9s 被杀 / alive 仍 0」分支 → **不是 elision**。按约定 P2 性价比低/需更多信息，**停止 P2 timeout/xpcproxy 方向**，转 P3。附带：本发晚段画面有绿色右下象限伪影，以后遇到 991 KB 级截图先查 panel 完整性，不要当壁纸证据。
 
 ### 4.26 P3 MVP 准备：guest 库/patch 就绪，尚未执行
 
