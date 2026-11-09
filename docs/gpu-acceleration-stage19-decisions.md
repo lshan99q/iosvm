@@ -1,0 +1,143 @@
+# Stage 19 收口决定（D1–D5）
+
+- **Status:** Accepted
+- **Date:** 2026-11-09
+- **Owner:** lshan（总执行官）
+- **Scope:** stage 19 P2/P3 收口、extension check-in 移交、剩余时间转 P4
+- **Supersedes:** 无（本文件是 stage 19 的收口决定，不推翻历史实验记录）
+- **Related:** `docs/gpu-acceleration-stage19-p0-runbook.md`、`docs/gpu-acceleration-stage19-plan.md`
+
+> 本文件只记录决定与依据；实验数字仍以 runbook 各节的原始日志/报告为准。每条决定都给出「何时可推翻」，避免以后把收口当成永久结论。
+
+---
+
+## D1. P3 真路径 = 不可行，提前收口
+
+**决定**：P3 的「surface → opcode 202 → 真 widget」与「CAContext 快照」两条真路径都判 **不可行**，**提前收口**，不等原时间盒 2026-11-10 14:06。
+
+**依据**（四条独立证据）：
+
+- **E1 — surface 枚举 30 个面无候选**：900s 枚举到 30 个存活 MiniIOSurface；id1/2 是 750x1624 显示面，id3 是 **184x124 BGRA**（stage11 旧 widget snapshot），id4 是 **312x202 LA08**（文字覆膜），id5–30 是 backboardd 的 180x180 图标/装饰面。**没有 155x155 pt（310x310@2x / 465x465@3x）或任何 widget 尺寸候选**；同 boot 950s 层树 155x155 `CALayerHost` = `0x500b566f`/`0x7f535c4c`，与枚举表任何 id 无对应。见 runbook §4.30；提交 `44f602a` / `2acbd0d`；日志 `logs/s19o-p3-surface-enum/`。
+- **E2 — `+allContexts` 按进程隔离**：backboardd 只看到自己的 1 个 context（`0xc0cfe455`，与 950s 层树 155x155 `0xbf11dcae`/`0x7702cd25` 不匹配）；SpringBoard 的 `+allContexts` 有 16 个（含 6 个自己的 window context），但**不含** 155x155 widget host（`0x4741275c`/`0xccf65063`）。见 runbook §4.28 D2/D3；提交 `64c8896`、`f339014`。
+- **E3 — 这代 CAContext 没有零参快照**：没有零参 `createImage`/`createCGImage`/`snapshot`；只有 `createImageSlot:hasAlpha:`（创建 slot，不是取图）。见 runbook §4.28 D3；提交 `f339014`。
+- **E4 — extension exec 后 ~0.5s 死亡，`CheckIn` 未发出**：C2 force xpcproxy 日志里，pid 57 到 `running`/`INIT` 后出现 **`Failed to send exception EXC_CORPSE_NOTIFY. error code: 5`**，约 0.5s 后 `Extension is hanging on launch. Killing.`；`CheckIn` 从未发出 → 实时 widget 内容不可得。见 runbook「附录：extension check-in 判定点」；提交 `9ce6e5b`；P2e/C2 §4.24/§4.25（`f1261b4`/`eac8128`）。
+
+**影响**：
+
+- 停止增加 surface/CAContext/202/rect 实验；不再猜 `createImageSlot` 参数。
+- P3 剩余时间只做 **guest-side placeholder（D2）**，然后转 P4（D5）。
+- P2/P3 的共同前置变成「extension 进程必须活到 `CheckIn`」（D4，阶段 20）。
+
+**何时可推翻**：
+
+1. extension check-in 修复（D4），且同 boot 能拿到 widget extension 的实时内容；或
+2. Apple/OS 侧出现新的、可用的零参快照/跨进程 render-server API，并有可复现证据；或
+3. 有新的 surface 在 widget 尺寸出现（310x310/465x465 或明确 155x155 pt），并与层树 host 对上。
+
+---
+
+## D2. P3 交付物 = guest-side placeholder（拉面）
+
+**决定**：P3 的交付物定为 **guest-side placeholder**（拉面），不是真 widget 内容。P3 最终结论写 **「不可行（真路径）+ 已交付 fallback」**，不写「可行」；fallback4 截图未回填前，写作「fallback 交付（待 fallback4 截图）」或「已交付 fallback（待验收）」，不要写「P3 通过」。
+
+**依据**：
+
+- host 侧 fallback2/3 都执行了（日志 `widget fallback ...`），但 **QEMU 截图来自 guest scanout（SpringBoard/panel），host fallback 画在 offscreen picture**，两者不是同一块像素；host-replay 模式也改不了。见 runbook §4.31；提交 `c3b0371`；代码 `e8a8ee7`、`2de8e65`/`baa0283`。
+- 因此唯一能在 QEMU 截图里看到的路径是 **guest 侧画**：`inject_sb.c` 的 `widget_placeholder=1`，UI 后在 `_SBWallpaperSecureWindow`/root view 的 widget 区域插圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`。
+- 验收判据：fallback4 截图的 widget 区出现 **24px 棋盘 + 3px 白框 + 两条黄对角线**；必须标注 **「占位，不是真 widget 内容」**。
+
+**影响**：
+
+- P3 可交付一个可见占位，但不得冒充真 widget；P3 状态是「真路径不可行 + fallback 交付（待截图）」。
+- host 侧 fallback 保留为分析用，不再作为视觉交付路径。
+
+**何时可推翻**：
+
+1. fallback4 截图不出现占位 → fallback 未交付，D2 需重开；
+2. D1 的推翻条件成立，真 widget 内容可得 → 用真内容替代占位，D2 失效。
+
+---
+
+## D3. P2 = 关闭，记「未达成」
+
+**决定**：P2 关闭，记 **未达成**；不再投入 P2 的 timeout/xpcproxy/daemon job 方向。
+
+**依据**：
+
+- 四条常规路径走完：
+  1. **P2d 四 job**（profiled/powerlogHelperd/Video+ImageConversion）：仅 profiled 成功，powerlogHelperd plist 被 launchd 拒绝，Photos 仍 error 22；层树 contents 仍 0 → 依赖不是原因。见 §4.22；提交 `fdf964a`。
+  2. **P2e C1**（`ExtensionWatchdogTimeout=120`）：limits plist 在镜像里且可解析，但 ~9s 仍被杀，120s 未生效。见 §4.24；提交 `f1261b4`。
+  3. **P2e C2**（`launchd_proxyless_spawn=0` 强制 xpcproxy）：boot-arg 生效（`xpcproxy spawned`、`elide xpcproxy`=0），但 Batteries 7.2s、Gradient 11.4s 后仍 `CHECK_IN_TIMEOUT`。见 §4.25；提交 `eac8128`。
+  4. **P2 根因审计**：extension check-in timeout 是系统性（18 个扩展被 5–13s 杀），与 P3 同源。见 §4.23/§4.24/§4.25；提交 `e3957d3`/`f1261b4`/`eac8128`。
+- 结论：P2 的 lookup 已修好、PosterBoard 能起来，但壁纸内容需要 extension 存活；这与 P3 共同阻塞。
+
+**影响**：
+
+- P2 不再占用 GPU/构建时间；不阻塞 P4。
+- 若 extension 修复，P2 可重开（lookup/geometry 的成果仍在）。
+
+**何时可推翻**：
+
+1. extension check-in 修复（D4）后，P2d/P2e 的条件重新具备；或
+2. 找到不依赖 extension 的壁纸静态路径（且不违反 D1/D2 的收口）。
+
+---
+
+## D4. extension check-in 独立立项（阶段 20 候选）
+
+**决定**：把 **extension check-in** 作为独立问题移交阶段 20 候选，不在 stage 19 P2/P3 内继续投入。
+
+**问题陈述**：
+
+- **现象**：同一 boot **18 个 extension 在 5–13s 被 `Extension is hanging on launch. Killing.` 杀**；GradientPoster/Batteries/WallpaperKit.CollectionsPoster 等都在 spawn 后 7–11s 收到 `XPC_EXIT_REASON_EXTENSION_CHECK_IN_TIMEOUT`；`checked in as alive` 0 次。
+- **已试负结果**：
+  - `ExtensionWatchdogTimeout=120`（limits plist）**无效**；C1 仍是 ~9s 被杀（§4.24）。
+  - **force xpcproxy**（`launchd_proxyless_spawn=0`）**不是 elision**；xpcproxy 路径下仍 7–11s 死（§4.25）。
+  - **profiled/powerlog/MediaConversion job 无关**；P2d 四 job 只让 profiled 起来，壁纸层仍 contents=0（§4.22）。
+- **唯一值得试的开关**：`ExtensionWatchdog=false`（bool，不是 timeout）关闭 watchdog，暴露真实 exit code；用于确认进程是 exec 后崩溃还是 check-in 协议问题。
+- **需要的权限/工具**：能注入/编译 extension 侧或 launchd 侧（现有 guest 工具链 `IOSVM_USE_LLD=1`、`/private/etc/com.apple.xpc.launchd.limits.plist`）；当前没有直接改 extension 二进制的权限/产物。
+- **判定点**：launchd 等待的是 `CheckIn` 消息；C2 日志显示进程在 `exec` 后/进入 `xpc_main` 前出现 `EXC_CORPSE_NOTIFY error 5`，不是「动作太慢」。见 runbook「附录：extension check-in 判定点」（`9ce6e5b`）。
+
+**影响**：
+
+- stage 19 不再为 extension 花时间；P2/P3 的剩余工作转 P4。
+- 阶段 20 若立项，先做 `ExtensionWatchdog=false` 的 30 分钟限时实验，不做无限深挖。
+
+**何时可推翻**：
+
+1. 找到不需要 extension 存活的替代内容路径；或
+2. `ExtensionWatchdog=false` 暴露的 exit code 指向一个可在阶段 19 时间盒内修的具体 bug（需 owner 重新排期）。
+
+---
+
+## D5. 剩余时间全部转 P4 四格表实跑
+
+**决定**：stage 19 剩余时间全部转 **P4 四格表实跑**（四份构建 × 20s 滚动窗口、host `0x502` 记账、`make test`、文档/推送）。
+
+**依据/口径**：
+
+- 四份构建定义与命令见 runbook §八：cell1 纯本地（`GL=1 CONFIGD=1`）、cell2 按引用（`GLWIRE_LOCAL=1`）、cell3 W1.5（`GLWIRE_NO_INPLACE=1`）、cell4 W1.5+W3（in-place 开）。
+- 每格同 `QEMU_SMP=1`、同触摸脚本、`WINDOW_AFTER=60`、`WINDOW_FRAMES=0`（约 20s）；`host 0x502` 只数宿主日志，判据 0；`make test` = `test-open` + `test-gpu`。
+- `four-cell.sh` 的 `--dry-run` 只验证调度/记账，**不是实测**；四发真 QEMU 后才填四格表。驱动 `e8a8ee7`；dry-run 自检见 `9ce6e5b`。
+
+**影响**：
+
+- P2/P3/D 系列不再新增实验；P4 是 stage 19 的最终交付项。
+- 四格结果未出前，不写「P4 完成/四格数字」。
+
+**何时可推翻**：
+
+1. 四份镜像无法构建/无 GPU 资源，P4 被硬阻塞（需 owner 决定）；
+2. owner 重新排期，优先 D4 的 extension 实验。
+
+---
+
+## 追溯表
+
+| 决定 | 主要证据 | runbook 章节 | 关键提交 |
+|---|---|---|---|
+| D1 | E1 surface 枚举；E2 allContexts；E3 无零参 snapshot；E4 CheckIn 未发出 | §4.28、§4.30、附录 extension check-in | `44f602a`、`2acbd0d`、`64c8896`、`f339014`、`9ce6e5b` |
+| D2 | host fallback2/3 offscreen；guest-side placeholder | §4.29、§4.31 | `e8a8ee7`、`2de8e65`、`c3b0371` |
+| D3 | P2d/P2e C1/C2 四路径 | §4.22–§4.25 | `fdf964a`、`f1261b4`、`eac8128`、`b07d2da` |
+| D4 | 18 extension 被 5–13s 杀；timeout/xpcproxy/job 负结果 | §4.24、§4.25、附录 extension check-in | `9ce6e5b`、`f1261b4`、`eac8128` |
+| D5 | 四格口径/脚本/dry-run | §八 | `e8a8ee7`、`9ce6e5b`、`b07d2da` |

@@ -2101,9 +2101,9 @@ UIWindowLayer "colour ( 0 1 )"
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
 - **P3 未完成；P2 仍未达成。**
 
-### 4.29 P3 时间盒收口：真路径不可行，fallback 转 guest-side 待验收（2026-11-10 14:06 到期）
+> **状态：正式决定 D1–D5 已下（见 `docs/gpu-acceleration-stage19-decisions.md`）。真路径判定为「不可行」并提前收口；fallback 转 guest-side placeholder，fallback4 截图待回填。**
 
-> **状态：证据已收齐，真路径判定为「不可行」；host fallback3 已证明 host 侧不可见，fallback 转 guest-side placeholder，待实现/验收。** P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
+> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D5**。P3 最终结论写「不可行（真路径）+ fallback 交付（待 fallback4 截图）」，不要写「可行」。 P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2154,8 +2154,8 @@ UIWindowLayer "colour ( 0 1 )"
 |---|---|
 | 判定时间 | 2026-11-10 14:06（到期后填实际） |
 | 真路径结论 | **不可行**（证据链见上：surface 枚举/allContexts/无零参 snapshot/extension timeout） |
-| 最终三选一 | **不可行**（若 owner 选择再攻 extension，则改为「需要更多信息」） |
-| fallback 交付 | 待 fallback3：出图 = 已交付；不出图 = 未交付（仍不是真路径） |
+| 最终三选一 | **不可行（真路径）+ fallback 交付（待 fallback4 截图）**；若 owner 选择再攻 extension，则改为「需要更多信息」 |
+| fallback 交付 | 待 guest-side fallback4：出图 = 已交付（占位，不是真 widget）；不出图 = 未交付 |
 | 需要 owner 决定 | 是否再攻 extension check-in timeout（P2/P3 共同前置） |
 
 **fallback 实现（不是 P3 通过）**
@@ -2571,6 +2571,7 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 11. **不再把 `createImageSlot:hasAlpha:` 当快照**：它是**创建 slot**，不是取图；slot/options 参数不要猜。
 12. **不再把 widget host 的 CAContext 当 SpringBoard/backboardd 自己的**：它属于 **widget extension 进程**；跨进程只能走 render server 或显式 id 传递。
 13. **不再靠调 surface 3 的 rect/selector 修 widget 内容**：P3a 的 surface 3 是空白白块；P3 已转 fallback（静态/占位 widget）。
+14. **host 侧画的东西在 QEMU 截图里结构性不可见**：截图 = guest scanout（SpringBoard/panel），host `widget compose`/fallback 只进 **offscreen picture**；fallback2（local panel）和 fallback3（host-replay）都因此看不到。以后做可视验收必须先确认像素归属，host 侧 fallback 只作分析用。
 
 ## 附录 C：编译环境（工具链阻塞已永久解除）
 
@@ -2664,3 +2665,18 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 ```
 
 `host 0x502` 只数宿主日志 `glerror 0x502` 行；`ui/frames/fps/span/shot B` 与 CSV 同表。正式四格仍等 P4 镜像。
+
+
+## 附录 D：阶段 19 收口决定 D1–D5（摘要）
+
+完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**。
+
+| ID | 决定 | 一句话依据 |
+|---|---|---|
+| D1 | **P3 真路径 = 不可行，提前收口** | surface 枚举 30 面无候选；`+allContexts` 按进程隔离；无零参 snapshot；extension exec 后 ~0.5s 死亡、`CheckIn` 未发出（`EXC_CORPSE_NOTIFY` error 5） |
+| D2 | **P3 交付 = guest-side placeholder（拉面）** | host fallback2/3 在截图里不可见（guest scanout vs offscreen picture）；唯一可见路径是 `inject_sb.c` 的 `widget_placeholder=1`；结论写「不可行 + fallback 交付（待 fallback4 截图）」，不写可行 |
+| D3 | **P2 = 关闭，记未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in |
+| D4 | **extension check-in 移交阶段 20 候选** | 18 个 extension 5–13s 被杀；timeout 120 无效、force xpcproxy 仍死、job 无关；唯一值得试 `ExtensionWatchdog=false` 暴露真实 exit code |
+| D5 | **剩余时间全部转 P4 四格表实跑** | 四份构建 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
+
+> 追溯：D1 见 §4.28/§4.30/附录 extension check-in；D2 见 §4.29/§4.31；D3 见 §4.22–§4.25；D4 见 §4.24/§4.25/附录 extension check-in；D5 见 §八。提交列表见 decisions.md 的追溯表。
