@@ -1838,6 +1838,89 @@ UIWindowLayer "colour ( 0 1 )"
 - **P3 正式开工**（不等待 P2）：guest 库已可编；MVP = boot-arg 固定 surface ID + backboardd `IOSurfaceLookup` + host **opcode 202 / `GLWIRE_WIDGET`**。
 - **P2 不阻塞 P3**；P1 暂停；P0 仍 **2/3**，P2 未达成。
 
+---
+
+### 4.25 s19o-p2e-c2（跑中）：`launchd_proxyless_spawn=0` 强制走 xpcproxy
+
+> **状态：已派、跑中；结果未回填。** 这一发只验证「是不是 elision 省掉了 xpcproxy」；不改镜像。P2 仍未达成。
+
+**镜像**
+
+| 项 | 值 |
+|---|---|
+| system.apfs | 不变：`8bf5f838d52e46d6c8bf77f13a5ad946`（P2e 的 limits 版） |
+| root.apfs | 不变：P2d `b59fcf668707da64c716c3bb76dffab1` |
+| 改动 | **只加 boot-arg** `launchd_proxyless_spawn=0`（强制 extension 走 xpcproxy）；不重建镜像、不改 plist |
+
+**Boot**
+
+- `XCMD="glwire_local=1 launchd_proxyless_spawn=0 layers_at=1800"`；`HOST_ENV=GLWIRE_NO_PANEL=1`；`UI_GRACE=1500`、`MAXSECS=3600`。
+- 其余同 P2e：`ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MINSHOT=200000`。
+
+**判据（逐条填，未出结果前不要写通过）**
+
+| # | 判据 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | extension 日志出现 **`xpcproxy spawned`**（或明确 xpcproxy 路径） | 待填 | GradientPoster 等 |
+| 2 | 不再在 **~9s** 出现 `Extension is hanging on launch. Killing.` | 待填 | |
+| 3 | 出现 **`checked in as alive`**（>0 次） | 待填 | |
+| 4 | 层树出现 PosterBoard 的 `CALayerHost` / `contents` | 待填 | |
+| 5 | 宿主第二张 **750x1624 非 panel** 纹理 | 待填 | 非 `4294901761` |
+| 6 | 截图背景非纯黑 | 待填 | 左右边缘 __/36,000 |
+
+**判读**
+
+- 若 1–3 成立、4–6 有改善 → elision 是原因之一，继续沿 xpcproxy/check-in 方向；仍不算 P2 达成。
+- 若仍 ~9s 被杀 / `checked in as alive` 仍 0 → **不是 elision**；按约定写「P2 性价比低/需要更多信息」，不要继续加 timeout/改 plist。
+- C2 未出结果前，P2 保持未达成；不要写「P2 已修复」。
+
+### 4.26 P3 MVP 准备：guest 库/patch 就绪，尚未执行
+
+> **状态：库和 patch 已就绪，P3 尚未执行、未换进镜像。** 这一节只记录准备与风险，不是 P3 结果。
+
+**guest 库（工具链编出）**
+
+| 库 | 新大小 | 旧大小 | 备份（exp 侧） | strings |
+|---|---:|---:|---|---|
+| `libhakios.dylib` | **90,720 B** | 90,128 B | `/tmp/libhakios.pre-p3.dylib` | `eagl_remote_widget_upload`、`widget_surface=`、`widget_rect=`、`widget_scale=` |
+| `libhakios.gl.dylib` | **400,720 B** | 401,816 B | `/tmp/libhakios.gl.pre-p3.dylib` | `_eagl_remote_widget_upload` |
+
+- patch：`/host/iosvm/logs/s19o-p3-guest-p3.patch`（**240 行**）。
+- 两个库尚未替换进 root.apfs/system.apfs；P3 未 boot。
+
+**MVP 链路（按 lead 的方案）**
+
+```
+boot-arg 固定 surface ID
+  -> backboardd IOSurfaceLookup
+  -> host opcode 202 / GLWIRE_WIDGET
+```
+
+**建议参数**
+
+- boot：`widget_surface=3 widget_rect=46,142,309,309`（另有 `widget_scale=` 可用）。
+- host：`GLWIRE_WIDGET=1`。
+- 仍用 local composition / `GLWIRE_NO_PANEL=1` 的现有测量配方，只加上述变量；不要同时改 trim/其它变量。
+
+**关键风险：surface 3 的可行性警告**
+
+- `surface 3` 是 **184x124**，@2x = **92x62 pt**；层树里 host 的是 **155x155**，尺寸对不上。
+- 可能是 **stage 10–12 的另一 layout snapshot**（不是当前主屏 widget 的 surface）。
+- 因此 MVP **只验证 `surface → opcode 202 → host` 这条链路**：
+  - 旧内容、拉伸、全黑都**不能证明 widget 正确**；
+  - 只要 host 收到 202/纹理、链路通，就算 MVP 链路验证，不要求像素语义正确。
+- 最小替代：**CAContext snapshot**（约 1–2 天）；在 surface 3 链路不通或语义完全不对时再转。
+
+**判据（P3 执行时填）**
+
+1. host 日志出现 opcode 202 / `GLWIRE_WIDGET` 的纹理上传；
+2. 宿主收到 **184x124**（或 `widget_rect` 指定尺寸）的纹理，内容非全零；
+3. 截图对应 rect 有变化（允许拉伸/旧内容，记录偏差）；
+4. 不要求 `312x202`/`184x124` 与当前 widget 位置完全吻合；不吻合就记录为「链路通、语义不对」。
+
+**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3 未执行，P2-C2 未出结果；P0 仍 2/3。
+
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西

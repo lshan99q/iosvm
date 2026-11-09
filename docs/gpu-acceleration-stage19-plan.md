@@ -40,8 +40,8 @@
 |---|---|---|---|
 | P0 | 标签是文字（**已达成 2/3：v7+v9**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
-| P2 | 壁纸（**暂停：P2e C1 limits 未生效（仍 ~9s 被杀）；停止 timeout/plist；code 30 分钟 C2 离线限时；P2 不阻塞 P3；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
-| P3 | widget（**进行中：MVP boot-arg 固定 surface ID + backboardd IOSurfaceLookup + host opcode 202/`GLWIRE_WIDGET`**） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
+| P2 | 壁纸（**暂停：C2 单变量 `launchd_proxyless_spawn=0` 跑中；若仍 9s 被杀则「不是 elision，P2 性价比低/需更多信息」；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
+| P3 | widget（**准备就绪、未执行：guest 库 90,720/400,720 B、patch 240 行；MVP surface 3 + opcode 202；surface 3 尺寸与层树 155x155 对不上，仅验链路**） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
 | P4 | 收尾 | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
 
 ---
@@ -299,7 +299,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 | D1 | P0 诊断 + VBO 影子/快照 | 宿主日志 attrib 3 回到 0.125..0.5 |
 | D2 | P1 绕开 darken → 修 backdrop | 能读出 App 名称的截图；**实际 P1a：`SKIP=13` Weather 562→44；全标签 101.7%（重分布）；P1b `TC0_SANITIZE` 53.9% 但 Weather 719→741；P1c 点带在 glyph tile alpha；P1d end 清底部出竖条；P1e start 清空白顶行、band 73.6% 但分标签有升有降；trim 方向停止，P1 暂停** |
 | D3 | 三发验证 | ≥2/3 发标签为文字、截图 ≥300 KB、diff ≥95%；**实际 v7 99.85%、v9 99.98%（2/3）；v8 89.53% 因 dump 落在 UI 加载动画，不计入** |
-| D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；P2c-timer 层树通但 contents=0；P2d 依赖对照失败；P2e C1 limits 未生效（Gradient spawn 后 ~9s 仍被杀，50 次 CHECK_IN_TIMEOUT、0 次 checked in as alive）；1800s 层树仍 405 行/contents=0；6,039 张 750x1624 全 panel、背景纯黑；P2 未达成；停止 C1，C2 30 分钟限时** |
+| D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；P2c-timer 层树通但 contents=0；P2d 依赖对照失败；P2e C1 limits 未生效（~9s 仍被杀，50 次 CHECK_IN_TIMEOUT、0 次 checked in as alive）；C2 `launchd_proxyless_spawn=0` 跑中；P2 未达成** |
 | D5–D6 | P3 widget（时间盒） | 可行/不可行结论 |
 | D7 | P4 四格表 + 收尾 | 四个数字 + `make test` + 推送 |
 
@@ -308,8 +308,8 @@ glwire: label draw #74 ...  866 nonzero pixels
 P0 已达成 2/3（v7+v9），但只覆盖「名称上屏」。下一阶段按 P1 → P2 → P3：
 
 - **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1e：FNV 证明 upload row0=视觉顶部，`TRIM_FROM=start` 清的是空白顶行；band 6989→5146（73.6%）但 Wallet +1244%、Health +70%、Photos +81%，trim 不是干净修复。停止 trim，转查 90 高背板/复合层；P1 方向暂停，优先 P2 依赖/P3。P1 未修复。**
-- **P2 壁纸**：P2 修好 lookup、PosterBoard running；P2b 触发失败；P2c-alt/alt2 证明跨进程 notify 不可用。P2c-timer timer/层树通但 contents=0；P2d 四 job 仅 profiled 成功，依赖不是原因。**根因（§4.23）**：18 个 extension 全被 check-in watchdog 杀（5–13s；GradientPoster spawn→kill 7.0s）；900s 层树 contents=0 是时序，不是永久不接。**P2e C1 失败（§4.24）**：system `8bf5f838…`、limits plist 691 B 可解析，但 `ExtensionWatchdogTimeout=120` 未生效；Gradient spawn 后 **~9s** 仍被 `hanging on launch` 杀；全 log **50 次** CHECK_IN_TIMEOUT、**0 次** `checked in as alive`；1800s 层树 405 行、contents=0，6,039 张 750x1624 全 panel、背景纯黑。**路线**：停止加 timeout/改 plist；code 做 30 分钟 C2 离线限时（xpcproxy/persona/check-in）；P2 不阻塞 P3，P1 暂停，P0 仍 2/3。
-- **P3 widget**：正式开工（不等 P2）；guest 库已可编。MVP = boot-arg 固定 surface ID + backboardd `IOSurfaceLookup` + host **opcode 202 / `GLWIRE_WIDGET`**；判据仍是 `312x202`/`184x124` 以纹理进宿主，否则交付拉面最小实现（时间盒 2 天）。
+- **P2 壁纸**：P2 修好 lookup、PosterBoard running；P2b 触发失败；P2c-alt/alt2 证明跨进程 notify 不可用。P2c-timer timer/层树通但 contents=0；P2d 四 job 仅 profiled 成功，依赖不是原因。**根因（§4.23）**：18 个 extension 全被 check-in watchdog 杀（5–13s；GradientPoster spawn→kill 7.0s）；900s 层树 contents=0 是时序，不是永久不接。**P2e C1 失败（§4.24）**：limits plist 691 B 可解析，但 `ExtensionWatchdogTimeout=120` 未生效；Gradient spawn 后 **~9s** 仍被杀；全 log **50 次** CHECK_IN_TIMEOUT、**0 次** `checked in as alive`；1800s 层树 405 行、contents=0，6,039 张 750x1624 全 panel、背景纯黑。**C2（§4.25，跑中）**：boot-arg `launchd_proxyless_spawn=0`，不改镜像；判据 `xpcproxy spawned`、不再 9s 杀、`checked in as alive`、层树 CALayerHost/contents、第二张 750x1624 非 panel、截图非黑；若仍死则「不是 elision，P2 性价比低/需更多信息」。停止加 timeout/改 plist；P2 不阻塞 P3，P1 暂停，P0 仍 2/3。
+- **P3 widget**：**准备就绪、未执行**；guest 库已编出 `libhakios.dylib` 90,720 B（旧 90,128，备份 `/tmp/libhakios.pre-p3.dylib`）、`libhakios.gl.dylib` 400,720 B（旧 401,816，备份 `/tmp/libhakios.gl.pre-p3.dylib`）；patch `logs/s19o-p3-guest-p3.patch` 240 行，strings 含 `widget_surface=`/`widget_rect=`/`widget_scale=`/`eagl_remote_widget_upload`。MVP = boot-arg 固定 surface ID + backboardd `IOSurfaceLookup` + host **opcode 202 / `GLWIRE_WIDGET`**；建议 `widget_surface=3 widget_rect=46,142,309,309`、`GLWIRE_WIDGET=1`。**风险**：surface 3 是 184x124 @2x=92x62 pt，与层树 host 155x155 对不上，可能来自 stage10–12 的旧 layout snapshot；MVP 只验 `surface→202→host` 链路，旧内容/拉伸/全黑不能证明 widget 正确；最小替代是 CAContext snapshot（1–2 天）。P3 未执行。
 - **回归基线**：不要用 v8 的动画帧当基线（v8 的 panel 已完整、picture 还停在前一状态，89.53% 是采样时刻问题）；用 v7/v9 这类静态时刻，或给 dump 加「连续两帧 panel/picture 稳定」门槛。
 
 ---
