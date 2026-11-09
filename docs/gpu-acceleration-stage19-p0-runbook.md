@@ -2456,12 +2456,13 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 |---|---|---|---|
 | cell1 纯本地 | 没有记录器，guest 自己画 | `GL=1 CONFIGD=1`（无 `GLREMOTE`/`GLWIRE_*`） | `/tmp/root-local.apfs` |
 | cell2 按引用 | guest 也画，surface 按引用上传 | `GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1` | `/tmp/root-byref.apfs` |
-| cell3 W1.5 | remote_only，host `--no-panel` 重放 | `GL=1 GLREMOTE=1 GLWIRE_NO_INPLACE=1 CONFIGD=1` | `/tmp/root-w15.apfs` |
-| cell4 W1.5+W3 | 同 W1.5，打开 in-place 行写 | `GL=1 GLREMOTE=1 CONFIGD=1`（不要 `GLWIRE_NO_INPLACE`） | `/tmp/root-w15w3.apfs` |
+| cell3 W1.5 | remote_only，host `--no-panel` + `GLWIRE_NO_INPLACE=1` 重放 | `GL=1 GLREMOTE=1 CONFIGD=1` | `/tmp/root-w15.apfs` |
+| cell4 W1.5+W3 | 同 cell3 镜像，host 打开 in-place 行写 | 同 cell3 构建 | `/tmp/root-w15.apfs`（同一份） |
 
 - 所有 guest 构建统一 `PREBUILT=1 IOSVM_USE_LLD=1 RC=rc.vtop`；不要在一个 boot 里换镜像。
 - `GLWIRE_LOCAL=1` 的构建把 `/redwood/etc/glwire_local` 写进镜像（guest 本地绘制）；cell3/4 的 host 需要 `GLWIRE_NO_PANEL=1` 走重放。
-- 镜像尺寸/内容不同，**四格必须各用各的 image**；当前 `/tmp/root-local.apfs`、`root-byref.apfs`、`root-w15.apfs`、`root-w15w3.apfs` **均不存在**，先按下面命令构建；不能用同一个 root.apfs 冒充四格。
+- **cell3/cell4 镜像相同是预期**：`GLWIRE_NO_INPLACE` 是 host 运行 env，不是 build env；两格只差 host `HOST_ENV`，不要为它们编两份镜像。
+- cell1/cell2/cell3 各自一份镜像；**cell3 与 cell4 共用 `/tmp/root-w15.apfs`**（host env 不同）。当前三份 `/tmp/root-local.apfs`、`root-byref.apfs`、`root-w15.apfs` **均不存在**，先按下面命令构建；不能把 cell1/2/3 复制成同一份冒充四格。
 
 **构建命令（每格一份 root.apfs；system.apfs 不参与四格）**
 
@@ -2476,13 +2477,9 @@ cp root.apfs /tmp/root-local.apfs
 PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1 RC=rc.vtop ./build.sh
 cp root.apfs /tmp/root-byref.apfs
 
-# cell3 W1.5（W3 关）
-PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 GLWIRE_NO_INPLACE=1 CONFIGD=1 RC=rc.vtop ./build.sh
-cp root.apfs /tmp/root-w15.apfs
-
-# cell4 W1.5+W3（in-place 开）
+# cell3/cell4 共用一份 W1.5 构建；W3 由 host env 决定，不重编
 PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
-cp root.apfs /tmp/root-w15w3.apfs
+cp root.apfs /tmp/root-w15.apfs
 ```
 
 > 每次 `build.sh` 也会处理 system.apfs；四格只用 root.apfs。不要把一个 root.apfs 复制成四份冒充四格；四个 env 组合必须分别构建。
@@ -2497,8 +2494,8 @@ cd /host/iosvm
 CELL1_IMAGE=/tmp/root-local.apfs  CELL1_LABEL=cell1-pure \
 CELL2_IMAGE=/tmp/root-byref.apfs  CELL2_LABEL=cell2-byref \
 CELL3_IMAGE=/tmp/root-w15.apfs    CELL3_LABEL=cell3-w15 \
-CELL4_IMAGE=/tmp/root-w15w3.apfs  CELL4_LABEL=cell4-w15w3 \
-CELL3_HOST_ENV="GLWIRE_NO_PANEL=1" \
+CELL4_IMAGE=/tmp/root-w15.apfs    CELL4_LABEL=cell4-w15w3 \
+CELL3_HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1" \
 CELL4_HOST_ENV="GLWIRE_NO_PANEL=1" \
 WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800 \
 tools/glwire/harness/four-cell.sh

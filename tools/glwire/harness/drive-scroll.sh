@@ -36,8 +36,8 @@
 #      WINDOW_FRAMES=0 WINDOW_SPAN=120 WINDOW_CLOCK=host WINDOW_AFTER=0
 #   /tmp/<label>.log / -host.log / -shot.png as boot-measure.sh; plus /tmp/<label>-drive.txt
 set -u
-IOSVM=/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel
-GLWIRE=/home/lshan/DSH-desktop/iosvm/tools/glwire
+IOSVM=${IOSVM:-/host/iosvm-work/hakios-xnu-kernel}
+GLWIRE=${GLWIRE:-/host/iosvm/tools/glwire}
 MINSHOT=${MINSHOT:-300000}
 NOUI_BY=${NOUI_BY:-780}
 REQUIRE_HOST_FRAMES=${REQUIRE_HOST_FRAMES:-1}
