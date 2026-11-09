@@ -1932,66 +1932,48 @@ UIWindowLayer "colour ( 0 1 )"
 
 ---
 
-### 4.28 P3b-D1 探针：CAContext 快照（未执行/跑中，结果待填）
+### 4.28 s19o-p3b-d1 实测：CAContext 探针拿到能力面，但没拿到对象/快照（D1 未成功）
 
-> **状态：探针代码/库已备，exp 尚未回填结果。** 这一发只回答「能不能拿到 CAContext 对象和非空快照」；不合成、不发 opcode 202、不证明 widget 正确。
+> **状态：已回填（2026-11-09 08:06Z）。D1 未成功。** 探针证明 `CAContext` 类存在、关键 selector/符号都在，但**没有任何 context 对象、快照或 nonzero**：`allContexts` 因 type-encoding 检查没被调用；真实 selector 是 `contextWithId:`（小写 d），探针找的是 `contextWithID:` 等；且探针只在 backboardd init（~20s）跑一次，而 widget context 到 UI 后才出现、id 每 boot 变。
 
-**代码（backboardd `inject.c`）**
-
-- boot-arg：**`widget_cacontext=0x<id>`**；`auto` / `1` 用于打印 **CAContext 全局表**（先看有哪些 context）。
-- 运行时按 **type encoding** 调候选 selector，不盲调：
-  - `contextWithID:`
-  - `objectForContextID:`
-  - `contextForID:`
-  - 拿到对象后试零参 `createImage` / `createCGImage` / `snapshot`
-- 打印内容：
-  - 类名、selector 是否存在/返回值；
-  - CGImage 的 **width/height/bpp/bpr/data bytes**；
-  - **前 16 字节** 与 **nonzero 像素数/比例**。
-- `CARenderServerSnapshot` 等私有符号**只 `dlsym` 打印 present/absent**，不直接调用。
-
-**库/patch**
+**镜像**
 
 | 项 | 值 |
 |---|---|
-| `libhakios.dylib` | **92,208 B**（P3a 90,720，备份 `/tmp/libhakios.p3a.dylib`） |
-| `libhakios.gl.dylib` | 仍 **400,720 B** |
-| 新增链接 | `-framework CoreGraphics` |
-| patch | `/host/iosvm/logs/s19o-p3-d1.patch`（**263 行**） |
+| root.apfs | 2026-11-09 07:42Z，5,910,528 B，md5 **`b8c686ef9aab075172218483c9e36db2`**（备份 `/tmp/root.apfs.bak-P3b-d1` = f2472194…） |
+| system.apfs | 未动：2,476,752,896 B，md5 `8bf5f838d52e46d6c8bf77f13a5ad946` |
+| 镜像内库 | `libhakios.dylib` **92,208 B**（`ca-context` strings 18 处）、`libhakios.gl.dylib` **400,720 B**；`/etc/rc`==rc.vtop |
 
-**exp 流程**
+**Boot**：`XCMD="glwire_local=1 widget_cacontext=auto layers_at=900"`；`GLWIRE_NO_PANEL=1`；`UI_GRACE=600`、`MAXSECS=2400`；`end=ui`、`ui=750s`、`biggest=327719`、`hostframes=2233`、panic=0。
 
-1. 从 P3a 层树里取 `CALayerHost ... HOST context 0x…` 的 context id。
-2. 用 **P3a 的 root.apfs** 换 `libhakios.dylib` 92,208 B，重打 root.apfs（不设 `SYSTEM`；system.apfs 不动）。
-3. boot：`widget_cacontext=0x<id>`；host **不要开 `GLWIRE_WIDGET`**（不发 202）；`GLWIRE_NO_PANEL=1`；`UI_GRACE=600`。
+**探针输出（9 行，全在 init 时）**
 
-**判据（逐条填；缺一不可）**
+- `CAContext 0x221ec5888`；**class methods (9)**：`setClientPort:`、**`allContexts(@16@0:8)`**、`remoteContextWithOptions:`、**`contextWithId:(@20@0:8I16)`**、`remoteContext`、`localContext`、`localContextWithOptions:`、`objectForSlot:(@20@0:8I16)`、`currentContext`。
+- **instance methods (53)**：含 `createImageSlot:hasAlpha:`、`createImageSlot:hasAlpha:extendedColors:`、`setObject:forSlot:` 等。
+- 符号：`CARenderServerSnapshot` / `RenderLayer` / `RenderDisplay` / `RenderDisplayLayerWithTransformAndTimeOffset` 全部 **present**。
+- auto：只打印 `auto class method allContexts types @16@0:8` 后结束；**没有** `context object` / `snapshot object` / `image … nonzero` 行。
+
+**判据（逐条）**
 
 | # | 判据 | 结果 | 证据 |
 |---|---|---|---|
-| 1 | selector 存在并打印（`contextWithID:` / `objectForContextID:` / `contextForID:` 至少一个） | 待填 | |
-| 2 | 拿到 **context 对象非空** | 待填 | 类名/指针 |
-| 3 | 快照尺寸合理（与当前 widget host 同量级，或记录实际值） | 待填 | WxH |
-| 4 | **nonzero > 0**（不是纯白/纯黑） | 待填 | nonzero 数/比例、前 16 字节 |
-| 5 | 不崩/不阻塞主线程（或记录崩溃点） | 待填 | |
+| 1 | selector 存在并打印 | **✅（但名字对不上）** | 实际是 `contextWithId:`（小写 d）/`objectForSlot:`；探针找的 `contextWithID:`/`objectForContextID:`/`contextForID:` 都不在 9 个 class methods 里 |
+| 2 | 拿到 context 对象非空 | **❌** | auto 未调用 `allContexts`（type gate 要求精确 `@@:`，实际 `@16@0:8`）；无任何对象打印 |
+| 3 | 快照尺寸合理 | **❌** | 无快照 |
+| 4 | nonzero > 0 | **❌** | 无图像/计数 |
+| 5 | 不崩/不阻塞 | **✅** | 9 行后正常继续，boot 到 UI、无 panic |
 
-- **只有 selector/symbol 打印、或快照纯白/纯黑 → 不算通过**；必须 nonzero>0。
-- 若只拿到纯白/纯黑：记录 mean/颜色，判「对象可得但快照无内容」，不是成功。
+**根因（code 侧，三处）**
 
-**放弃条件（明确）**
+1. **`allContexts` 没被调用**：`widget_ca_auto` 的 type-encoding 检查要求精确 `"@@:"`，实际 `"@16@0:8"`（带偏移）→ `continue`。
+2. **selector 名不对**：真实 `contextWithId:`（小写 d）；`widget_ca_try_id` 的候选名全不匹配；即使匹配，编码检查同样要求无偏移。
+3. **时序**：探针只在 init 跑一次；widget host context 在 UI 后才出现，且 id 每 boot 变——本 boot 900s 层树 155x155 host = **0x493ce0b9 / 0x810db096**；历史 P2c-timer 0x68f757b6、P2d 0x31afccae/0xa71cf0d7、P2e 0x665f6caa/0xbf7947b6、P2e-c2 0x65984b24/0xf974877b。
 
-1. 无 `CAContext` 类或上述 selector 全不存在；
-2. 连续 **3 次** 全空/纯白/纯黑，无改善；
-3. 调用阻塞主线程、崩溃、或只能拿空白层；
-4. 超过 **1–2 天** 时间盒。
+**其他**：host `widget` 行 = 0（未开 `GLWIRE_WIDGET`）；截图无绿色 1/4 伪影（0 纯绿）；左右边缘 0/36,000 非黑。
 
-→ 命中任一：写「需要更多信息/不可行」，不再盲试私有 selector。
+**建议**：① 选择器表加 `contextWithId:`，type encoding 用容忍偏移的解析；② `widget_cacontext_at=SECONDS` 延迟到 UI 后（与 `layers_at` 同思路）或轮询 `allContexts`；③ 延迟后 `allContexts` 列表 × 层树 155x155 host id 对照，对候选逐个 `createImageSlot:hasAlpha:` 快照取 nonzero>0；④ 仍失败按放弃条件转 fallback。**不要盲调未知 selector。**
 
-**后续**
-
-- D1 成功（nonzero>0）→ 才进 P3b：把 snapshot 走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。
-- D1 失败 → P3 交付「拉面」最小实现或记录不可行；**P3 未完成，不要写已交付**。
-
+**不要写**：D1 成功 / P3 完成 / widget 正确。P2-C2 已失败；P0 仍 2/3。
 
 ## 五、铁律与提交
 
