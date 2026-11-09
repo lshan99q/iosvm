@@ -1710,7 +1710,93 @@ UIWindowLayer "colour ( 0 1 )"
 
 **宿主/背景**：3,681 张 750x1624 全 panel；无第二张非 panel、无 1125x2436；shot/final 左右边缘 0/36,000 → 背景纯黑。
 
-**结论**：依赖不是原因（profiled 之外三个 job 没起作用）；P2 未达成，下一步回到 **poster scene/配置**（PosterBoard 是否创建/发布 poster scene、SpringBoard 是否发起 remote view 连接），不要再加 daemon plist 硬试。
+**结论**：依赖不是原因（profiled 之外三个 job 没起作用）；P2 未达成。**P2d 深挖见 §4.23**：真正卡在 **app extension check-in timeout**（18 个 extension 被同一 watchdog 杀），poster scene/配置不是第一因；下一步 P2e 处理 limits。
+
+---
+
+### 4.23 s19o-p2d 深挖：真正卡在 app extension check-in timeout（P2 未达成）
+
+> 证据：`/host/iosvm/logs/s19o-p2d/s19o-p2d-guest.log`。**日志不进 git**。
+> P2d 的 900s 层树 contents=0 是**时序**，不是「永久不接」；真正原因是扩展 check-in 超时，系统级。
+
+**关键时间线（同一 boot）**
+
+| 时间 | 事件 |
+|---|---|
+| 04:26 | P2d 的 900s `layers_at` 层树（`PBUIPoster*` VC 链在，contents=0） |
+| 04:37:58.70 | PosterBoard 才请求 `com.apple.GradientPoster.GradientPosterExtension` |
+| 04:37:59.78 | `service spawned with pid 64`；`Successfully spawned GradientPosterExtension[64]` |
+| 04:38:06.81 | `Extension is hanging on launch. Killing.` / `killing extension hanging on launch` / `SIGKILLed` |
+| 04:38:08.25 | `exited with exit reason ... XPC_EXIT_REASON_EXTENSION_CHECK_IN_TIMEOUT | extension check-in timeout` |
+| —— | **spawn → kill = 7.0s** |
+
+- **同 boot 18 个 extension 全被同一 watchdog 杀**（每个 5–13s；`Extension is hanging on launch. Killing.` 共 18 条）。GradientPoster 只是其中一个。
+- 全日志没有 `PRSPoster` / `dataStore` / `BSService` / scene / remote 连接错误；persona type6 仍是系统级；`/var/mobile/Library/...` 缺失不是第一因。
+- 因此 §4.22 的「900s 层树 contents=0」只能说明**那个时刻扩展还没起来/内容还没接上**；不能推出「poster scene/配置永久缺失」。
+
+**结论**
+
+- P2 真正卡在 **app extension check-in timeout**（系统性，18 个扩展同时中招）；壁纸只是其中之一。
+- **不是依赖缺失、不是 poster 配置错误、不是 PosterBoard 崩溃**；依赖对照（P2d）已经排除依赖作为第一因。
+- P2 仍未达成；不要写「已修复」。
+
+**P2e 计划（C1，单变量，未执行）**
+
+- 新增 `/private/etc/com.apple.xpc.launchd.limits.plist`，放宽 watchdog：
+
+  ```xml
+  <?xml version="1.0" encoding="UTF-8"?>
+  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+  <plist version="1.0">
+  <dict>
+      <key>SIGTERMTimeout</key>          <integer>3</integer>
+      <key>CrashOnSIGTERMTimeout</key>   <true/>
+      <key>ExtensionWatchdog</key>       <true/>
+      <key>ExtensionWatchdogTimeout</key><integer>120</integer>
+  </dict>
+  </plist>
+  ```
+
+- 构建：**`SYSTEM=1` 重建 `system.apfs`**（root.apfs 内容不动；构建后核对 root md5/备份）：
+  1. 把上面的 plist 放到 `userland/`，在 `build.sh` 的 system 段加：
+     ```sh
+     mkdir -p sysroot/private/etc
+     cp com.apple.xpc.launchd.limits.plist sysroot/private/etc/
+     ```
+  2. 备份并重建：
+     ```sh
+     cd /host/iosvm-work/hakios-xnu-kernel/userland
+     cp -a system.apfs /tmp/system.apfs.bak-P2e
+     cp -a root.apfs /tmp/root.apfs.bak-P2e
+     PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop SYSTEM=1 ./build.sh
+     ```
+- Boot：`layers_at=1800`（比 P2d 更晚，给扩展 120s 窗口）、`UI_GRACE=1500`、`MAXSECS=3600`：
+
+  ```sh
+  cd /host/iosvm
+  export REPO=/host/iosvm
+  export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+  export GLWIRE=$REPO/tools/glwire
+  export ROOT=$KERNEL/userland/root.apfs
+  LABEL=s19p2e-1
+
+  XCMD="glwire_local=1 layers_at=1800" \
+  ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=3600 UI_GRACE=1500 MINSHOT=200000 \
+  HOST_ENV="GLWIRE_NO_PANEL=1" \
+  IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
+  tools/glwire/harness/boot-measure.sh "$LABEL" "$ROOT" 3600
+  ```
+
+- 判据：
+  1. 7s 后不再出现 `Extension is hanging on launch. Killing.`；
+  2. 扩展进程能活过 **30–60s**（GradientPoster 或任一 extension 不立刻被 SIGKILL）；
+  3. 层树出现 **PosterBoard 的 `CALayerHost` / `contents`**（不只是 SpringBoard 自己的 host）；
+  4. 宿主出现第二张 **750x1624 非 panel** 持续纹理；
+  5. 截图背景非纯黑（左右边缘非黑 > 0）。
+- 若 **120s 仍被杀** → 不要继续加 timeout；转 **C2：xpcproxy/persona**（检查 check-in 是否被 xpcproxy 的 persona 解析挡住），或其它进程内方案。
+- C1 未执行；P2 未达成；不要写「P2 已修复」。
+
 
 ## 五、铁律与提交
 
