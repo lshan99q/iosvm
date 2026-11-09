@@ -28,6 +28,7 @@
 #      CELL1_LABEL..CELL4_LABEL  default cell1..cell4
 #      CELL1_XCMD..CELL4_XCMD    optional per-cell guest boot args (e.g. "glwire_local=1")
 #      CELL1_HOST_ENV..CELL4_HOST_ENV  optional per-cell host env
+#      CELLn_REQUIRE_HOST_FRAMES  default 0 for cell1 (no recorder) and 1 for the others
 #      CELL1_HOST_ARGS..CELL4_HOST_ARGS optional per-cell extra host_glwire args
 #      WINDOW_AFTER=60 MAX_SECS=1800 MINSHOT=200000 NOUI_BY=1800
 #      OUT=/tmp/four-cell
@@ -64,6 +65,17 @@ cell_label() {
 cell_xcmd()  { eval "printf '%s' \"\${CELL$1_XCMD:-}\""; }
 cell_henv()  { eval "printf '%s' \"\${CELL$1_HOST_ENV:-}\""; }
 cell_hargs() { eval "printf '%s' \"\${CELL$1_HOST_ARGS:-}\""; }
+cell_require_host() {
+	local value
+	eval "value=\"\${CELL$1_REQUIRE_HOST_FRAMES:-}\""
+	if [ -n "$value" ]; then
+		printf '%s' "$value"
+	elif [ "$1" = 1 ]; then
+		printf '0'
+	else
+		printf '1'
+	fi
+}
 
 # One row from an existing set of logs.  Prints the markdown row (without the leading |).
 row_from_logs() {
@@ -115,6 +127,7 @@ for n in 1 2 3 4; do
 	xcmd=$(cell_xcmd "$n")
 	henv=$(cell_henv "$n")
 	hargs=$(cell_hargs "$n")
+	require_host=$(cell_require_host "$n")
 
 	if [ "$DRY" = 0 ]; then
 		if [ -z "$image" ] || [ ! -f "$image" ]; then
@@ -129,7 +142,7 @@ for n in 1 2 3 4; do
 		# Same touch script and same 20 s window for every cell: drive-scroll's default
 		# WINDOW_FRAMES=0 is the eight-swipe ~20 s window.
 		env QEMU_SMP="$SMP" ZERO_RAM=1 MINSHOT="$MINSHOT" NOUI_BY="$NOUI_BY" \
-		    WINDOW_AFTER="$WINDOW_AFTER" WINDOW_FRAMES=0 \
+		    WINDOW_AFTER="$WINDOW_AFTER" WINDOW_FRAMES=0 REQUIRE_HOST_FRAMES="$require_host" \
 		    XCMD="$xcmd" HOST_ENV="$henv" \
 		    IOSVM="$IOSVM" GLWIRE="$GLWIRE" \
 		    "$HERE/drive-scroll.sh" "$label" "$root" "$MAX_SECS" $hargs \

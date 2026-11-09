@@ -2525,6 +2525,9 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - `make test` 不跑 QEMU、不覆盖四格表；它只证明仓库的 open 检查与 host Vulkan probe 通过。
 - 若 `host/vkbridge` 未取，先 `make submodule`；若只想跑不依赖 GPU 的门，用 `make test-open` 并记录原因。
 - 记录完整命令、退出码与关键输出；失败不要用「应该没问题」代替。
+- 2026-11-09 当前环境：`make test-open` **PASS**；`make test` 在 `test-gpu` 失败，
+  `VK_ICD_FILENAMES` 指向的 `/usr/share/vulkan/icd.d/lvp_icd.json` 不存在（lavapipe 未配置），
+  不是代码失败；需要补 ICD 后再重跑 `make test`，不要把 `test-open` 当完整 `make test`。
 
 ### 8.5 收尾清单
 
@@ -2642,6 +2645,9 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 - 唯一具体改动（若还有工具注入 extension）：先让进程活到 `xpc_main`（崩溃根因未明），或试 `ExtensionWatchdog=false`
   （bool，不是 timeout）关闭 watchdog 以暴露真实 exit；但 C1 的 limits 读取路径未证实，成功率低，不应再花超过 30 min。
 - 结论：P2/P3 的 extension 内容路径判“不能走/需 extension 进程存活这个前置条件”，不再作为 P3 主线。
+- 唯一开关 `ExtensionWatchdog=false` 的预期：若 launchd 确实读取 limits，就不再在 5–13 s 杀 extension，但
+  `CheckIn` 仍不会出现（进程已死/崩溃），只是暴露真实 exit；若 limits 读取路径未被证实，则行为完全不变。
+  因此它只能用于 unblock 诊断，不能恢复 widget 内容，阶段 20 应按“换根因/换路径”而不是“调 timeout”。
 
 ### P4 四格表 dry-run 自检（不跑 QEMU）
 
