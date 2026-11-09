@@ -23,7 +23,7 @@ others use `WINDOW_CLOCK=host`.  A row that cannot reach 120 in 1800 s says
 
 - **cell3 guest sender:** `MiniIOMobileFramebuffer: 2 frames in 772366 ms (0 a second),
   85869 us each in the driver ...` — **0.0026 fps**; the last host frame is `frame 250
-  ... interval 10.21 s (0.10 fps)`.  In 1800 s the host went 121 -> 250 (window 11/120);
+  ... interval 772.23 s (0.00 fps)`.  In 1800 s the host went 121 -> 250 (window 11/120);
   the guest went 12 -> 96.
 - **cell2 by-reference:** host 104 -> 183 in 1800 s (**0.044 fps**), guest 12 -> 48
   (**0.02 fps**); the window never reached frame 120 (0/120).
