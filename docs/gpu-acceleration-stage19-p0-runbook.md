@@ -2132,6 +2132,44 @@ UIWindowLayer "colour ( 0 1 )"
 **不要写**：P3 已交付 / widget 已正确 / P2 已修复。P3 未完成；P0 仍 2/3；P1 暂停。
 
 
+### 4.30 s19o-p3-surface-enum 实测：widget 面不在 MiniIOSurface 表里
+
+> **状态：已回填（2026-11-09 10:51Z）。** 900s 枚举到 **30 个存活 MiniIOSurface**；只有 id 1/2 的 750x1624 显示面、id 3 的 **184x124 BGRA**、id 4 的 **312x202 LA08**、以及 backboardd 的 180x180 图标/装饰面；**没有任何 155x155 pt（310x310@2x / 465x465@3x）或其它 widget 尺寸的候选面**。→ widget 内容面不是可 `IOSurfaceLookup` 的 MiniIOSurface（是 widget extension 的远程 CAContext；与 D3 一致）。
+
+**探针**：`src/inject.c` 新增 `surface_at=SECONDS`（主队列 `dispatch_after`），遍历 `IOSurfaceLookup(1..1024)` 打印 `id WxH fmt fourcc bpr alloc`；`surface_upload=1` 时对候选调 `eagl_remote_widget_upload` 试合成。编译产物 **93,072 B**（Mach-O，strings `surface-enum` 4 处）。
+
+**镜像/库**：root.apfs **`f29594abf78d25d36582d497e2969446`**（10:21 / 5,918,720 B；备份 `/tmp/root.apfs.bak-p3-enum` = ae626263…）；system.apfs 未动 `8bf5f838…`；镜像内 libhakios 93,072 / gl 400,720 / sb 109,632。
+
+**Boot**：`XCMD="glwire_local=1 surface_at=900 surface_upload=1 widget_rect=46,142,309,309 layers_at=950"`；`HOST_ENV="GLWIRE_WIDGET=1 GLWIRE_NO_PANEL=1"`；`end=ui ui=690s biggest=328115 hostframes=3888 panic=0`。
+
+**枚举结果（900s，30 个面）**
+
+```
+id 1  750x1624 BGRA bpr 3072 alloc 4997120   backboardd[16]
+id 2  750x1624 BGRA bpr 3008 alloc 4898816   （无 created 行）
+id 3  184x124  BGRA bpr 736  alloc 98304     SpringBoard[9]
+id 4  312x202  LA08 bpr 640  alloc 131072    SpringBoard[9]
+id 5..13,19..25,27..30  180x180 bpr 720      backboardd[16]
+id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
+```
+
+- **无 155x155/310x310/465x465**；同 boot 950s 层树 155x155 CALayerHost context = **`0x500b566f` / `0x7f535c4c`**，与表中任何 id 不对应。
+- 同 boot `surface_upload=1` 的 202 从主队列发出后 host 收到 **全零**（`widget upload texture 0 … 0x0 rect 0,0`），截图 widget 区仍 mean 251 白块——主队列调 `eagl_remote_widget_upload` 的编码/remote 状态问题（P3a 从 widget 线程调用正常）；不影响枚举结论。
+
+**结论**：P3 的「surface → opcode 202 → 真实 widget」路线**不可行**（没有可点的 surface id）；widget host 的像素在 extension 的远程 context 里，不在 MiniIOSurface 表。
+
+### 4.31 s19o-p3-fallback 验收（第一发）：host 没画 fallback（失败）
+
+> **状态：已回填（2026-11-09 11:18Z）。验收失败。** host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。
+
+**配置**：root `f29594ab…`；host_glwire **119,552 B / md5 `68d89e541eba0fd34f0f671a21e24659`**（含 `GLWIRE_WIDGET_FALLBACK`）；`XCMD="glwire_local=1 widget_surface=3 widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1"`；`end=ui ui=750s biggest=356986 panic=0`。
+
+**host 日志**：`widget upload texture 4294905859 184x124 … rect 46,142 309x309 bytes 91264` + 4 条 `widget compose`；`grep -ci fallback` = **0**。
+
+**根因（host 侧）**：`host_widget_blank()` 要求 ≥90% 像素 **B,G,R,A 全部 >235**；surface 3 是未绘制的 184x124 BGRA（全 0/透明或 alpha<235）→ `blank=0` → fallback 分支不触发。
+
+**下一步**：① 用 lead 已给的备选——只开 fallback + `GLWIRE_WIDGET_RECT=46,142,309,309`、**不带 widget_surface**（无 202），`widget_count==0 && have_env_rect` 无条件画占位；② 或 code 修 `host_widget_blank()` 把全 0/alpha=0 也算 blank 后再跑 202 版。**fallback 目前未通过验收，P3 未完成。**
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
