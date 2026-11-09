@@ -41,7 +41,7 @@
 | P0 | 标签是文字（**已达成 2/3：v7+v9**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
 | P2 | 壁纸（**停止：C2 已证明不是 elision（xpcproxy 生效但仍 7–11s 被杀；16 CHECK_IN_TIMEOUT / 0 alive）；P2 性价比低/需更多信息；转 P3；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
-| P3 | widget（**进行中：P3a 链路通（surface 3→202→host），但内容空白白块；不再调 rect，转 CAContext snapshot D1/P3b；P3 未完成**） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
+| P3 | widget（**进行中：P3a 链路通但内容空白；D1 `widget_cacontext` 探针已备/待跑；P3 未完成**） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
 | P4 | 收尾 | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
 
 ---
@@ -300,7 +300,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 | D2 | P1 绕开 darken → 修 backdrop | 能读出 App 名称的截图；**实际 P1a：`SKIP=13` Weather 562→44；全标签 101.7%（重分布）；P1b `TC0_SANITIZE` 53.9% 但 Weather 719→741；P1c 点带在 glyph tile alpha；P1d end 清底部出竖条；P1e start 清空白顶行、band 73.6% 但分标签有升有降；trim 方向停止，P1 暂停** |
 | D3 | 三发验证 | ≥2/3 发标签为文字、截图 ≥300 KB、diff ≥95%；**实际 v7 99.85%、v9 99.98%（2/3）；v8 89.53% 因 dump 落在 UI 加载动画，不计入** |
 | D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；P2c-timer 层树通但 contents=0；P2d 依赖对照失败；P2e C1 limits 未生效；C2 `launchd_proxyless_spawn=0` 生效但 extension 仍 7–11s 被杀（16 CHECK_IN_TIMEOUT、0 alive）；5,249 张 750x1624 全 panel；991,040 B 截图右下 1/4 纯绿伪影（683,954 px），不是壁纸；不是 elision；P2 未达成/性价比低** |
-| D5–D6 | P3 widget（时间盒） | 可行/不可行结论；**实际 P3a：链路通、surface 3 空白白块；P3b CAContext snapshot 待做** |
+| D5–D6 | P3 widget（时间盒） | 可行/不可行结论；**实际 P3a：链路通、surface 3 空白白块；D1 `widget_cacontext` 探针已备，待跑** |
 | D7 | P4 四格表 + 收尾 | 四个数字 + `make test` + 推送 |
 
 ### 6.1 下一阶段入口（P0 之后）
@@ -309,7 +309,7 @@ P0 已达成 2/3（v7+v9），但只覆盖「名称上屏」。下一阶段按 P
 
 - **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1e：FNV 证明 upload row0=视觉顶部，`TRIM_FROM=start` 清的是空白顶行；band 6989→5146（73.6%）但 Wallet +1244%、Health +70%、Photos +81%，trim 不是干净修复。停止 trim，转查 90 高背板/复合层；P1 方向暂停，优先 P2 依赖/P3。P1 未修复。**
 - **P2 壁纸**：P2 修好 lookup、PosterBoard running；P2b 触发失败；P2c-alt/alt2 证明跨进程 notify 不可用。P2c-timer timer/层树通但 contents=0；P2d 四 job 仅 profiled 成功，依赖不是原因。**根因（§4.23）**：18 个 extension 全被 check-in watchdog 杀（5–13s；GradientPoster spawn→kill 7.0s）；900s 层树 contents=0 是时序，不是永久不接。**P2e C1 失败（§4.24）**：limits plist 691 B 可解析，但 `ExtensionWatchdogTimeout=120` 未生效；~9s 仍被杀；50 次 CHECK_IN_TIMEOUT、0 次 checked in as alive。**C2 失败（§4.25）**：`launchd_proxyless_spawn=0` 生效（`service will always use xpcproxy`、`xpcproxy spawned`、`elide xpcproxy`=0），但 Batteries 7.2s、Gradient 11.4s 后仍 `CHECK_IN_TIMEOUT`；全 log 32 次 hanging、16 次 CHECK_IN_TIMEOUT、0 次 alive；1800s 层树 contents=0、5,249 张 750x1624 全 panel；991,040 B 截图右下 1/4 纯绿 `#00FF00`（683,954 px）是渲染伪影，不是壁纸。**不是 elision；停止 P2 timeout/xpcproxy 方向，P2 性价比低/需更多信息**；P2 不阻塞 P3，P1 暂停，P0 仍 2/3。
-- **P3 widget**：**P3a 已跑（§4.26）**：root `f2472194…`、system 未动；guest 1 条 `widget surface 3 184x124 -> texture 0xffff1003 rect 46,142 309x309`，host 1 条 upload（bytes 91,264）+ 4 条 `widget compose`，无 removed；**链路通**。但截图 widget 区域 mean RGB **251**、nonblack 211,753/214,369 → **纯白圆角块**，无 widget 内容；surface 3 的 92x62 pt 与层树 155x155 不符 → 链路通、语义不对，不再调 rect。**P3b（§4.27，未执行）**：code 做 CAContext snapshot D1 探针（运行时探测类/selector，先证明能拿对象与非空快照；1–2 天时间盒，命中无类/全空/主线程阻塞即放弃），成功后走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。P3 未完成。
+- **P3 widget**：**P3a 已跑（§4.26）**：root `f2472194…`、system 未动；guest 1 条 `widget surface 3 184x124 -> texture 0xffff1003 rect 46,142 309x309`，host 1 条 upload（bytes 91,264）+ 4 条 `widget compose`，无 removed；**链路通**。但截图 widget 区域 mean RGB **251**、nonblack 211,753/214,369 → **纯白圆角块**；surface 3 的 92x62 pt 与层树 155x155 不符 → 链路通、语义不对，不再调 rect。**D1（§4.28，待跑）**：`widget_cacontext=0x<id>`；runtime 按 type encoding 试 `contextWithID:`/`objectForContextID:`/`contextForID:`，再试 `createImage`/`createCGImage`/`snapshot`；打印类/CGImage 尺寸/bpp/bpr/前 16 字节/nonzero；`CARenderServerSnapshot` 只 dlsym present/absent。库 `libhakios.dylib` 92,208 B（P3a 90,720，备份 `/tmp/libhakios.p3a.dylib`），gl 400,720，patch 263 行；boot `widget_cacontext=0x<id>`、host **不开 `GLWIRE_WIDGET`**、NO_PANEL、UI_GRACE=600。判据 selector 打印 + 对象非空 + 尺寸合理 + **nonzero>0**；纯白/纯黑不算。放弃：无类/selector、连续 3 次全空、阻塞/崩溃、1–2 天。P3 未完成。
 - **回归基线**：不要用 v8 的动画帧当基线（v8 的 panel 已完整、picture 还停在前一状态，89.53% 是采样时刻问题）；用 v7/v9 这类静态时刻，或给 dump 加「连续两帧 panel/picture 稳定」门槛。
 
 ---

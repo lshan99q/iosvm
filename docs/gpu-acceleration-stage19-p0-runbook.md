@@ -1930,6 +1930,69 @@ UIWindowLayer "colour ( 0 1 )"
 **不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3a 只证明链路；P3b 未执行；P0 仍 2/3。
 
 
+---
+
+### 4.28 P3b-D1 探针：CAContext 快照（未执行/跑中，结果待填）
+
+> **状态：探针代码/库已备，exp 尚未回填结果。** 这一发只回答「能不能拿到 CAContext 对象和非空快照」；不合成、不发 opcode 202、不证明 widget 正确。
+
+**代码（backboardd `inject.c`）**
+
+- boot-arg：**`widget_cacontext=0x<id>`**；`auto` / `1` 用于打印 **CAContext 全局表**（先看有哪些 context）。
+- 运行时按 **type encoding** 调候选 selector，不盲调：
+  - `contextWithID:`
+  - `objectForContextID:`
+  - `contextForID:`
+  - 拿到对象后试零参 `createImage` / `createCGImage` / `snapshot`
+- 打印内容：
+  - 类名、selector 是否存在/返回值；
+  - CGImage 的 **width/height/bpp/bpr/data bytes**；
+  - **前 16 字节** 与 **nonzero 像素数/比例**。
+- `CARenderServerSnapshot` 等私有符号**只 `dlsym` 打印 present/absent**，不直接调用。
+
+**库/patch**
+
+| 项 | 值 |
+|---|---|
+| `libhakios.dylib` | **92,208 B**（P3a 90,720，备份 `/tmp/libhakios.p3a.dylib`） |
+| `libhakios.gl.dylib` | 仍 **400,720 B** |
+| 新增链接 | `-framework CoreGraphics` |
+| patch | `/host/iosvm/logs/s19o-p3-d1.patch`（**263 行**） |
+
+**exp 流程**
+
+1. 从 P3a 层树里取 `CALayerHost ... HOST context 0x…` 的 context id。
+2. 用 **P3a 的 root.apfs** 换 `libhakios.dylib` 92,208 B，重打 root.apfs（不设 `SYSTEM`；system.apfs 不动）。
+3. boot：`widget_cacontext=0x<id>`；host **不要开 `GLWIRE_WIDGET`**（不发 202）；`GLWIRE_NO_PANEL=1`；`UI_GRACE=600`。
+
+**判据（逐条填；缺一不可）**
+
+| # | 判据 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | selector 存在并打印（`contextWithID:` / `objectForContextID:` / `contextForID:` 至少一个） | 待填 | |
+| 2 | 拿到 **context 对象非空** | 待填 | 类名/指针 |
+| 3 | 快照尺寸合理（与当前 widget host 同量级，或记录实际值） | 待填 | WxH |
+| 4 | **nonzero > 0**（不是纯白/纯黑） | 待填 | nonzero 数/比例、前 16 字节 |
+| 5 | 不崩/不阻塞主线程（或记录崩溃点） | 待填 | |
+
+- **只有 selector/symbol 打印、或快照纯白/纯黑 → 不算通过**；必须 nonzero>0。
+- 若只拿到纯白/纯黑：记录 mean/颜色，判「对象可得但快照无内容」，不是成功。
+
+**放弃条件（明确）**
+
+1. 无 `CAContext` 类或上述 selector 全不存在；
+2. 连续 **3 次** 全空/纯白/纯黑，无改善；
+3. 调用阻塞主线程、崩溃、或只能拿空白层；
+4. 超过 **1–2 天** 时间盒。
+
+→ 命中任一：写「需要更多信息/不可行」，不再盲试私有 selector。
+
+**后续**
+
+- D1 成功（nonzero>0）→ 才进 P3b：把 snapshot 走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。
+- D1 失败 → P3 交付「拉面」最小实现或记录不可行；**P3 未完成，不要写已交付**。
+
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
