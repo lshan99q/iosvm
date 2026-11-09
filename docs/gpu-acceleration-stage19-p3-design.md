@@ -233,8 +233,8 @@ root.apfs → `XCMD="glwire_local=1 widget_surface=3,4 widget_rect=..."`、host
 - `GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`），默认关；
   可和 `GLWIRE_WIDGET=1` 组合，也可单独启用。
 - `GLWIRE_WIDGET_RECT=x,y,w,h`：没有收到 202 时，用这个固定 rect 画占位。
-- 收到 202 时先对上传数据做空白检测（BGRA/RGBA 或 LA08，≥90% 像素近白视为空白）；
-  只有空白 widget 用占位替换，正常 widget 仍画真实纹理。
+- 收到 202 时先对上传数据做空白检测（BGRA/RGBA 或 LA08；≥90% 像素为透明（alpha<10）、
+  RGB/LA 全 0、或近白，均视为空白）；只有空白 widget 用占位替换，正常 widget 仍画真实纹理。
 - 占位内容：24 px 高对比棋盘 + 3 px 白边框 + 两条黄色对角线（无字体）。
 - 日志：`glwire: widget fallback N rect(s) (NOT the real widget path)`；不改变
   `widget compose` 的既有行。
