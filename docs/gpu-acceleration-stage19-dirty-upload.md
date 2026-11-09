@@ -12,6 +12,10 @@
 ## Logs
 
 - host every frame: `host_glwire: dirty upload n/312 tiles, X of 4872000 B`
+- if **n > 8 and X >= half a frame**, the host does not send thousands of per-row tile sends:
+  it logs `host_glwire: dirty fallback n/312 tiles, X of 4872000 B -> full R` and sends one full
+  `R <frame_bytes>`; the guest already accepts R and takes the full path.  This is the scroll case
+  (310/312 tiles) and restores the full-frame cadence instead of the per-tile overhead.
 - guest every dirty frame: `hakios-remote: dirty n tiles, X B`
 - default: no `dirty` line; 10th request field is 0, host sends the old `R <frame_bytes>` and guest
   takes the old full-picture path.
@@ -24,4 +28,8 @@
   `dirty upload`; e2e default PASS (`painted 16/16`); host 4x4 two-frame test: first `D 1 64`,
   second `D 0 0`.
 - lib **401,864 B / md5 35d51b50981d4c8474aae449c16b0699**; host **119,792 B / md5
-  c9f357c8f7fd529d810ce8fc41c864db**; patch `logs/s19o-p1-dirty.patch` (123 lines).
+  58d5b876c17d70de548f349a4b939f5d**; patch `logs/s19o-p1-dirty.patch` (123 lines).
+- dirty1 result: static 0/0, 1/16KB, 3/49KB; scroll 48/768KB, 310/4.8MB, 134/2MB, 298/4.65MB.
+  The scroll window is inherently full-screen dirty; before fallback the host sent 310 tile
+  headers + ~19,840 row sends and guest 0.72 fps, worse than full 1.23.  Fallback keeps scroll at
+  full-frame cadence; it cannot make a full-screen-changing scroll ≥5 fps.  Δstatic is the win.
