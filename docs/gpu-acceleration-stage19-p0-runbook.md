@@ -1678,60 +1678,39 @@ UIWindowLayer "colour ( 0 1 )"
 - 与 P2 对比：P2 是「lookup 失败、无 wallpaper」；现在 lookup 修复、window/VC 出现，**问题前移到「远程 poster 内容没接上/没画出来」**。
 - 按分支：**有 wallpaper 层、contents 空 = 内容/快照问题**，不是 scene 完全没接上；P2 未达成。
 
-### 4.22 P2d 计划：单变量加 4 个 job（待执行）
+### 4.22 s19o-p2d 实测：4 个 stock LaunchDaemon job（P2 未达成；依赖不是原因）
 
-> **状态：未执行。** P2c-timer 已证明 window/VC 链在、contents 空；P2d 只验证「那 4 个缺失 job 是否让 PosterBoard 建立 scene/产生 content」。**不要同时改 trim/其它变量。**
+> **状态：已回填（2026-11-09 04:40Z）。P2 仍未达成。** 四个 job 里只有 `profiled` 真正起来；`powerlogHelperd` 的 stock plist 被 launchd 拒绝加载；两个 Photos `.xpc` 的 error 22 仍在。壁纸层树与 P2c-timer 完全同形（contents 空、无 PosterBoard 的 `CALayerHost`）。
 
-**改动（单变量）**
+**镜像**
 
-- 在 `build.sh` 的 `/LaunchDaemons` 拷贝段加入 4 个 stock plist（当前工作树约 455 行已有这四行；若检出没有就补）：
+| 项 | 值 |
+|---|---|
+| 构建 | 4-job patch 在 working tree（build.sh 456–459 四处 `cp`；无重复、`bash -n` 通过）；`PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh`，不设 `SYSTEM` |
+| root.apfs | 2026-11-09 04:11Z，5,906,432 B，md5 **`b59fcf668707da64c716c3bb76dffab1`** |
+| system.apfs | 未动：2,476,748,800 B，md5 `b75d80caaa5e276a58a4d45307d2165b` |
+| 镜像内 | 4 个 plist 均在 `/LaunchDaemons`；sb dylib 108,248 B（`layers timer`）；`/etc/rc`==rc.vtop |
+| 备份 | `/tmp/root.apfs.bak-P2d`（dbf1c3d8…） |
 
-  ```sh
-  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.managedconfiguration.profiled.plist root/LaunchDaemons/
-  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.powerlogHelperd.plist root/LaunchDaemons/
-  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.photos.VideoConversionService.plist root/LaunchDaemons/
-  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.photos.ImageConversionService.plist root/LaunchDaemons/
-  ```
+**Boot**：`XCMD="glwire_local=1 layers_at=900"`、`GLWIRE_NO_PANEL=1`、`UI_GRACE=900`、`MAXSECS=3000`；`end=ui`、`ui=660s`、`biggest=326663`、`hostframes=3681`、panic=0。
 
-- **只重建 root.apfs**，复用 P2c-timer 的 108,248 B `libhakios.sb.dylib`；**不设 `SYSTEM`**：
+**四个 job**
 
-  ```sh
-  cd /host/iosvm-work/hakios-xnu-kernel/userland
-  cp -a root.apfs /tmp/root.apfs.bak-P2d
-  PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
-  python3 ../tools/apfs/apfs.py ls root.apfs /LaunchDaemons | grep -E 'profiled|powerlog|Conversion'
-  ```
+| job | 结果 | 证据 |
+|---|---|---|
+| `com.apple.managedconfiguration.profiled` | **✅** | `(user/501/… [40]) Successfully spawned profiled[40] because ipc (mach)`、running；此后 `.public` lookup 失败 0 条 |
+| `com.apple.powerlogHelperd` | **❌ plist 被拒** | `Unknown key for plist importer (key: UNUserNotificationCenter type: dictionary)`；未加载、无 spawn |
+| `com.apple.photos.VideoConversionService` | **❌ 未 spawn** | 无 spawn；`Could not get domain target from bundle: …/VideoConversionService.xpc, error = 22`（04:20 SpringBoard、04:34 PosterBoard[46]） |
+| `com.apple.photos.ImageConversionService` | **❌ 未 spawn** | 同上（ImageConversionService.xpc，error 22） |
 
-- Boot 同 P2c-timer 参数（保留 `layers_at=900` 以便看层树）：
+- `com.apple.powerlog.plxpclogger.xpc` 仍失败（requestor：runningboardd/backboardd/SpringBoard，本发不是 PosterBoard）。
+- PosterBoard `user/501 [46]` running；除两个 MediaConversion error 外无别的失败。
 
-  ```sh
-  cd /host/iosvm
-  export REPO=/host/iosvm
-  export KERNEL=/host/iosvm-work/hakios-xnu-kernel
-  export GLWIRE=$REPO/tools/glwire
-  export ROOT=$KERNEL/userland/root.apfs
-  LABEL=s19p2d-1
+**层树（900s timer）**：405 行、9 window、`layers: end`。`_SBWallpaperSecureWindow`（level −3，ctx `0xa39703b2`）下 `PBUIPosterWallpaperRemoteViewController → PBUIPosterWallpaperViewController → PBUIPosterViewController`（375x812、opacity 1）仍在；子树 **contents=0**、旁有 `CALayer colour ( 0 0 )` 黑层。`CALayerHost` 共 8 个（2×155x155 + 6×375x812），**全是 SpringBoard 自己的 window context，无 PosterBoard**。
 
-  XCMD="glwire_local=1 layers_at=900" \
-  ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000 \
-  HOST_ENV="GLWIRE_NO_PANEL=1" \
-  IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
-  tools/glwire/harness/boot-measure.sh "$LABEL" "$ROOT" 3000
-  ```
+**宿主/背景**：3,681 张 750x1624 全 panel；无第二张非 panel、无 1125x2436；shot/final 左右边缘 0/36,000 → 背景纯黑。
 
-**判据（三条，逐条填）**
-
-1. **层树**：`_SBWallpaperSecureWindow` 子树里出现 **PosterBoard 的 `CALayerHost` / `_UIRemoteView` / `contents`**（不只是 SpringBoard 自己的 host）。
-2. **宿主**：出现第二张 **750x1624 非 panel** 持续纹理（或 1125x2436）。
-3. **截图**：主屏背景非纯黑（左右边缘非黑 > 0）。
-
-**分支**
-
-- 三条任一改善 → 依赖/job 是原因之一，继续沿该方向；仍不算 P2 达成，需补全壁纸内容。
-- **仍无 PosterBoard 的 `CALayerHost`/contents → 写「依赖不是原因，回到 poster scene/配置」**，不要继续加 job。
-- 不要在同一发改 trim/其它变量；不要预设通过。
-
----
+**结论**：依赖不是原因（profiled 之外三个 job 没起作用）；P2 未达成，下一步回到 **poster scene/配置**（PosterBoard 是否创建/发布 poster scene、SpringBoard 是否发起 remote view 连接），不要再加 daemon plist 硬试。
 
 ## 五、铁律与提交
 
