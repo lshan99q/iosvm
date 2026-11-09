@@ -263,6 +263,30 @@ done
 
 ---
 
+### 2.7 排障：`api.github.com` 403 不是代理故障
+
+巡检时 `curl -x 127.0.0.1:7892 https://api.github.com` 返回 **403**，很容易被当成代理坏了；实际上**未认证访问 GitHub API 的正常限流**也会 403（响应头 `x-ratelimit-remaining: 0`），`github.com` 根域和仓库页仍是 200，`git ls-remote` 正常。
+
+**判别（按顺序）**
+
+```sh
+# 1) 网页/仓库域是否正常
+curl -sS -o /dev/null -w '%{http_code}\n' https://github.com
+curl -sS -o /dev/null -w '%{http_code}\n' https://github.com/lshan99q/iosvm
+
+# 2) git 协议是否正常
+git ls-remote origin HEAD >/dev/null && echo ls-remote-ok
+
+# 3) API 的 403 响应头/正文
+curl -sS -D - https://api.github.com -o /tmp/gh-api-body.txt | head -20
+head -5 /tmp/gh-api-body.txt
+```
+
+- 若 1) 是 **200**、2) 成功、3) 是 **403 + `x-ratelimit-remaining: 0`** → **不是代理/DNS/Git 凭证问题**，是 GitHub API 未认证限流；等一会儿或带认证再查，**不要改代理、不要重配 credential**。
+- 若 1) 也失败（连接/DNS/TLS）→ 才按代理/网络故障排查。
+- 不要把 GitHub token 写进命令历史/文档/日志；API 限流不需要 token 也能解释 403。
+
+
 ## 三、P0 验收 checklist（照 §二 P0 逐条取数）
 
 > 判据原文（计划 §二）：**连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；
@@ -2077,9 +2101,9 @@ UIWindowLayer "colour ( 0 1 )"
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
 - **P3 未完成；P2 仍未达成。**
 
-### 4.29 P3 时间盒收口模板（2026-11-10 14:06 到期，待填）
+### 4.29 P3 时间盒收口：真路径不可行，只剩 fallback3 验收待填（2026-11-10 14:06 到期）
 
-> **状态：模板，未到期、未判定。** P3 只允许三种结论：**可行 / 不可行 / 需要更多信息**；不要提前写结论。
+> **状态：证据已收齐，真路径判定为「不可行」；只剩 fallback3 截图验收待填。** P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2091,35 +2115,47 @@ UIWindowLayer "colour ( 0 1 )"
 - **没有 155x155 pt（310x310 @2x / 465x465 @3x）或任何 widget 尺寸候选**；同 boot 950s 层树 155x155 `CALayerHost` = **`0x500b566f`/`0x7f535c4c`**，与枚举表任何 id 无对应。
 - → **widget 内容面不是 MiniIOSurface，而是 widget extension 的远程 CAContext**；`surface → opcode 202 → 真实 widget` 的 surface 路径**不可行**（没有可点的 id）。
 - 同 boot 试合成 id3/id4 时，host 收到的是全零 202（`widget upload texture 0 ... 0x0 rect 0,0`），截图 widget 区仍 mean 251 白块；这是主队列调 `eagl_remote_widget_upload` 的编码/remote 状态技术问题（P3a 从 widget 线程调用正常），不影响枚举结论。
-- fallback 验收 boot **已 GO**（占位实现见下）；P3 真实路径不可行，最终三选一待 fallback 截图验收后填。
+- fallback 验收 boot 已 GO，但 **fallback2 没出图**（local panel vs replay fbo）；fallback3 host-replay 待跑。P3 真实路径不可行，最终三选一只剩 fallback3 交付状态待填。
 
 **判据逐条对照**
 
 | # | P3 判据 | 当前证据 | 到期填 |
 |---|---|---|---|
-| 1 | `312x202`/`184x124` 以纹理进宿主 | P3a：链路通，但 surface 3 是空白白块；host 有 upload/compose | ✅/❌ |
-| 2 | 截图 widget 区域出现**当前**内容（非纯白/旧内容） | P3a 区域 mean RGB 251、nonblack 211,753/214,369 → 纯白 | ✅/❌ |
-| 3 | 延迟探针能拿 CAContext 对象 | D2 count 1（backboardd 自己）、D3 count 16（SpringBoard 自己的 window context）；D1 因 init/encoding 没拿到；都不是 155x155 host | ✅/❌ |
-| 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | ✅/❌ |
-| 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | ✅/❌ |
-| 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | ✅/❌ |
+| 1 | `312x202`/`184x124` 以纹理进宿主 | P3a：链路通（host upload + 4 compose），但 surface 3 是空白白块 | **✅ 链路 / ❌ 内容** |
+| 2 | 截图 widget 区域出现**当前**内容（非纯白/旧内容） | P3a 区域 mean RGB 251、nonblack 211,753/214,369 → 纯白 | **❌** |
+| 3 | 延迟探针能拿 CAContext 对象 | D2 count 1（backboardd 自己）、D3 count 16（SpringBoard 自己的 window context）；D1 因 init/encoding 没拿到；都不是 155x155 host | **❌（拿到的是别人的）** |
+| 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | **❌** |
+| 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | **❌** |
+| 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | **❌** |
 | 7 | fallback（拉面最小实现）可交付 | **已实现；fallback2 画了但截图看不到（local panel vs replay fbo）；fallback3 host-replay 待跑；未验收通过**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 fallback3 host-replay 截图验收（不是 P3 通过） |
-| 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | ❌ |
+| 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | **❌** |
 
-**三选一判定条件**
+**三选一判定（已填到只剩 fallback3）**
 
-- **可行**：第 1、2 条都过（当前 widget 内容真的进宿主并发到截图），且不依赖已死 extension；否则不能选。surface 枚举（第 8 条）已经排除「点某个 surface id」这条路，当前证据**强烈倾向不可行**。
-- **不可行**：时间盒到期，第 1/2 条未过，且第 4/5/6 条的证据表明 CAContext + extension 路线在时间盒内不可达；**fallback 已实现但还要 exp 截图验收；验收不过则写「未交付」**。
-- **需要更多信息**：只允许在「有一个具体、可测、未做的测量」时选（例如同 boot 拿到 widget extension context id 的新方法）；**不能拿「还没试够」当选需要更多信息的理由**。surface 枚举已完成，不能再把「不知道 surface 几号」当选需要更多信息。
+- **不可行（真路径）——当前判定，证据链完整**：
+  1. **surface 枚举 30 个面无候选**：id3 是 184x124 旧 snapshot、id4 是 312x202 LA08；无 155x155/310x310/465x465；950s 层树 155x155 host `0x500b566f/0x7f535c4c` 无对应 id。
+  2. **`+allContexts` 按进程隔离**：backboardd 只看到自己的 context；SpringBoard 16 个里只有自己的 window context，不含 155x155 widget host。
+  3. **这代 CAContext 没有零参 `createImage`/`createCGImage`/`snapshot`**；`createImageSlot:hasAlpha:` 是创建 slot，不是快照。
+  4. **extension 5–13s 被 check-in timeout 杀**（P2e/P2e-C2；18 个扩展），P3 实时 widget 内容在 extension 修复前不可得。
+  → 结论：**P3 真路径（surface/CAContext 实时内容）不可行**；不要再用 rect/selector/surface 3 重试。
+
+- **可行（仅指 fallback，不是真路径）——只在 fallback3 出图时成立**：
+  - fallback3 host-replay 截图/dump 的 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**；
+  - 必须注明 **“这是拉面占位，不是真 widget 内容”**；不能写成 P3 真路径可行。
+  - 当前 fallback2 已证明 local panel 看不到 replay fbo 的 fallback；fallback3 结果待填。
+
+- **需要更多信息**：
+  - 只缺一个具体测量：**extension check-in 修复后再跑一次 P3**（能拿到 widget extension 的实时内容/CAContext 快照）。
+  - 不是“还没试够”；surface 枚举、D1/D2/D3、fallback2 都已经做过。若 owner 决定再攻 extension timeout，才选这条；否则选不可行。
 
 **到期填写**
 
 | 项 | 值 |
 |---|---|
 | 判定时间 | 2026-11-10 14:06（到期后填实际） |
-| 结论 | 可行 / 不可行 / 需要更多信息（三选一） |
-| 关键证据 | 引用 §4.26/§4.27/§4.28 的行 |
-| fallback 是否交付 | 是 / 否 + 路径/说明 |
+| 真路径结论 | **不可行**（证据链见上：surface 枚举/allContexts/无零参 snapshot/extension timeout） |
+| 最终三选一 | **不可行**（若 owner 选择再攻 extension，则改为「需要更多信息」） |
+| fallback 交付 | 待 fallback3：出图 = 已交付；不出图 = 未交付（仍不是真路径） |
 | 需要 owner 决定 | 是否再攻 extension check-in timeout（P2/P3 共同前置） |
 
 **fallback 实现（不是 P3 通过）**
@@ -2416,6 +2452,31 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 - 所有 guest 构建统一 `PREBUILT=1 IOSVM_USE_LLD=1 RC=rc.vtop`；不要在一个 boot 里换镜像。
 - `GLWIRE_LOCAL=1` 的构建把 `/redwood/etc/glwire_local` 写进镜像（guest 本地绘制）；cell3/4 的 host 需要 `GLWIRE_NO_PANEL=1` 走重放。
 - 镜像尺寸/内容不同，**四格必须各用各的 image**；不能用同一个 root.apfs 冒充四格。
+
+**构建命令（每格一份 root.apfs；system.apfs 不参与四格）**
+
+```sh
+cd /host/iosvm-work/hakios-xnu-kernel/userland
+
+# cell1 纯本地（无记录器）
+PREBUILT=1 IOSVM_USE_LLD=1 GL=1 CONFIGD=1 RC=rc.vtop ./build.sh
+cp root.apfs /tmp/root-local.apfs
+
+# cell2 按引用
+PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1 RC=rc.vtop ./build.sh
+cp root.apfs /tmp/root-byref.apfs
+
+# cell3 W1.5（W3 关）
+PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 GLWIRE_NO_INPLACE=1 CONFIGD=1 RC=rc.vtop ./build.sh
+cp root.apfs /tmp/root-w15.apfs
+
+# cell4 W1.5+W3（in-place 开）
+PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
+cp root.apfs /tmp/root-w15w3.apfs
+```
+
+> 每次 `build.sh` 也会处理 system.apfs；四格只用 root.apfs。不要把一个 root.apfs 复制成四份冒充四格；四个 env 组合必须分别构建。
+
 
 ### 8.2 20s 滚动窗口（同一触摸脚本）
 

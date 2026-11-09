@@ -41,7 +41,7 @@
 | P0 | 标签是文字（**已达成 2/3：v7+v9**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
 | P2 | 壁纸（**停止：C2 不是 elision（xpcproxy 生效但仍 7–11s 被杀；16 CHECK_IN_TIMEOUT / 0 alive）；与 P3 共同根因=extension check-in timeout；P2 性价比低/需更多信息；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
-| P3 | widget（**D3 失败（第三次，到放弃线）：SpringBoard allContexts 16 个也不含 155x155 widget host；widget context 属 extension 进程；无零参 snapshot；与 P2 共同根因=extension check-in timeout；转 fallback（已实现 `GLWIRE_WIDGET_FALLBACK=1`；fallback2 画了但 panel 看不到，fallback3 host-replay 待跑、未验收）；surface 枚举 30 个面无 widget 尺寸（真路径不可行）；§4.29 收口模板待填；P3 未完成**） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
+| P3 | widget（**D3 失败（第三次，到放弃线）：SpringBoard allContexts 16 个也不含 155x155 widget host；widget context 属 extension 进程；无零参 snapshot；与 P2 共同根因=extension check-in timeout；转 fallback（已实现 `GLWIRE_WIDGET_FALLBACK=1`；fallback2 画了但 panel 看不到，fallback3 host-replay 待跑、未验收）；surface 枚举 30 个面无 widget 尺寸（真路径不可行）；§4.29 已填「真路径不可行」，只剩 fallback3 交付验收；P3 未完成**） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
 | P4 | 收尾（**脚本就绪、未跑四格**；执行配方见 runbook §八） | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
 
 ---
