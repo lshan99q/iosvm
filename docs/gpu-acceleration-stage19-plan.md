@@ -40,7 +40,7 @@
 |---|---|---|---|
 | P0 | 标签是文字（**已达成 2/3：v7+v9**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
-| P2 | 壁纸（**进行中：P2c-timer timer/层树通，wallpaper VC 链在但 contents 空；P2d 四 job 单变量待跑；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
+| P2 | 壁纸（**进行中：P2d 依赖对照失败（仅 profiled 起来；powerlog plist 被拒；Photos 仍 error 22）；依赖不是原因；转 poster scene/配置深挖；P2 未达成**） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
 | P3 | widget | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
 | P4 | 收尾 | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
 
@@ -299,7 +299,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 | D1 | P0 诊断 + VBO 影子/快照 | 宿主日志 attrib 3 回到 0.125..0.5 |
 | D2 | P1 绕开 darken → 修 backdrop | 能读出 App 名称的截图；**实际 P1a：`SKIP=13` Weather 562→44；全标签 101.7%（重分布）；P1b `TC0_SANITIZE` 53.9% 但 Weather 719→741；P1c 点带在 glyph tile alpha；P1d end 清底部出竖条；P1e start 清空白顶行、band 73.6% 但分标签有升有降；trim 方向停止，P1 暂停** |
 | D3 | 三发验证 | ≥2/3 发标签为文字、截图 ≥300 KB、diff ≥95%；**实际 v7 99.85%、v9 99.98%（2/3）；v8 89.53% 因 dump 落在 UI 加载动画，不计入** |
-| D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；P2c-timer timer 900s fired、404 行层树、wallpaper VC 链在屏，但 contents=0、无 PosterBoard CALayerHost；1,261 张 750x1624 全 panel，背景纯黑；P2 未达成；P2d 四 job 待跑** |
+| D4 | P2 壁纸 | lookup 不失败 / 壁纸纹理进宿主；**实际 P2：lookup 0 失败、PosterBoard running；P2c-timer timer 900s fired、404 行层树、VC 链在但 contents=0；P2d 四 job 仅 profiled 成功，powerlog plist 被拒、Photos 仍 error 22；405 行层树同形、背景纯黑；依赖不是原因；P2 未达成** |
 | D5–D6 | P3 widget（时间盒） | 可行/不可行结论 |
 | D7 | P4 四格表 + 收尾 | 四个数字 + `make test` + 推送 |
 
@@ -308,7 +308,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 P0 已达成 2/3（v7+v9），但只覆盖「名称上屏」。下一阶段按 P1 → P2 → P3：
 
 - **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1e：FNV 证明 upload row0=视觉顶部，`TRIM_FROM=start` 清的是空白顶行；band 6989→5146（73.6%）但 Wallet +1244%、Health +70%、Photos +81%，trim 不是干净修复。停止 trim，转查 90 高背板/复合层；P1 方向暂停，优先 P2 依赖/P3。P1 未修复。**
-- **P2 壁纸**：P2 修好 lookup、PosterBoard running；P2b 触发失败；P2c-alt/alt2 证明跨进程 notify 不可用。工具链已解除（SDK/cctools/ld64 + `IOSVM_USE_LLD=1`），新 `libhakios.sb.dylib` 108,248 B。**P2c-timer**：`layers timer 900s fired`、404 行层树、9 window；`_SBWallpaperSecureWindow` 与 `PBUIPosterWallpaperRemoteViewController → PBUIPosterWallpaperViewController → PBUIPosterViewController` 375x812 opacity 1 都在屏，但壁纸子树 `contents`=0、无 PosterBoard 的 `CALayerHost`；1,261 张 750x1624 全 panel，背景纯黑。结论前移到「远程 poster 内容没接上/没画出来」，P2 未达成。**P2d**：单变量加 4 个 job（profiled / powerlogHelperd / Video+ImageConversion），只重建 root.apfs、复用 108,248 B sb 库、boot `layers_at=900`；判据 PosterBoard CALayerHost/contents、第二张 750x1624 非 panel、背景非黑；若仍无 CALayerHost → 「依赖不是原因，回到 poster scene/配置」。
+- **P2 壁纸**：P2 修好 lookup、PosterBoard running；P2b 触发失败；P2c-alt/alt2 证明跨进程 notify 不可用。**P2c-timer**：`layers timer 900s fired`、404 行层树、9 window；`_SBWallpaperSecureWindow` 与 `PBUIPosterWallpaperRemoteViewController → PBUIPosterWallpaperViewController → PBUIPosterViewController` 375x812 opacity 1 都在屏，但壁纸子树 `contents`=0、无 PosterBoard 的 `CALayerHost`；1,261 张 750x1624 全 panel，背景纯黑。**P2d**：加 4 个 stock job（root 04:11Z/5,906,432 B/md5 `b59fcf66…`；备份 `/tmp/root.apfs.bak-P2d`）；profiled 成功（`user/501` spawn，lookup 0），powerlogHelperd 被 launchd 拒绝（`Unknown key ... UNUserNotificationCenter`），Video/ImageConversion 仍 error 22；405 行层树与 P2c-timer 同形（contents=0、无 PosterBoard CALayerHost、背景纯黑）。**依赖不是原因**，P2 未达成；下一步回到 poster scene/配置深挖（PosterBoard 是否创建/发布 scene、SpringBoard 是否发起 remote view 连接），不再加 daemon plist 硬试。
 - **P3 widget**：`312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天）。
 - **回归基线**：不要用 v8 的动画帧当基线（v8 的 panel 已完整、picture 还停在前一状态，89.53% 是采样时刻问题）；用 v7/v9 这类静态时刻，或给 dump 加「连续两帧 panel/picture 稳定」门槛。
 
