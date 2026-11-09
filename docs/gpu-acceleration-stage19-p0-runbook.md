@@ -2027,6 +2027,48 @@ UIWindowLayer "colour ( 0 1 )"
 - **D3 建议**：把 CAContext 探针移到 **SpringBoard（`inject_sb.c`）**，在同样的 900s 延迟里跑（SpringBoard 是 widget host 的 client，`allContexts` 应能看到 155x155 的 context）；对候选调 `createImageSlot:hasAlpha:`/`createImage` 取 nonzero>0。或继续用显式 id，但必须同 boot 传递（成本更高）。
 - 这是第 2 次 D1 尝试（auto@init、auto@900）；未到 3 次放弃线。**P3 未完成，不要写 D2 成功 / widget 正确。**
 
+#### D3（已 GO，第三次尝试）：CAContext 探针移到 SpringBoard
+
+> **状态：D3 已 GO、结果待填。** D2 证明 `+allContexts` 在 backboardd 里按进程隔离，看不到 SpringBoard 的 widget host context；D3 把同款探针移到 **SpringBoard（`inject_sb.c`）**——SpringBoard 是 widget host 的 client，`allContexts` 应能看到 155x155 的 context。
+
+**D3 行为**
+
+- 在 `inject_sb.c` 里用同款 **`widget_cacontext_at=SECONDS`**（建议 900s）延迟，在 main queue 上跑。
+- `+allContexts` 逐项打印 class/contextId；对零参返回对象的 `createImage`/`createCGImage`/`snapshot` 做快照，打印 W/H/bpp/bpr/bytes/前 16/nonzero。
+- `createImageSlot:hasAlpha:`/`createImageWithOptions:` 只打印 responds/encoding，**不调用**（slot/options 仍不猜）。
+- **`nonzero>0` 且 32 ≤ W,H ≤ 4096** 才打印 `widget candidate`。
+- 仍**不接 202**；host 不开 `GLWIRE_WIDGET`。
+- **缺省静默**：不设 `widget_cacontext_at` 时不打探针日志。
+
+**库/patch**
+
+| 项 | 值 |
+|---|---|
+| `libhakios.sb.dylib` | **109,632 B**，md5 **`02dfa907c6e7b3be833100f5a90c6a69`**，mtime **09:20:34Z**；strings 含 `widget_cacontext_at=`、`contextWithId:`、`widget candidate` |
+| `libhakios.dylib` | 92,872 B（D2 版，未变） |
+| `libhakios.gl.dylib` | 400,720 B（未变） |
+| 旧 sb 备份 | `/tmp/libhakios.sb.p3a.dylib`（108,248 B，P3a 版；exp 侧） |
+| patch | `/host/iosvm/logs/s19o-p3-d3.patch`（**358 行**） |
+
+**exp 流程（已 GO）**
+
+- 用 **P3b-D2 的 root.apfs**（`fc1787e4…`）只换 `libhakios.sb.dylib` 109,632 B，重打 root；不设 `SYSTEM`，system.apfs 不动。
+- boot：`widget_cacontext_at=900 layers_at=950`；host **不开 `GLWIRE_WIDGET`**；`GLWIRE_NO_PANEL=1`。
+- 候选 cid 与 **同 boot 950s 层树**的 155x155 widget host 对照；`nonzero>0` 才算成功。
+- 若 SpringBoard 的 `allContexts` 也只有自己/全 0 → **D3 失败/需 CAContext 跨进程（render server）**，按时间盒转 fallback。
+
+**判据**
+
+1. `widget_cacontext_at` timer 到点、`+allContexts` 在 SpringBoard 里被调用；
+2. 至少一个 context 对象被打印；
+3. 至少一个快照 `nonzero>0` 且尺寸合理，打印 `widget candidate`；
+4. 与 **同 boot 950s 层树**的 155x155 widget host id 对照（`0x…`，不是上一 boot）；
+5. 全空/全黑按 §4.28 的放弃条件处理。
+
+- **D3 是第三次尝试**（D1 auto@init、D2 auto@900、D3 SpringBoard）；若 SpringBoard 也看不到或仍全空/全黑 → **D3 失败/需跨进程传递**，按放弃条件转 fallback（拉面最小实现或「需更多信息」），不再盲试私有 selector。
+- 结果待填；**P3 未完成，不要写 D2/D3 成功 / widget 正确。**
+
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
