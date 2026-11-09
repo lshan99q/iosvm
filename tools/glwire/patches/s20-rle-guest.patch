@@ -1,0 +1,153 @@
+--- a/userland/src/eagl_remote.c
++++ b/userland/src/eagl_remote.c
+@@ -633,6 +633,28 @@
+ 	return on;
+ }
+ 
++static int
++remote_upload_rle(void)
++{
++	static int parsed = -1;
++	static int on;
++
++	if (parsed >= 0) {
++		return on;
++	}
++	parsed = 1;
++	{
++		const char *env = getenv("GLWIRE_UPLOAD_RLE");
++		const char *argument = remote_boot_arg("glwire_upload_rle=1");
++
++		on = (env != NULL && strcmp(env, "0") != 0) || argument != NULL;
++	}
++	if (on) {
++		remote_say("hakios-remote: upload-rle=1\n");
++	}
++	return on;
++}
++
+ static void
+ expand_565_row(unsigned char *dst, const uint16_t *src, int width)
+ {
+@@ -856,10 +878,11 @@
+ 		remote_surface2_segments_count = 0;
+ 		remote_surface2_row = 0;
+ 	}
+-	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d %d %d %d %d %d\n",
++	snprintf(request, sizeof(request), "R %d %d %zu %zu %d %d %d %d %d %d %d %d\n",
+ 	    width, height, w.at, (size_t)width * height * 4, remote_picture_segments_count,
+ 	    remote_picture_row, remote_surface2_segments_count, remote_surface2_row,
+-	    2 /* the record header names its context */, remote_dirty_upload(), remote_upload_565());
++	    2 /* the record header names its context */, remote_dirty_upload(), remote_upload_565(),
++	    remote_upload_rle());
+ 	if (send(remote_fd, request, strlen(request), 0) != (ssize_t)strlen(request) ||
+ 	    (remote_picture_segments_count > 0 &&
+ 	     send(remote_fd, remote_picture_segments,
+@@ -960,6 +983,107 @@
+ 		close(remote_fd);
+ 		remote_fd = -1;
+ 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
++		return 0;
++	}
++	if (reply[0] == 'Z') {
++		size_t raw = 0, packed_size = 0;
++		unsigned char *packed_bytes;
++		unsigned char *pixels;
++		size_t out = 0, in = 0;
++		int pixel_bytes;
++		long began;
++
++		if (sscanf(reply, "Z %zu %zu", &raw, &packed_size) != 2) {
++			goto bad_z;
++		}
++		if (raw == (size_t)width * (size_t)height * 2) {
++			pixel_bytes = 2;
++		} else if (raw == (size_t)width * (size_t)height * 4) {
++			pixel_bytes = 4;
++		} else {
++			goto bad_z;
++		}
++		if (packed_size > raw + raw / 64 + 32) {
++			goto bad_z;
++		}
++		packed_bytes = malloc(packed_size);
++		pixels = malloc(raw);
++		if (packed_bytes == NULL || pixels == NULL ||
++		    !remote_recv_all(remote_fd, packed_bytes, packed_size)) {
++			free(packed_bytes);
++			free(pixels);
++			goto bad_z;
++		}
++		began = remote_now_ms();
++		while (in < packed_size) {
++			unsigned code = packed_bytes[in++];
++
++			if ((code & 0x80) != 0) {
++				size_t run = (code & 0x7f) + 3;
++
++				if (in + pixel_bytes > packed_size) {
++					break;
++				}
++				while (run-- > 0 && out + pixel_bytes <= raw) {
++					memcpy(pixels + out, packed_bytes + in, (size_t)pixel_bytes);
++					out += (size_t)pixel_bytes;
++				}
++				in += (size_t)pixel_bytes;
++			} else {
++				size_t literal = code + 1;
++
++				if (in + literal * (size_t)pixel_bytes > packed_size) {
++					break;
++				}
++				if (out + literal * (size_t)pixel_bytes > raw) {
++					break;
++				}
++				memcpy(pixels + out, packed_bytes + in, literal * (size_t)pixel_bytes);
++				out += literal * (size_t)pixel_bytes;
++				in += literal * (size_t)pixel_bytes;
++			}
++		}
++		if (out != raw) {
++			remote_say("hakios-remote: RLE short %zu of %zu bytes\n", out, raw);
++			free(packed_bytes);
++			free(pixels);
++			goto bad_z;
++		}
++		{
++			long unpack_ms = remote_now_ms() - began;
++
++			for (int y = 0; y < height; y++) {
++				unsigned char *dst;
++
++				if (remote_upload_fast() && remote_target_base != NULL &&
++				    remote_target_width == width && remote_target_height == height &&
++				    remote_target_row >= (size_t)width * 4) {
++					dst = (unsigned char *)remote_target_base + remote_target_row * (size_t)y;
++				} else {
++					dst = remote_frame + 8 + (size_t)y * (size_t)width * 4;
++				}
++				if (pixel_bytes == 4) {
++					memcpy(dst, pixels + (size_t)y * (size_t)width * 4, (size_t)width * 4);
++				} else {
++					expand_565_row(dst, (const uint16_t *)(pixels + (size_t)y * (size_t)width * 2), width);
++				}
++			}
++			remote_say("hakios-remote: upload-rle %s raw %zu -> packed %zu B (%zu%%), unpack %ld ms\n",
++			    pixel_bytes == 4 ? "bgra" : "565", raw, packed_size,
++			    raw ? packed_size * 100 / raw : 0, unpack_ms);
++		}
++		free(packed_bytes);
++		free(pixels);
++		remote_ack_success(remote_fd);
++		remote_frames++;
++		remote_total_us += (long)(remote_now_ms() - started) * 1000.0;
++		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
++		return remote_upload_fast() ? 3 : 1;
++bad_z:
++		remote_say("hakios-remote: bad RLE reply '%s'\n", reply);
++		close(remote_fd);
++		remote_fd = -1;
++		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
+ 		return 0;
+ 	}
+ 
