@@ -2128,7 +2128,10 @@ static int fbo_log;
 static int probe_errors;
 static int keep_binding;
 static int read_panel;              /* (stage 17: read the picture from the panel-sized target) */
+static int frame_readback_ok = 1;   /* viewport nonzero: a frame with no panel draw must not send black */
 static GLuint panel_drawn_fbo;      /* the panel-sized target this frame last had a draw */
+static GLuint panel_upload_texture; /* a full-panel opcode-201 upload this frame: the fallback picture */
+static int panel_upload_frame;
 static int panel_drawn_frame = -1;
 static int frame_delay_ms;          /* (stage 15: a deliberate per-frame delay, for the timing question) */
 /* GLWIRE_POLL_MS: bound the main loop's otherwise infinite poll.  It is a measurement knob, not a
@@ -3835,6 +3838,8 @@ serve_frame(struct client *client)
 	glGetIntegerv(GL_VIEWPORT, &saved_viewport[0]);
 	client->names.stand_in = client->framebuffer;
 	panel_drawn_fbo = 0;             /* (stage seventeen: the frame's panel target starts unknown) */
+	panel_upload_texture = 0;
+	panel_upload_frame = 0;
 	shadow_frame = -1;
 	shadow_used = 0;
 	if (keep_binding && client->names.framebuffer_known && client->names.bound_framebuffer != 0) {
@@ -3964,6 +3969,7 @@ serve_frame(struct client *client)
 
 		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
 		glGetIntegerv(GL_VIEWPORT, box);
+		frame_readback_ok = box[2] > 0 && box[3] > 0;
 		if (bound != 0) {
 			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &kind);
@@ -4024,6 +4030,14 @@ serve_frame(struct client *client)
 			 * before the read-back, so the picture includes the widgets) */
 			glBindFramebuffer(GL_FRAMEBUFFER, target);
 		}
+	}
+	if (!frame_readback_ok && panel_upload_texture != 0 &&
+	    panel_upload_frame == (int)frames_replayed + 1) {
+		glBindTexture(GL_TEXTURE_2D, panel_upload_texture);
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+		frame_readback_ok = 1;
+		printf("host_glwire: read-back fallback texture %u (full-panel upload)\n", panel_upload_texture);
+		fflush(stdout);
 	}
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 	/*
@@ -4208,7 +4222,19 @@ serve_frame(struct client *client)
 		unsigned char *packed = NULL;
 		int length;
 
-		if (rle_wanted && !rgb565_wanted && !in_place) {
+		if (rle_wanted && !rgb565_wanted && !in_place && !frame_readback_ok) {
+			/* A frame that ends with a 0x0 viewport has no panel draw; reading it would send a
+			 * black picture over the previous one.  A D 0 reply makes the guest keep its surface. */
+			if (!send_all(client->fd, "D 0 0\n", 6)) {
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+			printf("host_glwire: rle skip empty readback\n");
+			fflush(stdout);
+		} else if (rle_wanted && !rgb565_wanted && !in_place) {
 			size_t cap = frame_bytes + frame_bytes / 64 + 16;
 			unsigned char *packed_rle = malloc(cap);
 			size_t out = 0, i = 0, pixels = (size_t)width * (size_t)height;

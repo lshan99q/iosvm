@@ -697,6 +697,10 @@ switch (opcode) {
 		printf("glwire: upload texture %u target %#x internal %#x %dx%d format %#x type %#x row %d pixel %d bytes %d\n",
 		    texture, target, internal, width, height, format, type, row_bytes, pixel_bytes, bytes);
 		fflush(stdout);
+		if (width == trace_width && height == trace_height && target == GL_TEXTURE_2D) {
+			panel_upload_texture = texture;
+			panel_upload_frame = (int)frames_replayed + 1;
+		}
 		names_texture_upload(g, texture, target, internal, width, height, format, type,
 		    row_bytes, pixel_bytes, data);
 		break;
