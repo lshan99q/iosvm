@@ -28,6 +28,10 @@ byte-run loop, no per-pixel channel work.
 - guest `upload-rle bgra raw 4872000 -> packed N B (Z%), unpack X ms`
 - target packed **≤800 KB**, host pack **<50 ms**, guest back to 10–14 fps, host frames grow,
   screenshot colors exact for BGRA (no 565 quantization; 565 optional).
+- RLE3: host logs `read-back ... viewport 0,0 0x0` for most late frames: no panel draw in that
+  frame, so the host was packing a black picture and the guest kept its only 3 real panels.
+  RLE now replies `D 0 0` (`rle skip empty readback`) when the viewport is 0x0; the guest keeps
+  the surface (`sent==3` for RLE+fast) instead of overwriting it with black.
 - RLE3: unpack 84–105 ms (target met).  The host actually logged **106 frames** (the "3 frames"
   report counted only the sparse frame lines); guest `upload-rle` also 106.  The guest display
   showed only 3 because the fast/RLE path wrote the first panel surface and the display alternates
@@ -36,8 +40,8 @@ byte-run loop, no per-pixel channel work.
 - If guest still starves after packed is small and the second surface is filled, the guest unpack
   loop is the next worker candidate; log `unpack ms` decides.
 
-Lib **419,072 B / md5 2daf37f0e72e528c0b7066e58e417de0**; host **124,000 B / md5
-d80f7ca34e49216c2d31fce7b7e8d169**.  RLE2: packed **51,202 B (1% of 4.87 MB, ~95x)**, host pack 1 ms, but guest unpack was **396–451 ms** because the repeat path did a 4-byte `memcpy` per pixel.  The repeat path now uses `memset` for 0/0xffffffff and a 32-bit fill otherwise; literals stay one `memcpy`.  If unpack is still >150 ms, the next step is a worker, not another RLE tweak.
+Lib **419,072 B / md5 ff3f63d5f25b2fab83803bbc6d3f448e**; host **128,144 B / md5
+3562ed74b2d10cbacebc4b9914989e8e**.  RLE2: packed **51,202 B (1% of 4.87 MB, ~95x)**, host pack 1 ms, but guest unpack was **396–451 ms** because the repeat path did a 4-byte `memcpy` per pixel.  The repeat path now uses `memset` for 0/0xffffffff and a 32-bit fill otherwise; literals stay one `memcpy`.  If unpack is still >150 ms, the next step is a worker, not another RLE tweak.
 
 Options observability: init now logs
 `options raw="<kern.bootargs>" parsed local=... fast=... 565=... rle=... dirty=... ack=... scale=...`;

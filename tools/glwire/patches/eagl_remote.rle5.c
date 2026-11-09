@@ -1085,7 +1085,9 @@ eagl_remote_flush(int width, int height)
 		remote_frames++;
 		remote_total_us += (long)(remote_now_ms() - started) * 1000.0;
 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
-		return 1;
+		/* RLE fast keeps the surface itself; a D 0 keep-alive must not copy the stale
+		 * remote_frame over it.  The dirty tile path still needs the copy. */
+		return remote_upload_rle() && remote_upload_fast() ? 3 : 1;
 dirty_failed:
 		remote_say("hakios-remote: dirty upload truncated (%zu of %zu), frame dropped\n", got_total, total);
 		close(remote_fd);
