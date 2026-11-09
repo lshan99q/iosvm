@@ -2101,9 +2101,9 @@ UIWindowLayer "colour ( 0 1 )"
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
 - **P3 未完成；P2 仍未达成。**
 
-### 4.29 P3 时间盒收口：真路径不可行，只剩 fallback3 验收待填（2026-11-10 14:06 到期）
+### 4.29 P3 时间盒收口：真路径不可行，fallback 转 guest-side 待验收（2026-11-10 14:06 到期）
 
-> **状态：证据已收齐，真路径判定为「不可行」；只剩 fallback3 截图验收待填。** P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
+> **状态：证据已收齐，真路径判定为「不可行」；host fallback3 已证明 host 侧不可见，fallback 转 guest-side placeholder，待实现/验收。** P3 最终只允许三种结论：**可行 / 不可行 / 需要更多信息**；fallback 不是真路径。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2115,7 +2115,7 @@ UIWindowLayer "colour ( 0 1 )"
 - **没有 155x155 pt（310x310 @2x / 465x465 @3x）或任何 widget 尺寸候选**；同 boot 950s 层树 155x155 `CALayerHost` = **`0x500b566f`/`0x7f535c4c`**，与枚举表任何 id 无对应。
 - → **widget 内容面不是 MiniIOSurface，而是 widget extension 的远程 CAContext**；`surface → opcode 202 → 真实 widget` 的 surface 路径**不可行**（没有可点的 id）。
 - 同 boot 试合成 id3/id4 时，host 收到的是全零 202（`widget upload texture 0 ... 0x0 rect 0,0`），截图 widget 区仍 mean 251 白块；这是主队列调 `eagl_remote_widget_upload` 的编码/remote 状态技术问题（P3a 从 widget 线程调用正常），不影响枚举结论。
-- fallback 验收 boot 已 GO，但 **fallback2 没出图**（local panel vs replay fbo）；fallback3 host-replay 待跑。P3 真实路径不可行，最终三选一只剩 fallback3 交付状态待填。
+- fallback2 没出图（local panel vs replay fbo）；fallback3 host-replay 也没出图（QEMU 截图是 guest scanout，host fallback 是 offscreen picture）；**host-side fallback 不可视觉交付**，转 guest-side placeholder。P3 真实路径不可行，最终三选一只剩 guest-side fallback 验收状态待填。
 
 **判据逐条对照**
 
@@ -2127,7 +2127,7 @@ UIWindowLayer "colour ( 0 1 )"
 | 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | **❌** |
 | 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | **❌** |
 | 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | **❌** |
-| 7 | fallback（拉面最小实现）可交付 | **已实现；fallback2 画了但截图看不到（local panel vs replay fbo）；fallback3 host-replay 待跑；未验收通过**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 fallback3 host-replay 截图验收（不是 P3 通过） |
+| 7 | fallback（拉面最小实现）可交付 | **host fallback 不可见；guest-side fallback 待实现/验收**：fallback2 画了但 panel 看不到；fallback3 host-replay 仍看不到（截图=guest scanout，host fallback=offscreen picture）；转 `inject_sb.c` 的 `widget_placeholder=1`，待实现/验收。host 侧实现细节：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B（fallback2 md5 `68d89e54…`；fallback3 实际 `28f484a1…`） | 待 guest-side placeholder 截图验收（不是 P3 通过） |
 | 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | **❌** |
 
 **三选一判定（已填到只剩 fallback3）**
@@ -2139,10 +2139,10 @@ UIWindowLayer "colour ( 0 1 )"
   4. **extension 5–13s 被 check-in timeout 杀**（P2e/P2e-C2；18 个扩展），P3 实时 widget 内容在 extension 修复前不可得。
   → 结论：**P3 真路径（surface/CAContext 实时内容）不可行**；不要再用 rect/selector/surface 3 重试。
 
-- **可行（仅指 fallback，不是真路径）——只在 fallback3 出图时成立**：
-  - fallback3 host-replay 截图/dump 的 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**；
+- **可行（仅指 fallback，不是真路径）——只在 guest-side placeholder 出图时成立**：
+  - guest-side `widget_placeholder=1` 截图里 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**；
   - 必须注明 **“这是拉面占位，不是真 widget 内容”**；不能写成 P3 真路径可行。
-  - 当前 fallback2 已证明 local panel 看不到 replay fbo 的 fallback；fallback3 结果待填。
+  - fallback2/fallback3 已证明 host 侧 fallback 在截图里不可见；guest-side 结果待填。
 
 - **需要更多信息**：
   - 只缺一个具体测量：**extension check-in 修复后再跑一次 P3**（能拿到 widget extension 的实时内容/CAContext 快照）。
@@ -2162,7 +2162,9 @@ UIWindowLayer "colour ( 0 1 )"
 
 - `GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）：先做空白检测（≥90% 近白），命中后画 24px 棋盘、3px 白边框、两条黄对角线；日志明确写 `widget fallback ... (NOT the real widget path)`。
 - 没有 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画占位。
-- `widget_test` 5 例 PASS；host binary **119,552 B** / md5 **`68d89e541eba0fd34f0f671a21e24659`**。
+- `widget_test` 5 例 PASS；host binary **119,552 B**（fallback2 md5 `68d89e541eba0fd34f0f671a21e24659`；fallback3 实际使用了 blank 修复版 `28f484a1ed55da720cb7b78e4eb0f602`）。
+- **host 侧 fallback 已证明不可视觉交付**（fallback2/3：截图是 guest scanout，host 画在 offscreen picture）；保留作分析用。
+- **交付改走 guest-side**：`inject_sb.c` 的 `widget_placeholder=1` 在 UI 后插圆角 UIView（棋盘+白框+黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`；待实现/验收。
 - 这是 **fallback 交付项**，截图验收前不要写成 P3 可行/已完成。
 
 **不要写**：P3 已交付 / widget 已正确 / P2 已修复。P3 未完成；P0 仍 2/3；P1 暂停。
@@ -2194,9 +2196,9 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 
 **结论**：P3 的「surface → opcode 202 → 真实 widget」路线**不可行**（没有可点的 surface id）；widget host 的像素在 extension 的远程 context 里，不在 MiniIOSurface 表。
 
-### 4.31 s19o-p3-fallback 验收：第一发没画、fallback2 画了但 panel 看不到，fallback3 待跑
+### 4.31 s19o-p3-fallback 验收：host fallback 在截图里始终不可见，转 guest-side placeholder
 
-> **状态：fallback2 已跑、验收仍未通过；fallback3 已 GO、待跑。P3 未完成。** 第一发 host 没画 fallback（blank 判定不触发）；fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。 host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。
+> **状态：fallback2/fallback3 都已跑、host 侧 fallback 视觉不可交付；guest-side placeholder 待实现/验收。P3 未完成。** 第一发（11:18Z）：host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。
 
 **配置**：root `f29594ab…`；host_glwire **119,552 B / md5 `68d89e541eba0fd34f0f671a21e24659`**（含 `GLWIRE_WIDGET_FALLBACK`）；`XCMD="glwire_local=1 widget_surface=3 widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1"`；`end=ui ui=750s biggest=356986 panic=0`。
 
@@ -2214,12 +2216,20 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - 截图：widget 区 mean **251**、`(255,255,255) ×208,907`、无棋盘/白框/两条黄对角线、纯绿 0 → **视觉验收未通过**。
 - 根因：`glwire_local=1` 时截图是 **guest 合成 panel**；host `host_widgets_compose()` 画在 **replay fbo**，两者不是同一块像素 → fallback 行有、panel 截图不变。**fallback 代码/rect 本身 OK**，是验收路径错。
 
-#### fallback3（已 GO，待跑）：host-replay 视觉验收
+#### fallback3（已跑，host-replay 仍不可见）
 
-- 模式：**host-replay**，**不带 `glwire_local`**；`XCMD="widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1 GLWIRE_WIDGET_RECT=46,142,309,309"`。
-- 可选 `GLWIRE_DUMP` 直接看 host picture（比截图更直接）。
-- 判据：截图或 dump 的 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**；只证明 fallback 视觉可用，**不是 P3 真路径**。
-- 结果待填；fallback 未验收通过，P3 未完成。
+- 配置：root `f29594ab…`；host 实际二进制 **119,552 B / md5 `28f484a1ed55da720cb7b78e4eb0f602`**（起跑时 `68d89e54…`，中途更新为 blank 修复版）；`XCMD="widget_rect=46,142,309,309"`（**无 glwire_local**）；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1 GLWIRE_WIDGET_RECT=46,142,309,309 GLWIRE_DUMP=/tmp/s19o-p3-fallback3/f"`。
+- boot：`end=ui` 660s、截图 **323,223 B**、host 3,367 帧、无 panic（`guestframes=0`，host-replay）。
+- host：`widget fallback 1 rect(s) ... first 46,142 309x309` **×4**；`widget compose`=0。
+- 截图：widget 区 mean **251**、`(255,255,255)×208,907`、无棋盘/白框/黄对角线、纯绿 0。
+- dump：只在 **11:47（frame 2/3）** 写 picture/panel，当时启动黑屏、widget 区 0；11:56 转出的 PNG 同样黑——**UI 后没有 dump**。
+- **定性**：QEMU 截图来自 **guest scanout（SpringBoard/panel）**；host `host_widgets_compose()`/fallback 只进自己的 **offscreen picture**，二者不是同一块像素。**host-replay 也改不了**；host 侧 fallback 无法视觉交付，P3a 的白块同理。
+
+#### guest-side placeholder（已派 code，待实现/验收）
+
+- `inject_sb.c` 加 **`widget_placeholder=1`**：UI 后在 `_SBWallpaperSecureWindow` / root view 的 widget 区域插一个圆角 `UIView`（24px 棋盘 + 3px 白边框 + 两条黄对角线），日志 **`static widget placeholder ... (NOT the real widget path)`**。
+- exp 换 sb 库，boot `XCMD="glwire_local=1 widget_placeholder=1"` 验收；截图应能看到占位，**这是 guest scanout 上的拉面，不是真 widget 路径**。
+- 结果待填；fallback 仍未验收通过，P3 未完成。
 
 ## 五、铁律与提交
 
