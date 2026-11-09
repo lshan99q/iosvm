@@ -2618,3 +2618,33 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 - 工具链在 `/host/iosvm-work/toolchain/`，**不进 git**；Apple SDK/二进制仍遵守 §5.1。
 - 缺 clang/SDK 先查 `.zshrc`/路径；确实缺再上报，并附 `which clang`、`echo $THEOS`、`echo $CCTOOLS_LD64`。
 - P3 的 guest 侧代码也走同一套 `IOSVM_USE_LLD=1` 构建。
+
+## 附录：extension check-in 判定点（P3 离线调查，30 min）
+
+- launchd 在 `Extension is hanging on launch` 前等待的终态是 `extension checked in as alive`（launchd strings 中有 `CheckIn` 与 `checked in as alive`）；判定点是 **launchd 收到扩展进程的 `CheckIn` 消息**，不是 plist 里的 timeout。
+- C2 force xpcproxy 日志：pid 57 已到 `service state: running` / `INIT`，`uncorking exec source upfront`、`created` 后立即出现
+  `Failed to send exception EXC_CORPSE_NOTIFY. error code: 5 for pid 57`；约 0.5 s 后 `Extension is hanging on launch. Killing.`，
+  约 4 s 后 `XPC_EXIT_REASON_EXTENSION_CHECK_IN_TIMEOUT`。即进程在 exec 后/进入 `xpc_main` 前死亡，`CheckIn` 没发出，
+  不是“动作太慢”。
+- 因此 extension 侧必须做的动作是：**进程存活，并在 `xpc_main`/`_EXExtensionMain` 初始化后经 pid-domain bootstrap 发 `CheckIn`**；
+  这段由 ExtensionKit/Foundation 自动完成，外部 launchd 配置改不了。
+- 能走吗：**不能走**。不能靠 launchd plist 让一个已死进程 check-in；`ExtensionWatchdogTimeout=120` 已证明无效。
+- 唯一具体改动（若还有工具注入 extension）：先让进程活到 `xpc_main`（崩溃根因未明），或试 `ExtensionWatchdog=false`
+  （bool，不是 timeout）关闭 watchdog 以暴露真实 exit；但 C1 的 limits 读取路径未证实，成功率低，不应再花超过 30 min。
+- 结论：P2/P3 的 extension 内容路径判“不能走/需 extension 进程存活这个前置条件”，不再作为 P3 主线。
+
+### P4 四格表 dry-run 自检（不跑 QEMU）
+
+`four-cell.sh --dry-run` 用四组合成日志（`/tmp/{pure-local,by-reference,w15,w15-w3}-*`）验证调度、标签与记账，
+实际输出：
+
+```
+| cell | ui | frames | fps | span | shot B | host 0x502 |
+|---|---|---|---|---|---|---|
+| pure-local | 660s | 320 | 16.00 | 20.00s | 1001 | 1 |
+| by-reference | 660s | 340 | 17.00 | 20.00s | 1002 | 0 |
+| w15 | 660s | 360 | 18.00 | 20.00s | 1003 | 0 |
+| w15-w3 | 660s | 380 | 19.00 | 20.00s | 1004 | 0 |
+```
+
+`host 0x502` 只数宿主日志 `glerror 0x502` 行；`ui/frames/fps/span/shot B` 与 CSV 同表。正式四格仍等 P4 镜像。
