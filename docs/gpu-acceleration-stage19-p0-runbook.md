@@ -2103,7 +2103,7 @@ UIWindowLayer "colour ( 0 1 )"
 | 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | ✅/❌ |
 | 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | ✅/❌ |
 | 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | ✅/❌ |
-| 7 | fallback（拉面最小实现）可交付 | **已实现、验收 boot 已 GO，待 exp 截图回填**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 exp 截图验收（不是 P3 通过） |
+| 7 | fallback（拉面最小实现）可交付 | **已实现；fallback2 画了但截图看不到（local panel vs replay fbo）；fallback3 host-replay 待跑；未验收通过**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白（含透明/全零）后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 fallback3 host-replay 截图验收（不是 P3 通过） |
 | 8 | surface 枚举有 widget 尺寸候选 | **❌**：30 个面只有 id3 184x124（旧 snapshot）/id4 312x202（LA08）；无 155x155/310x310/465x465；950s host 0x500b566f/0x7f535c4c 无对应 id | ❌ |
 
 **三选一判定条件**
@@ -2158,9 +2158,9 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 
 **结论**：P3 的「surface → opcode 202 → 真实 widget」路线**不可行**（没有可点的 surface id）；widget host 的像素在 extension 的远程 context 里，不在 MiniIOSurface 表。
 
-### 4.31 s19o-p3-fallback 验收（第一发）：host 没画 fallback（失败）
+### 4.31 s19o-p3-fallback 验收：第一发没画、fallback2 画了但 panel 看不到，fallback3 待跑
 
-> **状态：已回填（2026-11-09 11:18Z）。验收失败。** host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。
+> **状态：fallback2 已跑、验收仍未通过；fallback3 已 GO、待跑。P3 未完成。** 第一发 host 没画 fallback（blank 判定不触发）；fallback2 画了（日志 ×4），但 `glwire_local=1` 的截图是 guest 合成 panel，host fallback 画在 replay fbo，二者不是同一块像素，所以截图仍纯白。 host 收到 surface 3 的 202 上传并 compose，但 **`fallback` 行 0**；截图 widget 区仍纯白（mean RGB 251，top color 255,255,255 ×208,907），无棋盘/白框/黄对角线。
 
 **配置**：root `f29594ab…`；host_glwire **119,552 B / md5 `68d89e541eba0fd34f0f671a21e24659`**（含 `GLWIRE_WIDGET_FALLBACK`）；`XCMD="glwire_local=1 widget_surface=3 widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1"`；`end=ui ui=750s biggest=356986 panic=0`。
 
@@ -2169,6 +2169,21 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 **根因（host 侧）**：`host_widget_blank()` 要求 ≥90% 像素 **B,G,R,A 全部 >235**；surface 3 是未绘制的 184x124 BGRA（全 0/透明或 alpha<235）→ `blank=0` → fallback 分支不触发。
 
 **下一步**：① 用 lead 已给的备选——只开 fallback + `GLWIRE_WIDGET_RECT=46,142,309,309`、**不带 widget_surface**（无 202），`widget_count==0 && have_env_rect` 无条件画占位；② 或 code 修 `host_widget_blank()` 把全 0/alpha=0 也算 blank 后再跑 202 版。**fallback 目前未通过验收，P3 未完成。**
+
+#### fallback2（已跑，日志画了、截图看不到）
+
+- 配置：root `f29594abf78d25d36582d497e2969446`；host_glwire **119,552 B / md5 `68d89e541eba0fd34f0f671a21e24659`**；`XCMD="glwire_local=1 widget_rect=46,142,309,309"`（**无 202**）；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1 GLWIRE_WIDGET_RECT=46,142,309,309"`。
+- boot：`end=ui` 660s、截图 **321,437 B**、无 panic。
+- host：`widget fallback 1 rect(s) (NOT the real widget path), first 46,142 309x309` **×4**；`widget compose` = **0**（预期，无 202）。
+- 截图：widget 区 mean **251**、`(255,255,255) ×208,907`、无棋盘/白框/两条黄对角线、纯绿 0 → **视觉验收未通过**。
+- 根因：`glwire_local=1` 时截图是 **guest 合成 panel**；host `host_widgets_compose()` 画在 **replay fbo**，两者不是同一块像素 → fallback 行有、panel 截图不变。**fallback 代码/rect 本身 OK**，是验收路径错。
+
+#### fallback3（已 GO，待跑）：host-replay 视觉验收
+
+- 模式：**host-replay**，**不带 `glwire_local`**；`XCMD="widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_WIDGET=1 GLWIRE_WIDGET_FALLBACK=1 GLWIRE_WIDGET_RECT=46,142,309,309"`。
+- 可选 `GLWIRE_DUMP` 直接看 host picture（比截图更直接）。
+- 判据：截图或 dump 的 widget 区出现 **24px 棋盘 + 3px 白边框 + 两条黄对角线**；只证明 fallback 视觉可用，**不是 P3 真路径**。
+- 结果待填；fallback 未验收通过，P3 未完成。
 
 ## 五、铁律与提交
 
