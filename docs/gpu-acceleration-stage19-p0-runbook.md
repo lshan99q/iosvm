@@ -1867,52 +1867,34 @@ UIWindowLayer "colour ( 0 1 )"
 
 **判读**：命中「仍 ~9s 被杀 / alive 仍 0」分支 → **不是 elision**。按约定 P2 性价比低/需更多信息，**停止 P2 timeout/xpcproxy 方向**，转 P3。附带：本发晚段画面有绿色右下象限伪影，以后遇到 991 KB 级截图先查 panel 完整性，不要当壁纸证据。
 
-### 4.26 P3 MVP：guest 库/patch 就绪，已 GO（结果待填）
+### 4.26 s19o-p3a 实测：surface 3 → opcode 202 → host 合成链路已通（内容为空白白块）
 
-> **状态：已 GO、跑中/结果待填；库已换进 root.apfs，system.apfs 不动。** 这一节记录准备、参数与风险，不是 P3 结果；不要写 P3 已完成。
+> **状态：已回填（2026-11-09 07:20Z）。MVP 链路验证通过；像素语义不对。** guest `IOSurfaceLookup(3)` → `_eagl_remote_widget_upload`（opcode 202）→ host `widget upload texture` → `widget compose` 到 750x1624 fbo，rect 46,142 309x309 全部按参数发生；但 surface 3 的内容是**纯白圆角块**，不是当前 widget 内容。P3 未完成、widget 未正确。
 
-**guest 库（工具链编出）**
+**镜像/库**
 
-| 库 | 新大小 | 旧大小 | 备份（exp 侧） | strings |
-|---|---:|---:|---|---|
-| `libhakios.dylib` | **90,720 B** | 90,128 B | `/tmp/libhakios.pre-p3.dylib` | `eagl_remote_widget_upload`、`widget_surface=`、`widget_rect=`、`widget_scale=` |
-| `libhakios.gl.dylib` | **400,720 B** | 401,816 B | `/tmp/libhakios.gl.pre-p3.dylib` | `_eagl_remote_widget_upload` |
+| 项 | 值 |
+|---|---|
+| root.apfs | 2026-11-09 06:54Z，5,910,528 B，md5 **`f24721948583b3d3b379c14c2d852a23`** |
+| system.apfs | 未动：2,476,752,896 B，md5 `8bf5f838d52e46d6c8bf77f13a5ad946` |
+| guest 库 | `libhakios.dylib` **90,720 B**、`libhakios.gl.dylib` **400,720 B**（镜像内同尺寸；strings `widget_surface=` / `_eagl_remote_widget_upload`） |
+| host | `host_glwire` 8da5517744eed40051898424586e3241（115,384 B，strings `GLWIRE_WIDGET`） |
+| 备份 | `/tmp/root.apfs.bak-P3a`（P2d b59fcf66…） |
 
-- patch：`/host/iosvm/logs/s19o-p3-guest-p3.patch`（**240 行**）。
-- **已 GO**：root.apfs 换 P3 库（`libhakios.dylib` 90,720 B、`libhakios.gl.dylib` 400,720 B），**不设 `SYSTEM`**；system.apfs 不动。P3 boot 结果待填。
+**Boot**：`XCMD="glwire_local=1 widget_surface=3 widget_rect=46,142,309,309"`；`HOST_ENV="GLWIRE_WIDGET=1 GLWIRE_NO_PANEL=1"`；`UI_GRACE=600`、`MAXSECS=2400`；`end=ui`、`ui=840s`、`biggest=356579`、`hostframes=2285`、panic=0。
 
-**MVP 链路（按 lead 的方案）**
+**判据（逐条）**
 
-```
-boot-arg 固定 surface ID
-  -> backboardd IOSurfaceLookup
-  -> host opcode 202 / GLWIRE_WIDGET
-```
+| # | 判据 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | host 出现 opcode 202 / `GLWIRE_WIDGET` 上传 | **✅** | `glwire: widget upload texture 4294905859 … 184x124 … rect 46,142 309x309 bytes 91264`（1 条）；4 条 `widget compose 1 texture(s) into fbo 3/2 750x1624, first 46,142 309x309` |
+| 2 | 宿主收到 184x124 纹理、内容非全零 | **✅（但全白）** | 纹理 184x124；截图 rect 区域 mean RGB **251**、nonblack 211,753/214,369 → 纯白 |
+| 3 | 截图 rect 有变化（允许拉伸/旧内容） | **⚠️ 无可见内容** | 区域是**纯白圆角块**，与占位块外观一致；rect 46,142 309x309 已按参数拉伸应用 |
+| 4 | 尺寸/语义记录 | **❌ 语义不对** | surface 3 = 184x124（92x62 pt），层树 widget host = 155x155 pt；链路通但 surface 3 不代表当前 widget |
 
-**已 GO 的参数**
+**判读**：guest 侧 `hakios: widget surface 3 184x124 bpr 736 -> texture 0xffff1003 rect 46,142 309x309 scale 1.000` 出现 1 次；host 上传 1 次、合成 4 次；`widget texture removed`=0。**链路（surface→202→host compose）验证通过**；像素内容是空白白块，说明 surface 3 是旧 snapshot/空白面。下一步要拿**当前 widget 的快照/surface**（或走 CALayerHost/CAContext snapshot），不是继续调 rect。本发无绿色 1/4 伪影（0 纯绿像素）。
 
-- boot：`widget_surface=3 widget_rect=46,142,309,309`（另有 `widget_scale=` 可用）。
-- host：`GLWIRE_WIDGET=1 GLWIRE_NO_PANEL=1`。
-- 仍用 local composition 的现有测量配方，只加上述变量；不要同时改 trim/其它变量。
-
-**关键风险：surface 3 的可行性警告**
-
-- `surface 3` 是 **184x124**，@2x = **92x62 pt**；层树里 host 的是 **155x155**，尺寸对不上。
-- 可能是 **stage 10–12 的另一 layout snapshot**（不是当前主屏 widget 的 surface）。
-- 因此 MVP **只验证 `surface → opcode 202 → host` 这条链路**：
-  - 旧内容、拉伸、全黑都**不能证明 widget 正确**；
-  - 只要 host 收到 202/纹理、链路通，就算 MVP 链路验证，不要求像素语义正确。
-- 最小替代：**CAContext snapshot**（约 1–2 天）；在 surface 3 链路不通或语义完全不对时再转。
-
-**判据（P3 执行时填）**
-
-1. host 日志出现 opcode 202 / `GLWIRE_WIDGET` 的纹理上传；
-2. 宿主收到 **184x124**（或 `widget_rect` 指定尺寸）的纹理，内容非全零；
-3. 截图对应 rect 有变化（允许拉伸/旧内容，记录偏差）；
-4. 不要求 `312x202`/`184x124` 与当前 widget 位置完全吻合；不吻合就记录为「链路通、语义不对」。
-
-**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3 MVP 已 GO 但结果待填；P2-C2 已失败、P2 性价比低/需更多信息；P0 仍 2/3。
-
+**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P2-C2 已失败；P0 仍 2/3。
 
 ## 五、铁律与提交
 
