@@ -717,6 +717,14 @@ eagl_remote_set_target(void *base, size_t row, int width, int height)
 	remote_target_height = height;
 }
 
+static int
+remote_target_ready(int width, int height)
+{
+	return remote_upload_fast() && remote_target_base != NULL &&
+	    remote_target_width == width && remote_target_height == height &&
+	    remote_target_row >= (size_t)width * 4;
+}
+
 /* RGB565 experiment: the host sends 2,436,000 B for a 750x1624 frame, the guest expands each row
  * to BGRA (into the target surface when the fast path is on, otherwise into remote_frame). */
 static int
@@ -1087,7 +1095,7 @@ eagl_remote_flush(int width, int height)
 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 		/* RLE fast keeps the surface itself; a D 0 keep-alive must not copy the stale
 		 * remote_frame over it.  The dirty tile path still needs the copy. */
-		return remote_upload_rle() && remote_upload_fast() ? 3 : 1;
+		return remote_upload_rle() && remote_target_ready(width, height) ? 3 : 1;
 dirty_failed:
 		remote_say("hakios-remote: dirty upload truncated (%zu of %zu), frame dropped\n", got_total, total);
 		close(remote_fd);
@@ -1207,7 +1215,7 @@ dirty_failed:
 		remote_frames++;
 		remote_total_us += (long)(remote_now_ms() - started) * 1000.0;
 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
-		return remote_upload_fast() ? 3 : 1;
+		return remote_target_ready(width, height) ? 3 : 1;
 bad_z:
 		remote_say("hakios-remote: bad RLE reply '%s'\n", reply);
 		close(remote_fd);
@@ -1276,7 +1284,7 @@ bad_z:
 			remote_frames++;
 			remote_total_us += (long)(remote_now_ms() - started) * 1000.0;
 			wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
-			return remote_upload_fast() ? 3 : 1;
+			return remote_target_ready(width, height) ? 3 : 1;
 		} else if (sscanf(reply, "R %zu", &picture_bytes) == 1 &&
 		    picture_bytes == scaled_bytes) {
 			int ack_ms = remote_ack_effective_ms();
