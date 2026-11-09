@@ -1898,39 +1898,35 @@ UIWindowLayer "colour ( 0 1 )"
 
 ---
 
-### 4.27 P3b 计划：CAContext snapshot D1 探针（未执行）
+### 4.27 P3b D1→D3 结果：widget context 属于 extension，零参快照前提不成立
 
-> **状态：计划，未执行。** P3a 已证明 `surface→opcode 202→host compose` 链路通，但 surface 3 是空白白块；不再调 rect，转 **CAContext snapshot** 拿当前 widget 内容。
+> **状态：D1/D2/D3 均已跑，D3 失败（第三次，到放弃线）；P3 未完成。** P3a 的 `surface→202→host` 链路通，但 surface 3 是空白白块；D1 证明 CAContext 能力面在，D2 证明 `+allContexts` 按进程隔离，D3 证明 **widget host 的 CAContext 属于 widget extension 进程**，SpringBoard 也看不到。
 
-**D1 探针（code，先证明对象/快照可得）**
+**三次探针的结果**
 
-- 运行时探测（不假设私有 API 一定存在）：
-  - `NSClassFromString("CAContext")` / 相关类是否存在；
-  - `respondsToSelector:` 检查 `contextWithOptions:`、`layer`、`contents`、`createImage`/`snapshot` 等候选 selector；
-  - 从 SpringBoard 层树的 `CALayerHost` / `_UISceneLayerHostContainerView` 拿到 context id，再 `CAContext contextWithContextId:`（若存在）。
-- 先只做**日志探针**：打印类名、selector 可用性、context id、layer/contents 类型；不改合成。
-- 快照要求：拿到**非空** bitmap（宽高与当前 widget host 一致，或至少非全黑/非全白），并记录 bytes/mean/nonblack。
-- **放弃条件（明确）**：
-  1. `CAContext` 类或所需 selector 不存在；
-  2. 能拿对象但 `contents/createImage/snapshot` 全空/全黑，连续 N 次（建议 3 次）无改善；
-  3. 调用阻塞主线程/崩溃，或只能拿到 155x155 的空白层；
-  4. 超过 **1–2 天** 时间盒。
-  → 命中任一：写「需要更多信息/不可行」，不要再盲试私有 selector。
+| 发次 | 位置/时机 | 结果 |
+|---|---|---|
+| D1 | backboardd init | 9 行探针；`contextWithId:`（小写 d）/`allContexts` 在，但 `allContexts` 被精确 `@@:` encoding 挡住；init 太早、widget context 未出现；无对象/快照/nonzero |
+| D2 | backboardd `widget_cacontext_at=900` | timer fired；`allContexts count 1`（`0xc0cfe455`，backboardd 自己的）；与 950s 层树 155x155 host `0xbf11dcae/0x7702cd25` 不匹配；无 snapshot/nonzero |
+| D3 | SpringBoard `inject_sb.c`，900s | 第一次 fired `allContexts count 16`（含 6 个 window context）；第二次 fired `nil`；**16 个 cid 不含 155x155 host `0x4741275c/0xccf65063`**；0 行 snapshot/nonzero/candidate |
 
-**P3b（D1 成功后）**
+**关键结论**
 
-- 把 snapshot 作为纹理，走现有 host opcode 202 / `GLWIRE_WIDGET`；rect 用当前层树 widget frame（不是 surface 3 的 46,142,309,309）。
-- 判据：
-  1. snapshot 非空、尺寸与当前 widget host 一致；
-  2. host 收到对应纹理并 compose；
-  3. 截图 widget 区域出现**当前内容**（不是纯白/旧内容）；
-  4. 允许缩放/位置小偏差，但必须记录；语义正确才算 P3 达成。
-- 若 D1 失败：P3 交付「拉面」最小实现或记录不可行；**不要写 P3 已交付**。
+- **`+allContexts` 按进程隔离**：backboardd 只看到自己的 context；SpringBoard 看到 16 个（含自己的 window context），但看不到 widget host 的两个 155x155 context；它们属于 **widget extension 进程**。
+- **CAContext 这代没有零参 `createImage`/`createCGImage`/`snapshot`**：只有 `createImageSlot:hasAlpha:`（创建 slot，不是快照）。「零参快照」这条路前提不成立；要拿内容只能 `CARenderServer*`（render server）或跨进程传 id。
+- D3 是第三次尝试，按时间盒**到放弃线**：不再盲试私有 selector、不再猜 `createImageSlot` 参数。
 
-**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3a 只证明链路；P3b 未执行；P0 仍 2/3。
+**P2/P3 共同根因（关键）**
 
+- widget 内容由 **widget extension** 渲染；而 P2e/P2e-C2 已证明 **所有 extension 在 ~9s 被 check-in timeout 杀**（Gradient/Batteries 等；`CHECK_IN_TIMEOUT` 多、`checked in as alive` 0）。
+- 所以 **P3 的实时 widget 内容在 extension 修复前不可得**；这不是 P3 探针单独的问题，而是 **P2/P3 共用的系统级阻塞**。
+- 反过来说：即使 CAContext 跨进程/ render server 能拿到某个 context，extension 已经被杀，也拿不到当前 widget 内容。
 
----
+**下一步（fallback）**
+
+- **P3 不再继续 D 系列探针**：按时间盒转 fallback——静态/占位 widget（拉面最小实现），或记录「需更多信息/不可行」。
+- 若 owner 决定再攻 **extension check-in timeout**，那是 P2/P3 的共同前置；修好后再回来做实时 widget 内容。
+- **P3 未完成；P2 未达成；不要写 P3 已交付 / widget 正确。**
 
 ### 4.28 s19o-p3b-d1 实测：CAContext 探针拿到能力面，但没拿到对象/快照（D1 未成功）
 
