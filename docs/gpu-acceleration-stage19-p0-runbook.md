@@ -1591,6 +1591,51 @@ PosterBoard（pid 43）日志：
 - 拿到产物后：只重建 root.apfs（`RC=rc.vtop`，不设 SYSTEM），boot `XCMD="glwire_local=1 layers_at=900"`、`UI_GRACE=900 MAXSECS=3000`；先验 `layers timer 900s fired` 与 `hakios: layers`，仍不加 4 个 job。
 - **P3 guest 同样依赖这个编译环境**：没有新 dylib，P3 的 guest 侧代码也进不了镜像。
 
+> **该阻塞已于 2026-11-09 解除**：owner 把工具链烤进镜像/同步到 4 容器；exp 已编出 108,248 B 的新 `libhakios.sb.dylib`，P2c-timer 已启动。路径与规矩见 **附录 C**，结果模板见 **§4.21**。
+
+### 4.21 s19o-p2c-timer 实测：进程内 `layers_at=900`（结果待填）
+
+> **状态：exp 已启动 `s19o-p2c-timer`，结果尚未回填。** 本节只写口径与判据，**不要预设通过**；P2 仍未达成。
+
+**镜像/编译**
+
+| 项 | 值 |
+|---|---|
+| 构建 | 仅重建 `root.apfs`（不设 `SYSTEM`；system.apfs 未动） |
+| root.apfs | 2026-11-09 03:35Z，md5 **`dbf1c3d8…`**（完整 hash 待回填） |
+| system.apfs | 未动：2,476,748,800 B，md5 **`b75d80caaa5e276a58a4d45307d2165b`** |
+| 新 dylib | `userland/obj/libhakios.sb.dylib` **108,248 B**；`strings` 含 `layers_at`、`hakios: layers timer %lus scheduled`、`hakios: layers timer %lus fired` |
+| 旧库备份 | `/tmp/libhakios.sb.old.dylib`（exp 侧；本容器不一定有，按 exp 为准） |
+
+**Boot 参数**
+
+| 项 | 值 |
+|---|---|
+| `XCMD` | `glwire_local=1 layers_at=900` |
+| `HOST_ENV` | `GLWIRE_NO_PANEL=1` |
+| 时长/收尾 | `UI_GRACE=900`、`MAXSECS=3000`；`end=__`、`ui=__s`、`biggest=__`、`hostframes=__`、panic=__ |
+
+**判据（逐条填，不要合并）**
+
+| # | 判据 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | guest log 出现 **`hakios: layers timer 900s fired`** | 待填 | |
+| 2 | guest log 出现 **`hakios: layers`** 层树行 | 待填 | |
+| 3 | 层树含 `SBWallpaperEffectView` / `PBUIWallpaperView` / `PRSPoster` / `CALayerHost` | 待填 | 类名 + frame/contents/opacity |
+| 4 | 宿主出现第二张 **750x1624 非 panel** 持续纹理 | 待填 | 非 `4294901761` |
+| 5 | 宿主出现 **1125x2436** | 待填 | |
+| 6 | 截图左右边缘非黑 | 待填 | __ / 36,000 |
+| 7 | PosterBoard 仍 running、无 exit/SIGKILL/panic | 待填 | |
+| 8 | **是否计入 P2** | 待填 | 只有「层树有 wallpaper 层」或「壁纸纹理上屏」才可作候选；否则仍 P2 未达成 |
+
+**判读（待填）**
+
+- 若 1 fired 但 2 无层树：`layers()` 执行失败/对象为空，下一步查 `layers()` 的 root layer/类名。
+- 若 2 有层树但 3 无 wallpaper 类名：poster scene 没接上，转配置/ExtensionKit。
+- 若 3 有 wallpaper 层但 `contents` 空：内容/快照问题。
+- 若 3 有内容且 4/5 有纹理：壁纸路径通，再查合成/位置。
+- **不要**在结果出来前写「P2 已修复」。
+
 ---
 
 ## 五、铁律与提交
@@ -1836,3 +1881,50 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 6. **不再用 `GLWIRE_PROGRAM_SKIP=13` 当 P1 全局修复**：全标签 nonblack **101.7%**（Weather -97%，但 FaceTime +225%、Podcasts +432%），只是重分布。
 7. **不再用 `GLWIRE_TC0_SANITIZE=1` 当 P1 修复**：Weather 带 nonblack **562→758（+35%）**，形态从碎点变规则竖线；tc0 不是主因。
 8. **不再在合成/prog13 侧找点带**：P1c 已证明点带烘在 glyph tile 的 alpha 底部 6–8 行；修复在纹理生成/裁剪（P1d `GLYPH_TRIM`），在 P1d 数据前不要写「P1 已修复」。
+
+## 附录 C：编译环境（工具链阻塞已永久解除）
+
+> owner 已把编译环境烤进镜像/同步到 4 个容器，并把 SDK/cctools/ld64 放进已挂载工作树。**guest 构建一律 `IOSVM_USE_LLD=1`**；缺 clang/SDK 时先查 `.zshrc` 和下列路径，**不要停下来上报「容器编不了」**。
+
+**路径**
+
+| 项 | 路径 |
+|---|---|
+| iOS SDK | `/host/iosvm-work/toolchain/theos/sdks/iPhoneOS16.5.sdk` |
+| cctools linker | `/host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld` |
+| 运行库 | `/host/iosvm-work/toolchain/lib` |
+| ld64 包装 | `/host/iosvm-work/toolchain/ld64` |
+
+**`.zshrc` 变量（应已配置）**
+
+- `THEOS` → theos 根（含 `sdks/iPhoneOS16.5.sdk`）
+- `IOSVM_USE_LLD=1` → guest 构建统一走 lld 路径
+- `CCTOOLS_LD64` → cctools 的 `aarch64-apple-darwin11-ld`
+- `LD_LIBRARY_PATH` → 包含 `/host/iosvm-work/toolchain/lib`
+- `PATH` → 包含 cctools/bin 与 theos 工具
+
+**验证与构建**
+
+```sh
+# 先确认变量与路径
+source ~/.zshrc 2>/dev/null || true
+echo "$THEOS"; echo "$IOSVM_USE_LLD"; echo "$CCTOOLS_LD64"
+test -d /host/iosvm-work/toolchain/theos/sdks/iPhoneOS16.5.sdk && echo sdk-ok
+test -x /host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld && echo ld-ok
+
+# guest dylib / root.apfs：一律带 IOSVM_USE_LLD=1
+cd /host/iosvm-work/hakios-xnu-kernel/userland
+PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
+```
+
+**已产出的新 dylib（P2c-timer）**
+
+- `userland/obj/libhakios.sb.dylib`：**108,248 B**，`strings` 含 `layers_at`、`hakios: layers timer %lus scheduled`、`hakios: layers timer %lus fired`。
+- 旧库备份：`/tmp/libhakios.sb.old.dylib`（exp 侧）。
+- P2c-timer 镜像：只重建 root.apfs（03:35Z，md5 `dbf1c3d8…`）；system.apfs 未动 `b75d80ca…`。
+
+**规矩**
+
+- 工具链在 `/host/iosvm-work/toolchain/`，**不进 git**；Apple SDK/二进制仍遵守 §5.1。
+- 缺 clang/SDK 先查 `.zshrc`/路径；确实缺再上报，并附 `which clang`、`echo $THEOS`、`echo $CCTOOLS_LD64`。
+- P3 的 guest 侧代码也走同一套 `IOSVM_USE_LLD=1` 构建。
