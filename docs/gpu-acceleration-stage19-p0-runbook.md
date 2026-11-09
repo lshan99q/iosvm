@@ -2091,12 +2091,12 @@ UIWindowLayer "colour ( 0 1 )"
 | 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | ✅/❌ |
 | 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | ✅/❌ |
 | 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | ✅/❌ |
-| 7 | fallback（拉面最小实现）可交付 | 待填：静态/占位 widget 是否已交付 | ✅/❌ |
+| 7 | fallback（拉面最小实现）可交付 | **已实现，待 exp 截图验收**：`GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）；空白检测 ≥90% 近白后画 24px 棋盘 + 3px 白边框 + 两条黄对角线；日志 `widget fallback ... (NOT the real widget path)`；无 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画；`widget_test` 5 例 PASS；host binary 119,552 B / md5 `68d89e54…` | 待 exp 截图验收（不是 P3 通过） |
 
 **三选一判定条件**
 
 - **可行**：第 1、2 条都过（当前 widget 内容真的进宿主并发到截图），且不依赖已死 extension；否则不能选。
-- **不可行**：时间盒到期，第 1/2 条未过，且第 4/5/6 条的证据表明 CAContext + extension 路线在时间盒内不可达；**fallback（拉面最小实现）已交付或明确写「未交付」**。
+- **不可行**：时间盒到期，第 1/2 条未过，且第 4/5/6 条的证据表明 CAContext + extension 路线在时间盒内不可达；**fallback 已实现但还要 exp 截图验收；验收不过则写「未交付」**。
 - **需要更多信息**：只允许在「有一个具体、可测、未做的测量」时选（例如同 boot 拿到 widget extension context id 的新方法）；**不能拿「还没试够」当选需要更多信息的理由**。
 
 **到期填写**
@@ -2108,6 +2108,13 @@ UIWindowLayer "colour ( 0 1 )"
 | 关键证据 | 引用 §4.26/§4.27/§4.28 的行 |
 | fallback 是否交付 | 是 / 否 + 路径/说明 |
 | 需要 owner 决定 | 是否再攻 extension check-in timeout（P2/P3 共同前置） |
+
+**fallback 实现（不是 P3 通过）**
+
+- `GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`）：先做空白检测（≥90% 近白），命中后画 24px 棋盘、3px 白边框、两条黄对角线；日志明确写 `widget fallback ... (NOT the real widget path)`。
+- 没有 202 时可用 `GLWIRE_WIDGET_RECT=x,y,w,h` 直接画占位。
+- `widget_test` 5 例 PASS；host binary **119,552 B** / md5 **`68d89e541eba0fd34f0f671a21e24659`**。
+- 这是 **fallback 交付项**，截图验收前不要写成 P3 可行/已完成。
 
 **不要写**：P3 已交付 / widget 已正确 / P2 已修复。P3 未完成；P0 仍 2/3；P1 暂停。
 
@@ -2329,7 +2336,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ## 八、P4 四格表与收尾（可直接执行，结果待填）
 
-> **状态：未执行。** 四份镜像由外部构建；`tools/glwire/harness/four-cell.sh` 只负责按同一 20s 窗口驱动、记账和出表。**不要预设四格结果。**
+> **状态：脚本就绪，未跑四格。** `tools/glwire/harness/four-cell.sh` 可执行，四格 pure-local/by-reference/w15/w15-w3；20s 窗口；列 `ui/frames/fps/span/shot B/host 0x502`；`--dry-run` 四行验证、不碰 QEMU；`0x502` 只数 host log，正常为 0；README 已加。**不要预设四格结果。**
 
 ### 8.1 四份构建定义（镜像外部构建）
 
@@ -2361,13 +2368,13 @@ tools/glwire/harness/four-cell.sh
 ```
 
 - 只跑单格时给对应 `CELLn_IMAGE` 即可；缺 image 的格子会写 `SKIP`，不要用旧日志充数。
-- `--dry-run` 只读已有 `/tmp/<label>-{host.log,log,shot.png,drive.txt}` 重算表，不跑 QEMU；**dry-run 数字不是新实测**。
+- `--dry-run` 只读已有 `/tmp/<label>-{host.log,log,shot.png,drive.txt}` 重算表，不跑 QEMU；当前已做四行验证；**dry-run 数字不是新实测**。
 - 每格产物写到 `OUT`（默认 `/tmp/four-cell`）：`four-cell.md`、`four-cell.csv`、每格日志/截图/drive。
 
 ### 8.3 `0x502` 记账口径
 
 - 只数**宿主日志**里的 `glerror 0x502`：脚本 `grep -c 'glerror 0x502' <label>-host.log`，填表列 `host 0x502`。
-- P4 判据是 **`host 0x502` = 0**；某格 host log 缺失/没跑起来 → 写 `SKIP` 或 `-`，不写 0。
+- P4 判据是 **`host 0x502` = 0**；脚本正常情况应为 0；某格 host log 缺失/没跑起来 → 写 `SKIP` 或 `-`，不写 0。
 - 表列固定为：`cell | ui | frames | fps | span | shot B | host 0x502`；`ui`/`frames`/`fps`/`span` 取 `drive:` 行，`shot B` 取最大截图字节数。
 - 纯本地格可能 host 0 帧/超时；如实写，不把 guest 帧数当 host fps。
 
