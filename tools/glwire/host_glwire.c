@@ -2137,6 +2137,7 @@ static int poll_timeout_ms = -1;
 /* GLWIRE_UPLOAD_SCALE=2 sends the top-left quarter of the picture (1/4 bytes), for the payload
  * experiment.  1, the default, sends the whole frame exactly as before. */
 static int upload_scale = 1;
+static int upload_565_env;       /* GLWIRE_UPLOAD_565=1: the guest must also set its boot-arg */
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
 static unsigned fbo_note_count;
@@ -3669,6 +3670,9 @@ serve_frame(struct client *client)
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
+	if (upload_565_env) {
+		rgb565_wanted = 1;
+	}
 	/* (an older guest sends eight fields: its records keep the 8-byte header, context 0) */
 	wire_set_record_version(version);
 	if (version >= 2 && getenv("GLWIRE_CONTEXT_LOG") != NULL) {
@@ -4451,6 +4455,8 @@ main(int argc, char **argv)
 			}
 		}
 	}
+	upload_565_env = getenv("GLWIRE_UPLOAD_565") != NULL &&
+	    strcmp(getenv("GLWIRE_UPLOAD_565"), "0") != 0;
 	{
 		const char *value = getenv("GLWIRE_POLL_MS");
 
@@ -4533,8 +4539,9 @@ main(int argc, char **argv)
 		}
 	}
 	printf("host_glwire: build marker uniform-ring-v2 (poll %d ms%s, frame delay %d ms, "
-	    "upload scale %d)\n", poll_timeout_ms,
-	    poll_timeout_ms < 0 ? ", infinite = wait for guest" : "", frame_delay_ms, upload_scale);
+	    "upload scale %d, rgb565=%d)\n", poll_timeout_ms,
+	    poll_timeout_ms < 0 ? ", infinite = wait for guest" : "", frame_delay_ms, upload_scale,
+	    upload_565_env);
 	fflush(stdout);
 	printf("host_glwire: listening on %d%s%s\n", port,
 	    no_in_place ? " (GLWIRE_NO_INPLACE: the picture travels back instead)" : "",
