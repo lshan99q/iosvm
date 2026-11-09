@@ -2541,6 +2541,7 @@ cp root.apfs /tmp/root-w15.apfs
 ### 8.2 20s 滚动窗口（同一触摸脚本）
 
 `four-cell.sh` 调 `drive-scroll.sh`，默认 `WINDOW_FRAMES=0`（八次滑动，约 20s），并且 `WINDOW_AFTER=60` 等界面稳定后才开窗；四格同 `QEMU_SMP=1`、同触摸脚本。
+帧计数模式用 `WINDOW_FRAMES=120 WINDOW_SPAN=120`：four-cell 默认 cell1 `WINDOW_CLOCK=guest`、其余 `host`（可用 `CELLn_WINDOW_CLOCK` 覆盖）；表里的 `frames` 是 120，`span/fps` 取 `frame-window` 行，`--dry-run` 同样解析。
 
 ```sh
 cd /host/iosvm

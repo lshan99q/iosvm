@@ -29,6 +29,9 @@
 #      CELL1_XCMD..CELL4_XCMD    optional per-cell guest boot args (e.g. "glwire_local=1")
 #      CELL1_HOST_ENV..CELL4_HOST_ENV  optional per-cell host env
 #      CELLn_REQUIRE_HOST_FRAMES  default 0 for cell1 (no recorder) and 1 for the others
+#      WINDOW_FRAMES=0|120       0 = the old ~20 s time window; 120 = 120-frame counted window
+#      WINDOW_SPAN=120           frames in the counted window
+#      CELLn_WINDOW_CLOCK        default guest for cell1, host for the others
 #      CELL1_HOST_ARGS..CELL4_HOST_ARGS optional per-cell extra host_glwire args
 #      WINDOW_AFTER=60 MAX_SECS=1800 MINSHOT=200000 NOUI_BY=1800
 #      OUT=/tmp/four-cell
@@ -39,6 +42,8 @@ GLWIRE=${GLWIRE:-$(cd "$HERE/.." && pwd)}
 IOSVM=${IOSVM:-/host/iosvm-work/hakios-xnu-kernel}
 OUT=${OUT:-/tmp/four-cell}
 WINDOW_AFTER=${WINDOW_AFTER:-60}
+WINDOW_FRAMES=${WINDOW_FRAMES:-0}
+WINDOW_SPAN=${WINDOW_SPAN:-120}
 MAX_SECS=${MAX_SECS:-1800}
 MINSHOT=${MINSHOT:-200000}
 NOUI_BY=${NOUI_BY:-1800}
@@ -75,6 +80,18 @@ cell_henv() {
 	fi
 }
 cell_hargs() { eval "printf '%s' \"\${CELL$1_HOST_ARGS:-}\""; }
+cell_window_clock() {
+	local value
+	eval "value=\"\${CELL$1_WINDOW_CLOCK:-}\""
+	if [ -n "$value" ]; then
+		printf '%s' "$value"
+	elif [ "$1" = 1 ]; then
+		printf 'guest'
+	else
+		printf 'host'
+	fi
+}
+
 cell_require_host() {
 	local value
 	eval "value=\"\${CELL$1_REQUIRE_HOST_FRAMES:-}\""
@@ -112,9 +129,15 @@ row_from_logs() {
 	# (the line continues with a "; guest ..." half that has its own fps: cut it off first)
 	local headline=${line%%;*}
 	ui=$(printf '%s\n' "$line" | sed -n 's/^drive: ui=\([0-9]*\)s.*/\1/p')
-	frames=$(printf '%s\n' "$headline" | sed -n 's/.*frames \([0-9]*\) ->.*/\1/p')
-	fps=$(printf '%s\n' "$headline" | sed -n 's/.*-> \([0-9.]*\) fps.*/\1/p')
-	span=$(printf '%s\n' "$headline" | sed -n 's/.*window \([0-9.]*\)s.*/\1/p')
+	if printf '%s\n' "$headline" | grep -q 'frame-window'; then
+		frames=$(printf '%s\n' "$headline" | sed -n 's/.*frame-window \([0-9]*\) frames.*/\1/p')
+		fps=$(printf '%s\n' "$headline" | sed -n 's/.*-> \([0-9.]*\) fps.*/\1/p')
+		span=$(printf '%s\n' "$headline" | sed -n 's/.* in \([0-9.]*\)s ->.*/\1/p')
+	else
+		frames=$(printf '%s\n' "$headline" | sed -n 's/.*frames \([0-9]*\) ->.*/\1/p')
+		fps=$(printf '%s\n' "$headline" | sed -n 's/.*-> \([0-9.]*\) fps.*/\1/p')
+		span=$(printf '%s\n' "$headline" | sed -n 's/.*window \([0-9.]*\)s.*/\1/p')
+	fi
 	local shot_bytes=0 errors=0 end=""
 	[ -f "$shot" ] && shot_bytes=$(stat -Lc%s "$shot" 2>/dev/null || echo 0)
 	errors=$(grep -c 'glerror 0x502' "$hlog" 2>/dev/null || true)
@@ -138,6 +161,7 @@ for n in 1 2 3 4; do
 	henv=$(cell_henv "$n")
 	hargs=$(cell_hargs "$n")
 	require_host=$(cell_require_host "$n")
+	window_clock=$(cell_window_clock "$n")
 
 	if [ "$DRY" = 0 ]; then
 		if [ -z "$image" ] || [ ! -f "$image" ]; then
@@ -150,9 +174,10 @@ for n in 1 2 3 4; do
 		root="$image"
 		echo "four-cell: cell$n ($label) $root" >&2
 		# Same touch script and same 20 s window for every cell: drive-scroll's default
-		# WINDOW_FRAMES=0 is the eight-swipe ~20 s window.
+		# WINDOW_FRAMES=0 is the eight-swipe ~20 s window; 120 is the counted window.
 		env QEMU_SMP="$SMP" ZERO_RAM=1 MINSHOT="$MINSHOT" NOUI_BY="$NOUI_BY" \
-		    WINDOW_AFTER="$WINDOW_AFTER" WINDOW_FRAMES=0 REQUIRE_HOST_FRAMES="$require_host" \
+		    WINDOW_AFTER="$WINDOW_AFTER" WINDOW_FRAMES="$WINDOW_FRAMES" WINDOW_SPAN="$WINDOW_SPAN" \
+		    WINDOW_CLOCK="$window_clock" REQUIRE_HOST_FRAMES="$require_host" \
 		    XCMD="$xcmd" HOST_ENV="$henv" \
 		    IOSVM="$IOSVM" GLWIRE="$GLWIRE" \
 		    "$HERE/drive-scroll.sh" "$label" "$root" "$MAX_SECS" $hargs \
