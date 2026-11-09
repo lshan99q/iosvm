@@ -267,7 +267,9 @@ glwire: label draw #74 ...  866 nonzero pixels
 
 三份镜像/四格（cell3=cell4 同镜像，仅 host env 不同；同 `QEMU_SMP=1`、同触摸脚本）；**`0x502` 按「宿主侧 0」记账**（第二次实跑已全 0）。
 
-**fps 判据（D6）**：60s/20s 滚动窗口的 fps **不可比**（窗口内 2–9 帧，仍在 UI 重建期）；fps 改用 **`WINDOW_FRAMES=120` 帧计数窗口**，cell1 用 **`WINDOW_CLOCK=guest`**。当前 20s 表只用于 `0x502`，不写性能达标。`make test`；文档；推送。
+**fps 判据（D6）**：60s/20s 滚动窗口的 fps **不可比**（窗口内 2–9 帧，仍在 UI 重建期）；fps 改用 **`WINDOW_FRAMES=120` 帧计数窗口**，cell1 用 **`WINDOW_CLOCK=guest`**。当前 20s 表只用于 `0x502`，不写性能达标。
+
+**cell3/4 部分主屏**：同一右下区域 cell3/cell4 都缺，与 in-place 无关；分析指向截图撞在第一张完整 host 屏幕帧前（§8.6），验证未跑。不得写成 w15 功能差异或画面完整达标。`make test`；文档；推送。
 
 ---
 

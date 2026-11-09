@@ -2494,6 +2494,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 - 镜像（三份，大小都是 5,918,720 B）：cell1 `/tmp/root-local.apfs` **`f39b910543189be4934a48c4d495e928`**；cell2 `root-byref.apfs` **`3207a35ec42ac1d17c1b398de73d9a67`**（`glwire_local=1`）；cell3=cell4 `root-w15.apfs` **`785bcbac82c9a117684b2d40b7375d48`**。
 - guest 库：libhakios **92,872** / gl **400,720** / sb **110,656**（`abc8f4f1…`，A1）；system.apfs 未动 `8bf5f838…`。
 - cell3/4：cell4 host log 有 **192 行 `in-place rows`**，cell3 **0**；两者的 panel/picture 都是 DIFF，差异就在 in-place 行写。
+- **cell3/cell4 截图右下缺块**：cell3（NO_INPLACE=1）与 cell4（192 行）**同一右下区域缺失**，与 in-place 无关；证据指向截图撞上 host replay 第一张完整 home-screen 帧之前（cell3 frame128 82,080 records/0 image refs，frame129 236,026 records/48 refs/1,239,821 B；cell4 同量级）。cell1/2 是 guest 本地 scanout，没有这个半帧窗口。**这是分析假设，验证见 §8.6，不能据此写「w15 功能差异」或「画面完整达标」。**
 - harness：repo `fe521de` + `/tmp/p4-harness/run-four-cell.sh`（只补 `QEMU_EFI`/`QEMU_VARS`，无本地语义改动）；副本归档 `logs/s19o-p4-cells/harness/`。
 - 上一轮 cell1 被杀复盘：上一轮 cell4 的 `drive-scroll.sh` 退出时全局 `kill -9` 误杀新一轮 cell1（实际存活 13s）；本轮 launcher 已加残留进程前置检查，未再发生（见 `attempt1-1256/postmortem-cell1-kill.md`）。
 
@@ -2584,6 +2585,16 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - 记录完整命令、退出码与关键输出；失败不要用「应该没问题」代替。
 - `make test` 通过前不要写「收尾完成」；`make test-open` 通过可先记，但 test-gpu 的 lavapipe 缺失要单列。
 - 2026-11-09 实测：`make test-open` **PASS**（rc=0，provenance clean + proto pass）；`make test` **rc=2**，在 `test-gpu` 失败，`VK_ICD_FILENAMES` 指向的 `/usr/share/vulkan/icd.d/lvp_icd.json` 不存在（lavapipe 未配置），**不是代码失败**；补 ICD 后重跑 `make test`，不要把 `test-open` 当完整 `make test`。
+
+### 8.6 cell3/cell4 缺角根因（分析 only，未验证）
+
+- 来源：code 文档 `docs/gpu-acceleration-stage19-p4-w15-partial.md`（commit `531a257`）。
+- 现象：cell3（NO_INPLACE，0 行）与 cell4（192 行 in-place）**同一右下区域缺失**——顶部行到 x≈1056；从 y≈1400 起最右只到 x≈521/562；右下 `x>562,y>1300` 非黑 = 0；dock 左半/Phone/Safari 在，缺右半。→ **不是 in-place 顺序/裁剪，也不是 dock 没画**。
+- host 帧：cell3 截图窗口从 `frame 128` 开始；frame128 = 82,080 records / **0 image refs**，frame129 = **236,026 records / 48 image refs（1,239,821 B）** 才是完整 home-screen；cell4 也在 frame 174 出现同量级完整帧。截图撞在第一张完整帧前。
+- cell1/2 是 guest 本地 scanout，没有 host replay 半帧窗口；cell3 红条 `rdar:45025538` 是 SpringBoard debug overlay，只在 cell3 出现，**不是 w15 dock 根因**。
+- 验证方案（**未跑**）：同 cell3/4 镜像，UI 后等 10s 再截 + `GLWIRE_DUMP` 同 late frame；裁 `x>562,y>1300` 与右 dock。late 全 → 截图时序；picture 全/scanout 半 → writeback 竞态；都半 → replay 源/裁剪。
+- attempt3 帧计数四格跑中：`four-cell.sh` 已支持 `WINDOW_FRAMES`/`WINDOW_SPAN`/`WINDOW_CLOCK`（cell1 guest、其余 host）与 `frame-window` 解析（code `e41a47a`，远端 `93f5d2a`）；结果待填。
+- **结论口径**：cell3/4 的部分主屏可能是截图时序，不是 w15 功能差异；P4 仍只写 `0x502` 通过，**不写性能达标 / 画面完整达标**。
 
 ### 8.5 收尾清单
 
