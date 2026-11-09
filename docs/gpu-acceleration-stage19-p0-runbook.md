@@ -2077,6 +2077,41 @@ UIWindowLayer "colour ( 0 1 )"
 - 按 lead 的 D3 失败判据：**明确判「D3 失败/需 CAContext 跨进程（render server）」**，按时间盒转 fallback（拉面最小实现或「需更多信息」），**不再盲试私有 selector / 不再猜 createImageSlot 参数**。
 - **P3 未完成；P2 仍未达成。**
 
+### 4.29 P3 时间盒收口模板（2026-11-10 14:06 到期，待填）
+
+> **状态：模板，未到期、未判定。** P3 只允许三种结论：**可行 / 不可行 / 需要更多信息**；不要提前写结论。
+
+**判据逐条对照**
+
+| # | P3 判据 | 当前证据 | 到期填 |
+|---|---|---|---|
+| 1 | `312x202`/`184x124` 以纹理进宿主 | P3a：链路通，但 surface 3 是空白白块；host 有 upload/compose | ✅/❌ |
+| 2 | 截图 widget 区域出现**当前**内容（非纯白/旧内容） | P3a 区域 mean RGB 251、nonblack 211,753/214,369 → 纯白 | ✅/❌ |
+| 3 | 延迟探针能拿 CAContext 对象 | D2 count 1（backboardd 自己）、D3 count 16（SpringBoard 自己的 window context）；D1 因 init/encoding 没拿到；都不是 155x155 host | ✅/❌ |
+| 4 | 拿到 widget host 的 CAContext 或等价快照 | D1/D2/D3 全部失败：`+allContexts` 按进程隔离；SpringBoard 16 个不含 `0x4741275c/0xccf65063`；widget context 属 extension 进程 | ✅/❌ |
+| 5 | 零参 snapshot 可得且 nonzero>0 | 这代 CAContext 无零参 `createImage`/`createCGImage`/`snapshot`；`createImageSlot:hasAlpha:` 是创建 slot，未调用 | ✅/❌ |
+| 6 | 不依赖已死的 extension | P2e/P2e-C2：所有 extension ~9s 被 check-in timeout 杀；P3 实时内容在 extension 修复前不可得 | ✅/❌ |
+| 7 | fallback（拉面最小实现）可交付 | 待填：静态/占位 widget 是否已交付 | ✅/❌ |
+
+**三选一判定条件**
+
+- **可行**：第 1、2 条都过（当前 widget 内容真的进宿主并发到截图），且不依赖已死 extension；否则不能选。
+- **不可行**：时间盒到期，第 1/2 条未过，且第 4/5/6 条的证据表明 CAContext + extension 路线在时间盒内不可达；**fallback（拉面最小实现）已交付或明确写「未交付」**。
+- **需要更多信息**：只允许在「有一个具体、可测、未做的测量」时选（例如同 boot 拿到 widget extension context id 的新方法）；**不能拿「还没试够」当选需要更多信息的理由**。
+
+**到期填写**
+
+| 项 | 值 |
+|---|---|
+| 判定时间 | 2026-11-10 14:06（到期后填实际） |
+| 结论 | 可行 / 不可行 / 需要更多信息（三选一） |
+| 关键证据 | 引用 §4.26/§4.27/§4.28 的行 |
+| fallback 是否交付 | 是 / 否 + 路径/说明 |
+| 需要 owner 决定 | 是否再攻 extension check-in timeout（P2/P3 共同前置） |
+
+**不要写**：P3 已交付 / widget 已正确 / P2 已修复。P3 未完成；P0 仍 2/3；P1 暂停。
+
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
@@ -2292,6 +2327,70 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ---
 
+## 八、P4 四格表与收尾（可直接执行，结果待填）
+
+> **状态：未执行。** 四份镜像由外部构建；`tools/glwire/harness/four-cell.sh` 只负责按同一 20s 窗口驱动、记账和出表。**不要预设四格结果。**
+
+### 8.1 四份构建定义（镜像外部构建）
+
+| cell | 定义 | 关键构建 env | 建议镜像 |
+|---|---|---|---|
+| cell1 纯本地 | 没有记录器，guest 自己画 | `GL=1 CONFIGD=1`（无 `GLREMOTE`/`GLWIRE_*`） | `/tmp/root-local.apfs` |
+| cell2 按引用 | guest 也画，surface 按引用上传 | `GL=1 GLREMOTE=1 GLWIRE_LOCAL=1 CONFIGD=1` | `/tmp/root-byref.apfs` |
+| cell3 W1.5 | remote_only，host `--no-panel` 重放 | `GL=1 GLREMOTE=1 GLWIRE_NO_INPLACE=1 CONFIGD=1` | `/tmp/root-w15.apfs` |
+| cell4 W1.5+W3 | 同 W1.5，打开 in-place 行写 | `GL=1 GLREMOTE=1 CONFIGD=1`（不要 `GLWIRE_NO_INPLACE`） | `/tmp/root-w15w3.apfs` |
+
+- 所有 guest 构建统一 `PREBUILT=1 IOSVM_USE_LLD=1 RC=rc.vtop`；不要在一个 boot 里换镜像。
+- `GLWIRE_LOCAL=1` 的构建把 `/redwood/etc/glwire_local` 写进镜像（guest 本地绘制）；cell3/4 的 host 需要 `GLWIRE_NO_PANEL=1` 走重放。
+- 镜像尺寸/内容不同，**四格必须各用各的 image**；不能用同一个 root.apfs 冒充四格。
+
+### 8.2 20s 滚动窗口（同一触摸脚本）
+
+`four-cell.sh` 调 `drive-scroll.sh`，默认 `WINDOW_FRAMES=0`（八次滑动，约 20s），并且 `WINDOW_AFTER=60` 等界面稳定后才开窗；四格同 `QEMU_SMP=1`、同触摸脚本。
+
+```sh
+cd /host/iosvm
+CELL1_IMAGE=/tmp/root-local.apfs  CELL1_LABEL=cell1-pure \
+CELL2_IMAGE=/tmp/root-byref.apfs  CELL2_LABEL=cell2-byref \
+CELL3_IMAGE=/tmp/root-w15.apfs    CELL3_LABEL=cell3-w15 \
+CELL4_IMAGE=/tmp/root-w15w3.apfs  CELL4_LABEL=cell4-w15w3 \
+CELL3_HOST_ENV="GLWIRE_NO_PANEL=1" \
+CELL4_HOST_ENV="GLWIRE_NO_PANEL=1" \
+WINDOW_AFTER=60 QEMU_SMP=1 MINSHOT=200000 MAX_SECS=1800 \
+tools/glwire/harness/four-cell.sh
+```
+
+- 只跑单格时给对应 `CELLn_IMAGE` 即可；缺 image 的格子会写 `SKIP`，不要用旧日志充数。
+- `--dry-run` 只读已有 `/tmp/<label>-{host.log,log,shot.png,drive.txt}` 重算表，不跑 QEMU；**dry-run 数字不是新实测**。
+- 每格产物写到 `OUT`（默认 `/tmp/four-cell`）：`four-cell.md`、`four-cell.csv`、每格日志/截图/drive。
+
+### 8.3 `0x502` 记账口径
+
+- 只数**宿主日志**里的 `glerror 0x502`：脚本 `grep -c 'glerror 0x502' <label>-host.log`，填表列 `host 0x502`。
+- P4 判据是 **`host 0x502` = 0**；某格 host log 缺失/没跑起来 → 写 `SKIP` 或 `-`，不写 0。
+- 表列固定为：`cell | ui | frames | fps | span | shot B | host 0x502`；`ui`/`frames`/`fps`/`span` 取 `drive:` 行，`shot B` 取最大截图字节数。
+- 纯本地格可能 host 0 帧/超时；如实写，不把 guest 帧数当 host fps。
+
+### 8.4 `make test`
+
+```sh
+cd /host/iosvm
+make test          # test-open（provenance + proto，如果 submodule 已取）→ test-gpu（host/vkbridge + lavapipe probe）
+```
+
+- `make test` 不跑 QEMU、不覆盖四格表；它只证明仓库的 open 检查与 host Vulkan probe 通过。
+- 若 `host/vkbridge` 未取，先 `make submodule`；若只想跑不依赖 GPU 的门，用 `make test-open` 并记录原因。
+- 记录完整命令、退出码与关键输出；失败不要用「应该没问题」代替。
+
+### 8.5 收尾清单
+
+1. 四格表 `four-cell.md`/`csv`（四份镜像各一行，`0x502` 列）；
+2. `make test` 输出与退出码；
+3. 文档更新（runbook 本节 + plan 的 P4/D7）；
+4. 只提交 `.md`/证据图，不提交 `.apfs`/日志/截图；
+5. **P4 未执行前不要写四格数字**；不要用 dry-run 数字当结果。
+
+
 ## 附录 A：本手册引用的数字出处
 
 | 数字/结论 | 出处 |
@@ -2320,6 +2419,11 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 6. **不再用 `GLWIRE_PROGRAM_SKIP=13` 当 P1 全局修复**：全标签 nonblack **101.7%**（Weather -97%，但 FaceTime +225%、Podcasts +432%），只是重分布。
 7. **不再用 `GLWIRE_TC0_SANITIZE=1` 当 P1 修复**：Weather 带 nonblack **562→758（+35%）**，形态从碎点变规则竖线；tc0 不是主因。
 8. **不再在合成/prog13 侧找点带**：P1c 已证明点带烘在 glyph tile 的 alpha 底部 6–8 行；修复在纹理生成/裁剪（P1d `GLYPH_TRIM`），在 P1d 数据前不要写「P1 已修复」。
+9. **不再用 `+allContexts` 跨进程枚举 widget 的 CAContext**：它按进程隔离；backboardd 只看到自己的 context，SpringBoard 看到 16 个也不含 155x155 widget host（`0x4741275c`/`0xccf65063`）。
+10. **不再假设这代 CAContext 有零参 `createImage`/`createCGImage`/`snapshot`**：实际只有 `createImageSlot:hasAlpha:` 等；零参快照前提不成立。
+11. **不再把 `createImageSlot:hasAlpha:` 当快照**：它是**创建 slot**，不是取图；slot/options 参数不要猜。
+12. **不再把 widget host 的 CAContext 当 SpringBoard/backboardd 自己的**：它属于 **widget extension 进程**；跨进程只能走 render server 或显式 id 传递。
+13. **不再靠调 surface 3 的 rect/selector 修 widget 内容**：P3a 的 surface 3 是空白白块；P3 已转 fallback（静态/占位 widget）。
 
 ## 附录 C：编译环境（工具链阻塞已永久解除）
 
