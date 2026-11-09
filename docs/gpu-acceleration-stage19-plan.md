@@ -42,7 +42,7 @@
 | P1 | 文字质量（**暂停：P1e `TRIM_FROM=start` 清空白顶行，trim 不是干净修复；转查 90 高背板/复合层；P1 未修复**） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
 | P2 | 壁纸（**关闭/未达成**：P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in；不再投入（D3）） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
 | P3 | widget（**真路径不可行（D1，提前收口）+ fallback 已交付（D2，fallback5 PASS）**：surface 枚举 30 面无候选、allContexts 按进程隔离、无零参 snapshot、extension CheckIn 未发出；host fallback2/3 截图不可见，转 guest-side `widget_placeholder=1`；占位不是真 widget，不写「可行」） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
-| P4 | 收尾（**D5：四格第二次实跑完成**；`host 0x502` 四格全 0（判据通过）；fps 0.00/0.10/0.46/0.20 是 guest 送帧瓶颈，不写性能达标；`make test-open` PASS，`test-gpu` 缺 lavapipe ICD；镜像 cell1 `f39b9105…`/cell2 `3207a35e…`/cell3=cell4 `785bcbac…`） | 四格表（纯本地/按引用/W1.5/W1.5+W3）各一次 20 s 滚动窗口；宿主侧 `0x502` = 0；`make test`；文档与推送 | — |
+| P4 | 收尾（**D7：纯本地可用；by-reference/w15 不具可用性**；cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2 183/343≈0.04 fps；cell3 2 帧/772,366ms≈0.003 fps、host frame 250；cell4 未跑是判决；0x502 四格全 0（cell4 为早前跑）；不写性能达标） | `0x502` 用 20s 窗口（判据 0）；fps 用 120 帧窗口（D6，cell1 guest）；cell4 不补跑；`make test`；文档与推送 | — |
 
 ---
 
@@ -269,7 +269,9 @@ glwire: label draw #74 ...  866 nonzero pixels
 
 **fps 判据（D6）**：60s/20s 滚动窗口的 fps **不可比**（窗口内 2–9 帧，仍在 UI 重建期）；fps 改用 **`WINDOW_FRAMES=120` 帧计数窗口**，cell1 用 **`WINDOW_CLOCK=guest`**。当前 20s 表只用于 `0x502`，不写性能达标。
 
-**cell3/4 部分主屏**：同一右下区域 cell3/cell4 都缺，与 in-place 无关；分析指向截图撞在第一张完整 host 屏幕帧前（§8.6），验证未跑。不得写成 w15 功能差异或画面完整达标。`make test`；文档；推送。
+**cell3/4 部分主屏**：同一右下区域 cell3/cell4 都缺，与 in-place 无关；分析指向截图撞在第一张完整 host 屏幕帧前（§8.6），验证未跑。不得写成 w15 功能差异或画面完整达标。
+
+**P4 最终结论（D7）**：**cell1-pure 120 帧/11.00s = 10.91 fps（guest 时钟）是唯一可用数字**；cell2 by-reference 1800s 只到 **183/343（≈0.04 fps）**；cell3 guest 驱动 **2 帧/772,366 ms（≈0.003 fps）**、host 只到 **frame 250**；**cell4 未跑是判决不是漏跑**（远端路径已证不可用，省约 50 分钟 GPU）；`0x502` 四格全 0（cell4 为早前 20s 跑，0；本轮未补跑）。结论固定为「**纯本地可用；by-reference / w15 在 TCG 单核 + softpipe 下不具可用性（guest 送帧停摆，不是没测）**」，不写性能达标。`make test`；文档；推送。
 
 ---
 
@@ -280,6 +282,7 @@ glwire: label draw #74 ...  866 nonzero pixels
 3. **不再把「tile 有像素」当文字**：backdrop 填充会让 64x19 tile 全非零。
 4. **不再说「合完 label 整个面板重建」**：逐笔哈希已推翻（第十七阶段 §十一）。
 5. **不动内核**：本阶段是客人机用户态 + 宿主。
+6. **不再为 by-reference / w15 追加性能实验**：TCG 单核 + softpipe 下 guest 送帧停摆已判不可用；除非换配置（多核/真 GPU 直通）另立项。
 
 ---
 
@@ -314,7 +317,7 @@ P0 已达成 2/3（v7+v9），但只覆盖「名称上屏」。下一阶段按 P
 - **P1 文字质量**：标签下方虚线伪影；Search 完整性（当前多数时刻仍是「Se」，更晚加载才出现完整 Search）；widget 左上角 40x40 白像素 **875/1600（±2%）**；标签为白。**P1e：FNV 证明 upload row0=视觉顶部，`TRIM_FROM=start` 清的是空白顶行；band 6989→5146（73.6%）但 Wallet +1244%、Health +70%、Photos +81%，trim 不是干净修复。停止 trim，转查 90 高背板/复合层；P1 方向暂停，优先 P2 依赖/P3。P1 未修复。**
 - **P2 壁纸**：**关闭/未达成（D3）**。P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 **extension check-in timeout**（18 个扩展 5–13s 被杀；Gradient spawn→kill 7.0s；C1 timeout 120 无效、C2 非 elision）。不再投入 P2；P1 暂停，P0 仍 2/3。
 - **P3 widget（正式收口 D1/D2；详见 `docs/gpu-acceleration-stage19-decisions.md`）**：**P3a 已跑（§4.26）**：root `f2472194…`、system 未动；guest 1 条 `widget surface 3 184x124 -> texture 0xffff1003 rect 46,142 309x309`，host 1 条 upload（bytes 91,264）+ 4 条 `widget compose`，无 removed；**链路通**。但截图 widget 区域 mean RGB **251**、nonblack 211,753/214,369 → **纯白圆角块**；surface 3 的 92x62 pt 与层树 155x155 不符 → 链路通、语义不对，不再调 rect。**D1（§4.28）未成功**：root `b8c686ef…`（备份 `/tmp/root.apfs.bak-P3b-d1` = f2472194…）；`widget_cacontext=auto layers_at=900`、NO_PANEL；9 行探针全在 init；class methods 有 **`contextWithId:`（小写 d）**、`allContexts`、`objectForSlot:`，instance 有 `createImageSlot:hasAlpha:`，CARenderServer* 全 present；但 `allContexts` 被精确 `@@:` 编码挡住、`contextWithID:` 名单不匹配、探针只在 init 跑（widget context UI 后才出现，id 每 boot 变；本 boot 155x155 host=0x493ce0b9/0x810db096）→ **无 context 对象/快照/nonzero**。**D2（§4.28）失败**：root `fc1787e4…`；timer fired、allContexts count 1（`0xc0cfe455`，backboardd 自己的）；与 950s 层树 155x155 host `0xbf11dcae/0x7702cd25` 不匹配。**D3（§4.28）失败**：root `ae626263…`；SpringBoard allContexts count 16（含 6 个 window context），但不含 155x155 host `0x4741275c/0xccf65063`；widget context 属 **widget extension 进程**；CAContext 没有零参 `createImage`/`snapshot`（只有 `createImageSlot:hasAlpha:`），0 snapshot/nonzero。D3 第三次、到放弃线。**P2/P3 共同根因：extension 被 check-in timeout ~9s 杀，P3 实时 widget 内容在 extension 修复前不可得**。下一步 fallback：host 侧 `GLWIRE_WIDGET_FALLBACK=1` 已证明在截图里不可见（fallback2 local panel、fallback3 host-replay 都是 offscreen picture）；转 **guest-side `widget_placeholder=1`**（`inject_sb.c` 插棋盘 UIView，日志 `static widget placeholder ...`），**fallback5 PASS、已交付（占位）**；或 owner 决定再攻 extension timeout；到期按 §4.29 三选一（可行/不可行/需要更多信息）。surface 枚举 30 个面（id3 184x124 旧 snapshot、id4 312x202 LA08）无 widget 尺寸候选；950s host 0x500b566f/0x7f535c4c 无对应 id → **P3 真路径不可行（D1 提前收口）；guest-side fallback5 PASS（D2），fallback 已交付（拉面占位，不是真 widget）；不写可行。**
-- **P4 四格表**：D5 已实跑（13:25–14:27Z）；三份镜像四格、20s 窗口、`host 0x502` 四格全 0（判据通过）；fps 0.00/0.10/0.46/0.20 是 guest 送帧瓶颈，不是 host 回放慢，**不写性能达标**；稳定态需另起 `WINDOW_AFTER=300`；`make test-open` PASS、`test-gpu` 缺 lavapipe ICD。
+- **P4 四格表**：D7 已收口。cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2 1800s 183/343≈0.04 fps；cell3 guest 2 帧/772,366ms≈0.003 fps、host frame 250；cell4 未跑是判决。`0x502` 四格全 0；**不写性能达标**；不再为 by-reference/w15 追加实验，除非换配置。`make test-open` PASS、`test-gpu` 缺 lavapipe ICD。
 - **回归基线**：不要用 v8 的动画帧当基线（v8 的 panel 已完整、picture 还停在前一状态，89.53% 是采样时刻问题）；用 v7/v9 这类静态时刻，或给 dump 加「连续两帧 panel/picture 稳定」门槛。
 
 ---

@@ -2103,7 +2103,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 > **状态：正式收口。** 真路径判定 **不可行**（D1）；guest-side placeholder **fallback5 PASS**（D2），已交付。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不写「可行」。
 
-> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D6**。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不要写「可行」。
+> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D7**。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不要写「可行」。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2478,7 +2478,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 > **状态：第二次实跑已完成（2026-11-09 13:25–14:27Z）。** `host 0x502` **四格全 0，P4 判据通过**；但 20s 窗口 fps 很低（0.00/0.10/0.46/0.20），**只是 0x502 判据通过，不写性能达标**。稳定态窗口未做，见 §8.0 说明。
 
-### 8.0 实测结果（第二次实跑）
+### 8.0 实测结果（第二次实跑，20s 口径；仅用于 0x502）
 
 三份镜像、四个 cell（cell3=cell4 同镜像，仅 host env 不同）：
 
@@ -2596,7 +2596,21 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - attempt3 帧计数四格跑中：`four-cell.sh` 已支持 `WINDOW_FRAMES`/`WINDOW_SPAN`/`WINDOW_CLOCK`（cell1 guest、其余 host）与 `frame-window` 解析（code `e41a47a`，远端 `93f5d2a`）；结果待填。
 - **结论口径**：cell3/4 的部分主屏可能是截图时序，不是 w15 功能差异；P4 仍只写 `0x502` 通过，**不写性能达标 / 画面完整达标**。
 
-### 8.5 收尾清单
+### 8.7 P4 最终结论（D7，2026-11-09）
+
+| cell | 最终数字 | 判定 |
+|---|---|---|
+| cell1-pure | **120 帧 / 11.00s = 10.91 fps（guest 时钟）** | **唯一可用数字** |
+| cell2-byref | 1800s 只到 **183/343（≈0.04 fps）** | by-reference 不可用 |
+| cell3-w15 | guest 驱动行 **2 帧 / 772,366 ms（≈0.003 fps）**；host 只到 **frame 250** | w15 不可用 |
+| cell4-w15w3 | **未跑（判决，不是漏跑）** | 远端路径已证不可用，省约 50 分钟 GPU；不补跑 |
+
+- `0x502` 四格全 0（cell4 为早前 20s 跑，0；attempt3 未补跑）；这是 P4 唯一通过的判据。
+- **结论固定**：**纯本地可用；by-reference / w15 在 TCG 单核 + softpipe 下不具可用性（guest 送帧停摆，不是没测）**。
+- **不写「性能达标」**；cell1 的 10.91 fps 是可用性数字，不是性能目标。
+- **不再为 by-reference / w15 追加性能实验**，除非换配置（多核/真 GPU 直通）另立项。
+
+### 8.8 收尾清单
 
 1. 四格表 `four-cell.md`/`csv`（四行、三份镜像；`0x502` 列）；
 2. `make test` 输出与退出码；
@@ -2639,6 +2653,7 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 12. **不再把 widget host 的 CAContext 当 SpringBoard/backboardd 自己的**：它属于 **widget extension 进程**；跨进程只能走 render server 或显式 id 传递。
 13. **不再靠调 surface 3 的 rect/selector 修 widget 内容**：P3a 的 surface 3 是空白白块；P3 已转 fallback（静态/占位 widget）。
 14. **host 侧画的东西在 QEMU 截图里结构性不可见**：截图 = guest scanout（SpringBoard/panel），host `widget compose`/fallback 只进 **offscreen picture**；fallback2（local panel）和 fallback3（host-replay）都因此看不到。以后做可视验收必须先确认像素归属，host 侧 fallback 只作分析用。
+15. **不再为 by-reference / w15 追加性能实验**：TCG 单核 + softpipe 下 guest 送帧停摆，已判不具可用性；cell4 未跑是判决不是漏跑。除非换配置（多核/真 GPU 直通）另立项。
 
 ## 附录 C：编译环境（工具链阻塞已永久解除）
 
@@ -2734,7 +2749,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 `host 0x502` 只数宿主日志 `glerror 0x502` 行；`ui/frames/fps/span/shot B` 与 CSV 同表。正式四格仍等 P4 镜像。
 
 
-## 附录 D：阶段 19 收口决定 D1–D6（摘要）
+## 附录 D：阶段 19 收口决定 D1–D7（摘要）
 
 完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**。
 
@@ -2746,5 +2761,6 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | D4 | **extension check-in 移交阶段 20 候选** | 18 个 extension 5–13s 被杀；timeout 120 无效、force xpcproxy 仍死、job 无关；唯一值得试 `ExtensionWatchdog=false` 暴露真实 exit code |
 | D5 | **剩余时间全部转 P4 四格表实跑** | 三份镜像/四格 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
 | D6 | **P4 fps 判据改 120 帧计数窗口** | 20s 窗口只有 2–9 帧、仍在 UI 重建期，fps 不可比；改用 `WINDOW_FRAMES=120`，cell1 `WINDOW_CLOCK=guest`；当前只写 0x502 通过，不写性能达标 |
+| D7 | **P4 终局：纯本地可用；byref/w15 不具可用性** | cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2 183/343≈0.04 fps；cell3 2 帧/772,366ms≈0.003 fps、host frame 250；cell4 未跑是判决；0x502 四格全 0；不写性能达标 |
 
 > 追溯：D1 见 §4.28/§4.30/附录 extension check-in；D2 见 §4.29/§4.31；D3 见 §4.22–§4.25；D4 见 §4.24/§4.25/附录 extension check-in；D5 见 §八。提交列表见 decisions.md 的追溯表。
