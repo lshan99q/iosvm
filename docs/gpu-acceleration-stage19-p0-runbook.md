@@ -1977,40 +1977,48 @@ UIWindowLayer "colour ( 0 1 )"
 
 ---
 
-### 4.29 P3b-D2 计划：修选择器/编码 + 延迟探针（已派，未回填）
+#### D2（已 GO，结果待填）：修选择器/编码 + `widget_cacontext_at` 延迟
 
-> **状态：D2 已派、结果待填。** D1 未成功不代表 CAContext 不可用：能力面（类/selector/CARenderServer* 符号）都在；D2 只修探针自身的三处问题，仍不自动接 opcode 202。
+> **状态：exp 已 GO、结果待填。** D1 未成功不代表 CAContext 不可用；D2 只修探针自身问题，仍**不自动接 opcode 202**。
 
-**D2 改动**
+**修正**
 
-1. **选择器/编码**
-   - 加真实 class method **`contextWithId:`**（小写 d）。
-   - type encoding 改为**容忍偏移**的解析（如 `@16@0:8`、`@20@0:8I16`），不要精确匹配 `@@:`。
-   - 保留 `allContexts`、`objectForSlot:`；不要盲调未知 selector。
-2. **延迟**
-   - 加 **`widget_cacontext_at=SECONDS`**：在 backboardd 用 `dispatch_after` 到 UI 之后（建议 900s，和 `layers_at` 同思路）再跑。
-   - 或轮询 `allContexts` 直到非空；两者取一，不要同时改合成。
-3. **逐个快照**
-   - 延迟后取 `allContexts`，逐项打印 **id / class / 尺寸**。
-   - 对候选逐个试 `createImageSlot:hasAlpha:`（及已确认存在的零参/`createImage` 变体），打印 **bytes / bpp / bpr / 前 16 字节 / nonzero**。
-   - 用同 boot 层树 155x155 host id 对照；**不要用上一 boot 的 id**（每 boot 变）。
-4. **不自动接 202**：D2 仍只做快照探针，host 不开 `GLWIRE_WIDGET`；避免把空内容合成进去。
+- **不要求精确 `@@:`**：用 `method_getNumberOfArguments` / return type 判断，允许 `@16@0:8`、`@20@0:8I16` 这类带偏移的 encoding。
+- selector 表加真实 **`contextWithId:`**（小写 d）。
+- 新增 **`widget_cacontext_at=SECONDS`**：backboardd **main queue** 上 `dispatch_after` 到 UI 之后再跑（与 `layers_at` 同思路）。
 
-**判据（逐条填）**
+**D2 行为**
 
-| # | 判据 | 结果 | 证据 |
-|---|---|---|---|
-| 1 | `contextWithId:`/`allContexts` 被实际调用（encoding 不再挡） | 待填 | |
-| 2 | 拿到至少一个 context 对象 | 待填 | id/class |
-| 3 | 至少一个快照尺寸合理（与 155x155 host 同量级，或记录实际值） | 待填 | WxH |
-| 4 | **nonzero > 0**（非纯白/纯黑） | 待填 | nonzero/比例、前 16 字节 |
-| 5 | 不崩/不阻塞；host 无 202/widget 行 | 待填 | |
+- `+allContexts`（或 `contexts` / `allContextIDs`）逐项打印 class / contextId。
+- **只对零参、返回对象的** `createImage` / `createCGImage` / `snapshot` 做快照；打印 W/H/bpp/bpr/bytes/前 16 字节/nonzero。
+- `createImageSlot:hasAlpha:` / `createImageWithOptions:` **只打印 responds/encoding，不调用**。
+- `nonzero>0` 且 **32 ≤ W,H ≤ 4096** 才打印 **`widget candidate`**。
+- 仍不接 202（host 不开 `GLWIRE_WIDGET`）；候选只做日志。
 
-- 只有 selector/符号、或纯白/纯黑快照 → **不算成功**。
-- D2 成功后，才进 P3b：snapshot 走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。
-- 放弃条件同 §4.28：无类/selector、连续 3 次全空/全黑、阻塞/崩溃、超 1–2 天 → 写「需更多信息/不可行」。
+**库**
 
-**不要写**：D1/D2 成功 / P3 完成 / widget 正确。D2 未回填；P2-C2 已失败；P0 仍 2/3。
+| 项 | 值 |
+|---|---|
+| `libhakios.dylib` | **92,872 B**，md5 **`e7e33614e307a985227c7f7d47a36184`**；strings 含 `widget_cacontext_at=`、`contextWithId:`、`widget candidate` |
+| `libhakios.gl.dylib` | 仍 **400,720 B** |
+| 备份 | `/tmp/libhakios.d1.dylib`（92,208，D1 版）等（exp 侧） |
+
+**exp 流程（已 GO）**
+
+- P3b-D1 的 root.apfs 换 `libhakios.dylib` 92,872 B，重打 root；不设 `SYSTEM`，system.apfs 不动。
+- boot：`widget_cacontext_at=900 layers_at=950`；host **不开 `GLWIRE_WIDGET`**；`GLWIRE_NO_PANEL=1`；`UI_GRACE=600`。
+
+**判据**
+
+1. `widget_cacontext_at` timer 到点后，`+allContexts` 真的被调用（不是 init 一次）；
+2. 至少一个 context 对象被打印；
+3. 至少一个快照 `nonzero>0` 且尺寸在 32–4096，打印 `widget candidate`；
+4. 与 **950s 层树**的 155x155 host id 对照（同 boot 的 id，不用上一 boot 的）；
+5. 全空/全黑按 §4.28 的放弃条件处理，不盲调未知 selector。
+
+- 只有 selector/符号、或纯白/纯黑 → 不算成功。
+- D2 成功后才进 P3b：snapshot 走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。
+- **结果待填；P3 未完成，不要写 D2 成功 / widget 正确。**
 
 
 ## 五、铁律与提交
