@@ -2138,6 +2138,8 @@ static int poll_timeout_ms = -1;
  * experiment.  1, the default, sends the whole frame exactly as before. */
 static int upload_scale = 1;
 static int upload_565_env;       /* GLWIRE_UPLOAD_565=1: the guest must also set its boot-arg */
+static int upload_rle_env;       /* GLWIRE_UPLOAD_RLE=1: pack the RGB565 picture with 16-bit runs */
+static int rle_wanted;           /* the guest's 12th request field */
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
 static unsigned fbo_note_count;
@@ -3633,6 +3635,7 @@ serve_frame(struct client *client)
 	int version = 0;                /* the record layout the guest speaks (stage fifteen: 2 = with context) */
 	int dirty_wanted = 0;           /* the guest asks for D <tiles> instead of the full picture */
 	int rgb565_wanted = 0;          /* the guest asks for 16-bit RGB565 instead of 32-bit BGRA */
+	int request_rle = 0;             /* the guest asks for the RGB565 16-bit run packing */
 	/* P1'''': a frame may name a second panel-sized surface (the display presents two in turn). */
 	int segment_count2 = 0, row_bytes2 = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
@@ -3664,14 +3667,19 @@ serve_frame(struct client *client)
 		line[at++] = c;
 	}
 	line[at] = '\0';
-	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
+	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
 	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version, &dirty_wanted,
-	    &rgb565_wanted) < 4) {
+	    &rgb565_wanted, &request_rle) < 4) {
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
 	if (upload_565_env) {
 		rgb565_wanted = 1;
+	}
+	if (upload_rle_env) {
+		rle_wanted = request_rle;
+	} else {
+		rle_wanted = request_rle;
 	}
 	/* (an older guest sends eight fields: its records keep the 8-byte header, context 0) */
 	wire_set_record_version(version);
@@ -4200,7 +4208,72 @@ serve_frame(struct client *client)
 		unsigned char *packed = NULL;
 		int length;
 
-		if (rgb565_wanted && !in_place) {
+		if (rle_wanted && !rgb565_wanted && !in_place) {
+			size_t cap = frame_bytes + frame_bytes / 64 + 16;
+			unsigned char *packed_rle = malloc(cap);
+			size_t out = 0, i = 0, pixels = (size_t)width * (size_t)height;
+			double pack_began = now_seconds();
+
+			if (packed_rle == NULL) {
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+			while (i < pixels) {
+				size_t run = 1;
+
+				while (i + run < pixels &&
+				    memcmp(picture + (i + run) * 4, picture + i * 4, 4) == 0 && run < 130) {
+					run++;
+				}
+				if (run >= 3) {
+					packed_rle[out++] = (unsigned char)(0x80 | (run - 3));
+					memcpy(packed_rle + out, picture + i * 4, 4);
+					out += 4;
+					i += run;
+				} else {
+					size_t start = i;
+					size_t literal = 0;
+
+					while (i < pixels && literal < 128) {
+						size_t r = 1;
+
+						while (i + r < pixels &&
+						    memcmp(picture + (i + r) * 4, picture + i * 4, 4) == 0 && r < 3) {
+							r++;
+						}
+						if (r >= 3) {
+							break;
+						}
+						i++;
+						literal++;
+					}
+					packed_rle[out++] = (unsigned char)(literal - 1);
+					memcpy(packed_rle + out, picture + start * 4, literal * 4);
+					out += literal * 4;
+				}
+			}
+			{
+				double pack_ms = (now_seconds() - pack_began) * 1000.0;
+
+				printf("host_glwire: bgra rle raw %zu -> packed %zu B (%zu%%), pack %.1f ms\n",
+				    frame_bytes, out, frame_bytes ? out * 100 / frame_bytes : 0, pack_ms);
+			}
+			snprintf(done, sizeof(done), "Z %zu %zu\n", frame_bytes, out);
+			if (!send_all(client->fd, done, strlen(done)) ||
+			    !send_all(client->fd, packed_rle, out)) {
+				free(packed_rle);
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+			free(packed_rle);
+			fflush(stdout);
+		} else if (rgb565_wanted && !in_place) {
 			size_t bytes565 = (size_t)width * (size_t)height * 2;
 			uint16_t *pixels565 = malloc(bytes565);
 			size_t at = 0;
@@ -4220,19 +4293,89 @@ serve_frame(struct client *client)
 					pixels565[at++] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
 				}
 			}
-			snprintf(done, sizeof(done), "R %zu\n", bytes565);
-			if (!send_all(client->fd, done, strlen(done)) ||
-			    !send_all(client->fd, pixels565, bytes565)) {
-				free(pixels565);
-				free(records);
-				free(picture);
-				free(segments);
-				free(segments2);
-				return -1;
+			if (rle_wanted) {
+				size_t pixels = (size_t)width * (size_t)height;
+				size_t cap = bytes565 + bytes565 / 64 + 16;
+				unsigned char *packed565 = malloc(cap);
+				size_t out = 0, i = 0;
+				double pack_began = now_seconds();
+
+				if (packed565 == NULL) {
+					free(pixels565);
+					free(records);
+					free(picture);
+					free(segments);
+					free(segments2);
+					return -1;
+				}
+				while (i < pixels) {
+					size_t run = 1;
+
+					while (i + run < pixels && pixels565[i + run] == pixels565[i] && run < 130) {
+						run++;
+					}
+					if (run >= 3) {
+						packed565[out++] = (unsigned char)(0x80 | (run - 3));
+						packed565[out++] = (unsigned char)(pixels565[i] & 0xff);
+						packed565[out++] = (unsigned char)(pixels565[i] >> 8);
+						i += run;
+					} else {
+						size_t start = i;
+						size_t literal = 0;
+
+						while (i < pixels && literal < 128) {
+							size_t r = 1;
+
+							while (i + r < pixels && pixels565[i + r] == pixels565[i] && r < 3) {
+								r++;
+							}
+							if (r >= 3) {
+								break;
+							}
+							i++;
+							literal++;
+						}
+						packed565[out++] = (unsigned char)(literal - 1);
+						for (size_t j = 0; j < literal; j++) {
+							packed565[out++] = (unsigned char)(pixels565[start + j] & 0xff);
+							packed565[out++] = (unsigned char)(pixels565[start + j] >> 8);
+						}
+					}
+				}
+				{
+					double pack_ms = (now_seconds() - pack_began) * 1000.0;
+
+					printf("host_glwire: rgb565 rle raw %zu -> packed %zu B (%zu%%), pack %.1f ms\n",
+					    bytes565, out, bytes565 ? out * 100 / bytes565 : 0, pack_ms);
+				}
+				snprintf(done, sizeof(done), "Z %zu %zu\n", bytes565, out);
+				if (!send_all(client->fd, done, strlen(done)) ||
+				    !send_all(client->fd, packed565, out)) {
+					free(packed565);
+					free(pixels565);
+					free(records);
+					free(picture);
+					free(segments);
+					free(segments2);
+					return -1;
+				}
+				free(packed565);
+				fflush(stdout);
+			} else {
+				snprintf(done, sizeof(done), "R %zu\n", bytes565);
+				if (!send_all(client->fd, done, strlen(done)) ||
+				    !send_all(client->fd, pixels565, bytes565)) {
+					free(pixels565);
+					free(records);
+					free(picture);
+					free(segments);
+					free(segments2);
+					return -1;
+				}
+				printf("host_glwire: rgb565 sends %zu of %zu picture B\n", bytes565, frame_bytes);
+				fflush(stdout);
 			}
 			free(pixels565);
-			printf("host_glwire: rgb565 sends %zu of %zu picture B\n", bytes565, frame_bytes);
-			fflush(stdout);
 		} else if (dirty_wanted && !in_place) {
 			if (host_send_dirty(client, picture, width, height, frame_bytes) != 0) {
 				free(records);
@@ -4457,6 +4600,8 @@ main(int argc, char **argv)
 	}
 	upload_565_env = getenv("GLWIRE_UPLOAD_565") != NULL &&
 	    strcmp(getenv("GLWIRE_UPLOAD_565"), "0") != 0;
+	upload_rle_env = getenv("GLWIRE_UPLOAD_RLE") != NULL &&
+	    strcmp(getenv("GLWIRE_UPLOAD_RLE"), "0") != 0;
 	{
 		const char *value = getenv("GLWIRE_POLL_MS");
 
@@ -4539,9 +4684,9 @@ main(int argc, char **argv)
 		}
 	}
 	printf("host_glwire: build marker uniform-ring-v2 (poll %d ms%s, frame delay %d ms, "
-	    "upload scale %d, rgb565=%d)\n", poll_timeout_ms,
+	    "upload scale %d, rgb565=%d, rle=%d)\n", poll_timeout_ms,
 	    poll_timeout_ms < 0 ? ", infinite = wait for guest" : "", frame_delay_ms, upload_scale,
-	    upload_565_env);
+	    upload_565_env, upload_rle_env);
 	fflush(stdout);
 	printf("host_glwire: listening on %d%s%s\n", port,
 	    no_in_place ? " (GLWIRE_NO_INPLACE: the picture travels back instead)" : "",
