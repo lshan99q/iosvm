@@ -1975,6 +1975,44 @@ UIWindowLayer "colour ( 0 1 )"
 
 **不要写**：D1 成功 / P3 完成 / widget 正确。P2-C2 已失败；P0 仍 2/3。
 
+---
+
+### 4.29 P3b-D2 计划：修选择器/编码 + 延迟探针（已派，未回填）
+
+> **状态：D2 已派、结果待填。** D1 未成功不代表 CAContext 不可用：能力面（类/selector/CARenderServer* 符号）都在；D2 只修探针自身的三处问题，仍不自动接 opcode 202。
+
+**D2 改动**
+
+1. **选择器/编码**
+   - 加真实 class method **`contextWithId:`**（小写 d）。
+   - type encoding 改为**容忍偏移**的解析（如 `@16@0:8`、`@20@0:8I16`），不要精确匹配 `@@:`。
+   - 保留 `allContexts`、`objectForSlot:`；不要盲调未知 selector。
+2. **延迟**
+   - 加 **`widget_cacontext_at=SECONDS`**：在 backboardd 用 `dispatch_after` 到 UI 之后（建议 900s，和 `layers_at` 同思路）再跑。
+   - 或轮询 `allContexts` 直到非空；两者取一，不要同时改合成。
+3. **逐个快照**
+   - 延迟后取 `allContexts`，逐项打印 **id / class / 尺寸**。
+   - 对候选逐个试 `createImageSlot:hasAlpha:`（及已确认存在的零参/`createImage` 变体），打印 **bytes / bpp / bpr / 前 16 字节 / nonzero**。
+   - 用同 boot 层树 155x155 host id 对照；**不要用上一 boot 的 id**（每 boot 变）。
+4. **不自动接 202**：D2 仍只做快照探针，host 不开 `GLWIRE_WIDGET`；避免把空内容合成进去。
+
+**判据（逐条填）**
+
+| # | 判据 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | `contextWithId:`/`allContexts` 被实际调用（encoding 不再挡） | 待填 | |
+| 2 | 拿到至少一个 context 对象 | 待填 | id/class |
+| 3 | 至少一个快照尺寸合理（与 155x155 host 同量级，或记录实际值） | 待填 | WxH |
+| 4 | **nonzero > 0**（非纯白/纯黑） | 待填 | nonzero/比例、前 16 字节 |
+| 5 | 不崩/不阻塞；host 无 202/widget 行 | 待填 | |
+
+- 只有 selector/符号、或纯白/纯黑快照 → **不算成功**。
+- D2 成功后，才进 P3b：snapshot 走 opcode 202/`GLWIRE_WIDGET`，rect 用当前层树 widget frame。
+- 放弃条件同 §4.28：无类/selector、连续 3 次全空/全黑、阻塞/崩溃、超 1–2 天 → 写「需更多信息/不可行」。
+
+**不要写**：D1/D2 成功 / P3 完成 / widget 正确。D2 未回填；P2-C2 已失败；P0 仍 2/3。
+
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
