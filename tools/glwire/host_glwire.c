@@ -3784,6 +3784,10 @@ serve_frame(struct client *client)
 	 * corrupts llvmpipe's state tracker (the crash came a few calls later, in glClearColor).
 	 * The stream's later glGenTextures must not replace the uploaded texture (names_*_put_new).
 	 */
+	trace_width = width;
+	trace_height = height;
+	panel_upload_texture = 0;
+	panel_upload_frame = 0;
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	{
 		wire_buffer upload;
@@ -3838,8 +3842,6 @@ serve_frame(struct client *client)
 	glGetIntegerv(GL_VIEWPORT, &saved_viewport[0]);
 	client->names.stand_in = client->framebuffer;
 	panel_drawn_fbo = 0;             /* (stage seventeen: the frame's panel target starts unknown) */
-	panel_upload_texture = 0;
-	panel_upload_frame = 0;
 	shadow_frame = -1;
 	shadow_used = 0;
 	if (keep_binding && client->names.framebuffer_known && client->names.bound_framebuffer != 0) {
