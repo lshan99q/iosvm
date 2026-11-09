@@ -1867,9 +1867,9 @@ UIWindowLayer "colour ( 0 1 )"
 
 **判读**：命中「仍 ~9s 被杀 / alive 仍 0」分支 → **不是 elision**。按约定 P2 性价比低/需更多信息，**停止 P2 timeout/xpcproxy 方向**，转 P3。附带：本发晚段画面有绿色右下象限伪影，以后遇到 991 KB 级截图先查 panel 完整性，不要当壁纸证据。
 
-### 4.26 P3 MVP 准备：guest 库/patch 就绪，尚未执行
+### 4.26 P3 MVP：guest 库/patch 就绪，已 GO（结果待填）
 
-> **状态：库和 patch 已就绪，P3 尚未执行、未换进镜像。** 这一节只记录准备与风险，不是 P3 结果。
+> **状态：已 GO、跑中/结果待填；库已换进 root.apfs，system.apfs 不动。** 这一节记录准备、参数与风险，不是 P3 结果；不要写 P3 已完成。
 
 **guest 库（工具链编出）**
 
@@ -1879,7 +1879,7 @@ UIWindowLayer "colour ( 0 1 )"
 | `libhakios.gl.dylib` | **400,720 B** | 401,816 B | `/tmp/libhakios.gl.pre-p3.dylib` | `_eagl_remote_widget_upload` |
 
 - patch：`/host/iosvm/logs/s19o-p3-guest-p3.patch`（**240 行**）。
-- 两个库尚未替换进 root.apfs/system.apfs；P3 未 boot。
+- **已 GO**：root.apfs 换 P3 库（`libhakios.dylib` 90,720 B、`libhakios.gl.dylib` 400,720 B），**不设 `SYSTEM`**；system.apfs 不动。P3 boot 结果待填。
 
 **MVP 链路（按 lead 的方案）**
 
@@ -1889,11 +1889,11 @@ boot-arg 固定 surface ID
   -> host opcode 202 / GLWIRE_WIDGET
 ```
 
-**建议参数**
+**已 GO 的参数**
 
 - boot：`widget_surface=3 widget_rect=46,142,309,309`（另有 `widget_scale=` 可用）。
-- host：`GLWIRE_WIDGET=1`。
-- 仍用 local composition / `GLWIRE_NO_PANEL=1` 的现有测量配方，只加上述变量；不要同时改 trim/其它变量。
+- host：`GLWIRE_WIDGET=1 GLWIRE_NO_PANEL=1`。
+- 仍用 local composition 的现有测量配方，只加上述变量；不要同时改 trim/其它变量。
 
 **关键风险：surface 3 的可行性警告**
 
@@ -1911,7 +1911,7 @@ boot-arg 固定 surface ID
 3. 截图对应 rect 有变化（允许拉伸/旧内容，记录偏差）；
 4. 不要求 `312x202`/`184x124` 与当前 widget 位置完全吻合；不吻合就记录为「链路通、语义不对」。
 
-**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3 未执行，P2-C2 未出结果；P0 仍 2/3。
+**不要写**：P3 已完成 / widget 已正确 / P2 已修复。P3 MVP 已 GO 但结果待填；P2-C2 已失败、P2 性价比低/需更多信息；P0 仍 2/3。
 
 
 ## 五、铁律与提交
