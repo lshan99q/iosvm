@@ -1,5 +1,5 @@
 #!/bin/bash
-# four-cell.sh -- P4: the four builds, one 20 s scroll window each, one table.
+# four-cell.sh -- P4: the four cells, one 20 s scroll window each, one table.
 #
 # This is a *skeleton*: it does not build the four images and it does not run by itself
 # unless each image is given.  It drives the existing drive-scroll.sh, so the window is the
@@ -10,15 +10,15 @@
 #
 #   cell1  pure local     no recorder in the image
 #   cell2  by-reference   GLWIRE_LOCAL=1 (guest draws; surfaces uploaded by reference)
-#   cell3  W1.5           remote_only, host --no-panel replays
-#   cell4  W1.5 + W3      same build as W1.5, W3 (in-place row write) on
+#   cell3  W1.5           remote_only; host --no-panel + GLWIRE_NO_INPLACE=1 replays
+#   cell4  W1.5 + W3      same image as cell3; host --no-panel, in-place row write on
 #
 # The images are built outside this script.  Give each one explicitly:
 #
 #   CELL1_IMAGE=/tmp/root-local.apfs \
 #   CELL2_IMAGE=/tmp/root-byref.apfs \
 #   CELL3_IMAGE=/tmp/root-w15.apfs \
-#   CELL4_IMAGE=/tmp/root-w15w3.apfs \
+#   CELL4_IMAGE=/tmp/root-w15.apfs    # same image as cell3; host env differs
 #   ./four-cell.sh
 #
 # --dry-run reads existing /tmp/<label>-{host.log,log,shot.png,drive.txt} and prints the same
@@ -63,7 +63,17 @@ cell_label() {
 	esac
 }
 cell_xcmd()  { eval "printf '%s' \"\${CELL$1_XCMD:-}\""; }
-cell_henv()  { eval "printf '%s' \"\${CELL$1_HOST_ENV:-}\""; }
+cell_henv() {
+	local value
+	eval "value=\"\${CELL$1_HOST_ENV:-}\""
+	if [ -n "$value" ]; then
+		printf '%s' "$value"
+	elif [ "$1" = 3 ]; then
+		printf '%s' "GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1"
+	elif [ "$1" = 4 ]; then
+		printf '%s' "GLWIRE_NO_PANEL=1"
+	fi
+}
 cell_hargs() { eval "printf '%s' \"\${CELL$1_HOST_ARGS:-}\""; }
 cell_require_host() {
 	local value
