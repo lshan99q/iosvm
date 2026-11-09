@@ -1831,6 +1831,13 @@ UIWindowLayer "colour ( 0 1 )"
 
 **结论**：C1 单变量失败——limits 文件在镜像里但不生效；extension check-in 仍超时，壁纸 provider 起不来。下一步按 §4.23 的 fallback 转 **C2（xpcproxy/persona）**或离线 launchd/XPCServices 分析，**不要继续加 timeout**。P2 未达成。
 
+**路线调整（2026-11-09）**
+
+- **停止 C1**：不再加 timeout、不再改 limits plist；120s 未生效，继续调只是重复。
+- **C2 限时**：code 做 **30 分钟**离线限时（xpcproxy/persona/check-in 方向）；到点无论结果都汇报，不无限深挖。
+- **P3 正式开工**（不等待 P2）：guest 库已可编；MVP = boot-arg 固定 surface ID + backboardd `IOSurfaceLookup` + host **opcode 202 / `GLWIRE_WIDGET`**。
+- **P2 不阻塞 P3**；P1 暂停；P0 仍 **2/3**，P2 未达成。
+
 ## 五、铁律与提交
 
 ### 5.1 仓库里不许出现的东西
