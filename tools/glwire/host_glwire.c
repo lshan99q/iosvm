@@ -541,14 +541,55 @@ static int last_draw_was_glyph;
 struct widget_rect {
 	GLuint texture;
 	GLint x, y, w, h;
+	int blank;              /* the uploaded picture is ~all white (a surface that was never drawn) */
 };
 
 static struct widget_rect widgets[8];
 static unsigned widget_count;
 static unsigned widget_full_said;
 
+/* The P3a surface is 184x124 of near-white: an IOSurface that was never drawn.  A white texel
+ * writes alpha 255, so the frame looks like a white widget; only the pixels can tell us that a
+ * placeholder is wanted.  Both byte orders are checked component-wise, so BGRA/RGBA and LA08
+ * work without knowing the guest's GL enum. */
+static int
+host_widget_blank(const unsigned char *data, GLsizei bytes, GLint w, GLint h, GLsizei row_bytes,
+    GLsizei pixel_bytes)
+{
+	long pixels, white = 0;
+
+	if (data == NULL || bytes <= 0 || w <= 0 || h <= 0 || row_bytes <= 0 || pixel_bytes <= 0) {
+		return 1;
+	}
+	pixels = (long)w * (long)h;
+	if (pixel_bytes >= 4) {
+		for (GLint y = 0; y < h; y++) {
+			const unsigned char *line = data + (size_t)y * (size_t)row_bytes;
+			for (GLint x = 0; x < w; x++) {
+				const unsigned char *p = line + (size_t)x * 4;
+				if (p[0] > 235 && p[1] > 235 && p[2] > 235 && p[3] > 235) {
+					white++;
+				}
+			}
+		}
+	} else if (pixel_bytes == 2) {
+		for (GLint y = 0; y < h; y++) {
+			const unsigned char *line = data + (size_t)y * (size_t)row_bytes;
+			for (GLint x = 0; x < w; x++) {
+				const unsigned char *p = line + (size_t)x * 2;
+				if (p[0] > 235 && p[1] > 235) {
+					white++;
+				}
+			}
+		}
+	} else {
+		return 0;
+	}
+	return pixels > 0 && white * 100 >= pixels * 90;
+}
+
 static void
-host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h)
+host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h, int blank)
 {
 	GLuint texture = names_texture(g, guest);
 	unsigned i;
@@ -578,6 +619,7 @@ host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, G
 			widgets[i].y = y;
 			widgets[i].w = w;
 			widgets[i].h = h;
+			widgets[i].blank = blank;
 			return;
 		}
 	}
@@ -587,12 +629,107 @@ host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, G
 		widgets[widget_count].y = y;
 		widgets[widget_count].w = w;
 		widgets[widget_count].h = h;
+		widgets[widget_count].blank = blank;
 		widget_count++;
 	} else if (widget_full_said++ == 0) {
 		printf("glwire: widget table is full (%u), texture %u not composed\n",
 		    widget_count, (unsigned)texture);
 		fflush(stdout);
 	}
+}
+
+/* A placeholder that says "this is not the widget": a high-contrast checkerboard, a white border
+ * and two diagonals.  No font, so it works on any host and at any size.  The rect is clipped exactly
+ * like the textured quad; the caller has already disabled the texture unit for this draw. */
+static void
+host_widget_placeholder(GLint x, GLint y, GLint w, GLint h, int width, int height)
+{
+	GLint left = x, top = y, right = x + w, bottom = y + h;
+	const int cell = 24;
+	float x0, x1, y0, y1;
+
+	if (left < 0) left = 0;
+	if (top < 0) top = 0;
+	if (right > width) right = width;
+	if (bottom > height) bottom = height;
+	if (right <= left || bottom <= top) {
+		return;
+	}
+	x0 = 2.0f * (float)left / (float)width - 1.0f;
+	x1 = 2.0f * (float)right / (float)width - 1.0f;
+	y1 = 2.0f * (float)(height - top) / (float)height - 1.0f;
+	y0 = 2.0f * (float)(height - bottom) / (float)height - 1.0f;
+
+	glDisable(GL_TEXTURE_2D);
+	glDisable(GL_BLEND);
+	for (GLint yy = top; yy < bottom; yy += cell) {
+		for (GLint xx = left; xx < right; xx += cell) {
+			GLint xe = xx + cell < right ? xx + cell : right;
+			GLint ye = yy + cell < bottom ? yy + cell : bottom;
+			float a = 2.0f * (float)xx / (float)width - 1.0f;
+			float b = 2.0f * (float)xe / (float)width - 1.0f;
+			float c = 2.0f * (float)(height - yy) / (float)height - 1.0f;
+			float d = 2.0f * (float)(height - ye) / (float)height - 1.0f;
+			int odd = ((xx - left) / cell + (yy - top) / cell) & 1;
+
+			glColor4f(odd ? 0.10f : 0.90f, odd ? 0.55f : 0.20f, odd ? 0.65f : 0.10f, 1.0f);
+			glBegin(GL_QUADS);
+			glVertex2f(a, c);
+			glVertex2f(b, c);
+			glVertex2f(b, d);
+			glVertex2f(a, d);
+			glEnd();
+		}
+	}
+	/* white border: four 3-px quads, clipped with the rect */
+	{
+		const int t = 3;
+		GLint l = left, r = right, tp = top, bt = bottom;
+		float lx = 2.0f * (float)l / (float)width - 1.0f;
+		float rx = 2.0f * (float)r / (float)width - 1.0f;
+		float ty = 2.0f * (float)(height - tp) / (float)height - 1.0f;
+		float by = 2.0f * (float)(height - bt) / (float)height - 1.0f;
+		float tx = 2.0f * (float)(l + t < r ? l + t : r) / (float)width - 1.0f;
+		float bx = 2.0f * (float)(r - t > l ? r - t : l) / (float)width - 1.0f;
+		float ty2 = 2.0f * (float)(height - (tp + t < bt ? tp + t : bt)) / (float)height - 1.0f;
+		float by2 = 2.0f * (float)(height - (bt - t > tp ? bt - t : tp)) / (float)height - 1.0f;
+
+		glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+		glBegin(GL_QUADS);
+		glVertex2f(lx, ty); glVertex2f(rx, ty); glVertex2f(rx, ty2); glVertex2f(lx, ty2);
+		glVertex2f(lx, by2); glVertex2f(rx, by2); glVertex2f(rx, by); glVertex2f(lx, by);
+		glVertex2f(lx, ty2); glVertex2f(tx, ty2); glVertex2f(tx, by2); glVertex2f(lx, by2);
+		glVertex2f(bx, ty2); glVertex2f(rx, ty2); glVertex2f(rx, by2); glVertex2f(bx, by2);
+		glEnd();
+	}
+	/* two diagonals, so the middle is visibly not a flat colour */
+	glColor4f(1.0f, 0.95f, 0.20f, 1.0f);
+	glLineWidth(3.0f);
+	glBegin(GL_LINES);
+	glVertex2f(x0, y1); glVertex2f(x1, y0);
+	glVertex2f(x0, y0); glVertex2f(x1, y1);
+	glEnd();
+	glLineWidth(1.0f);
+	glEnable(GL_TEXTURE_2D);
+	glEnable(GL_BLEND);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+}
+
+static int
+host_widget_env_on(const char *name)
+{
+	const char *value = getenv(name);
+
+	return value != NULL && strcmp(value, "0") != 0;
+}
+
+static int
+host_widget_env_rect(GLint *x, GLint *y, GLint *w, GLint *h)
+{
+	const char *value = getenv("GLWIRE_WIDGET_RECT");
+
+	return value != NULL && sscanf(value, "%d,%d,%d,%d", x, y, w, h) == 4 &&
+	    *w > 0 && *h > 0;
 }
 
 /* One textured quad per widget, in the frame's pixels, after the replay and before the read-back.
@@ -604,11 +741,17 @@ host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 	GLint previous_active = 0, previous_texture = 0, previous_program = 0;
 	const char *blend = getenv("GLWIRE_WIDGET_BLEND");
 	int premultiplied = blend == NULL || strcmp(blend, "straight") != 0;
+	int fallback = host_widget_env_on("GLWIRE_WIDGET_FALLBACK") ||
+	    host_widget_env_on("GLWIRE_WIDGET_PLACEHOLDER");
+	GLint env_x = 0, env_y = 0, env_w = 0, env_h = 0;
+	int have_env_rect = fallback && host_widget_env_rect(&env_x, &env_y, &env_w, &env_h);
+	unsigned fallback_count = 0;
 	unsigned i;
-	static unsigned said;
+	static unsigned said, fallback_said;
 
 	(void)g;
-	if (getenv("GLWIRE_WIDGET") == NULL || widget_count == 0 || width <= 0 || height <= 0) {
+	if ((!host_widget_env_on("GLWIRE_WIDGET") && !fallback) ||
+	    (widget_count == 0 && !have_env_rect) || width <= 0 || height <= 0) {
 		return;
 	}
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
@@ -651,6 +794,10 @@ host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 	glEnable(GL_TEXTURE_2D);
 	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	if (widget_count == 0 && have_env_rect) {
+		host_widget_placeholder(env_x, env_y, env_w, env_h, width, height);
+		fallback_count = 1;
+	}
 	for (i = 0; i < widget_count; i++) {
 		const struct widget_rect *widget = &widgets[i];
 		GLint left = widget->x, top = widget->y;
@@ -662,6 +809,11 @@ host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 		if (right > width) right = width;
 		if (bottom > height) bottom = height;
 		if (right <= left || bottom <= top) {
+			continue;
+		}
+		if (fallback && widget->blank) {
+			host_widget_placeholder(widget->x, widget->y, widget->w, widget->h, width, height);
+			fallback_count++;
 			continue;
 		}
 		x0 = 2.0f * (float)left / (float)width - 1.0f;
@@ -681,7 +833,16 @@ host_widgets_compose(struct glstate *g, GLuint fbo, int width, int height)
 		glTexCoord2f(u0, v1); glVertex2f(x0, y0);
 		glEnd();
 	}
-	if (said < 4) {
+	if (fallback_count != 0 && fallback_said < 4) {
+		fallback_said++;
+		printf("glwire: widget fallback %u rect(s) (NOT the real widget path), first %d,%d %dx%d\n",
+		    fallback_count, have_env_rect && widget_count == 0 ? env_x : widgets[0].x,
+		    have_env_rect && widget_count == 0 ? env_y : widgets[0].y,
+		    have_env_rect && widget_count == 0 ? env_w : widgets[0].w,
+		    have_env_rect && widget_count == 0 ? env_h : widgets[0].h);
+		fflush(stdout);
+	}
+	if (said < 4 && widget_count > 0) {
 		said++;
 		printf("glwire: widget compose %u texture(s) into fbo %u %dx%d, first %d,%d %dx%d, "
 		    "%s alpha\n", widget_count, (unsigned)fbo, width, height, widgets[0].x, widgets[0].y,
@@ -3682,17 +3843,26 @@ serve_frame(struct client *client)
 	if (fbo_log && (frames_replayed + 1 <= 2 || (frames_replayed + 1) % 100 == 0 || dump_draws_runtime)) {
 		host_fbo_summary("frame", frames_replayed + 1, client);
 	}
-	/* (P3 MVP: widget surfaces are composited into the frame that is about to be read) */
-	if (widget_count != 0 && getenv("GLWIRE_WIDGET") != NULL) {
-		GLuint target = client->framebuffer;
+	/* (P3 MVP: widget surfaces are composited into the frame that is about to be read; the
+	 * fallback can also run with only GLWIRE_WIDGET_FALLBACK=1 and a fixed GLWIRE_WIDGET_RECT) */
+	{
+		GLint fx = 0, fy = 0, fw = 0, fh = 0;
+		int widget_on = host_widget_env_on("GLWIRE_WIDGET");
+		int fallback_on = host_widget_env_on("GLWIRE_WIDGET_FALLBACK") ||
+		    host_widget_env_on("GLWIRE_WIDGET_PLACEHOLDER");
+		int fallback_rect = fallback_on && host_widget_env_rect(&fx, &fy, &fw, &fh);
 
-		if (panel_drawn_fbo != 0 && panel_drawn_frame == (int)frames_replayed + 1) {
-			target = panel_drawn_fbo;
+		if ((widget_count != 0 || fallback_rect) && (widget_on || fallback_on)) {
+			GLuint target = client->framebuffer;
+
+			if (panel_drawn_fbo != 0 && panel_drawn_frame == (int)frames_replayed + 1) {
+				target = panel_drawn_fbo;
+			}
+			host_widgets_compose(&client->names, target, width, height);
+			/* (the compositor restores the state it found: bind the target that was just drawn
+			 * before the read-back, so the picture includes the widgets) */
+			glBindFramebuffer(GL_FRAMEBUFFER, target);
 		}
-		host_widgets_compose(&client->names, target, width, height);
-		/* (the compositor restores the state it found: bind the target that was just drawn
-		 * before the read-back, so the picture includes the widgets) */
-		glBindFramebuffer(GL_FRAMEBUFFER, target);
 	}
 	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 	/*

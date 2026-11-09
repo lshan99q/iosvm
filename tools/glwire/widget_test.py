@@ -42,14 +42,15 @@ def free_port():
     return port
 
 
-def run(map_test, extra_records):
+def run(map_test, extra_records, extra_env=None):
     with tempfile.NamedTemporaryFile(suffix=".records") as records:
         subprocess.run([map_test, "--dump", records.name], check=True, stdout=subprocess.DEVNULL)
         stream = b"".join(extra_records) + open(records.name, "rb").read()
     port = free_port()
+    env = dict(os.environ, GLWIRE_WIDGET="1")
+    env.update(extra_env or {})
     host = subprocess.Popen([os.path.join(HERE, "host_glwire"), str(port)],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            env=dict(os.environ, GLWIRE_WIDGET="1"))
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     output = []
     try:
         deadline = time.time() + 15
@@ -129,6 +130,27 @@ def main():
     else:
         failures += 1
         print("widget_test: zero rect removes FAIL: centre %s" % list(pixel(picture, 2, 2)))
+        print(output)
+
+    picture, output = run(args.map_test,
+                          [widget(bytes([255, 255, 255, 255]) * (WIDTH * HEIGHT), 0, 0, WIDTH, HEIGHT)],
+                          {"GLWIRE_WIDGET_FALLBACK": "1"})
+    centre = pixel(picture, 2, 2)
+    if centre != bytes([255, 255, 255, 255]) and centre != BASELINE:
+        print("widget_test: white fallback PASS")
+    else:
+        failures += 1
+        print("widget_test: white fallback FAIL: centre %s" % list(centre))
+        print(output)
+
+    picture, output = run(args.map_test,
+                          [widget(RED * (WIDTH * HEIGHT), 0, 0, WIDTH, HEIGHT)],
+                          {"GLWIRE_WIDGET_FALLBACK": "1"})
+    if pixel(picture, 2, 2) == RED_BGRA:
+        print("widget_test: fallback keeps real widget PASS")
+    else:
+        failures += 1
+        print("widget_test: fallback keeps real widget FAIL: centre %s" % list(pixel(picture, 2, 2)))
         print(output)
 
     raise SystemExit(1 if failures else 0)

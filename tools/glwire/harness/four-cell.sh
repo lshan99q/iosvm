@@ -53,7 +53,14 @@ TABLE_MD="$OUT/four-cell.md"
 TABLE_CSV="$OUT/four-cell.csv"
 
 cell_image() { eval "printf '%s' \"\${CELL$1_IMAGE:-}\""; }
-cell_label() { eval "printf '%s' \"\${CELL$1_LABEL:-cell$1}\""; }
+cell_label() {
+	case $1 in
+	1) printf '%s' "${CELL1_LABEL:-pure-local}" ;;
+	2) printf '%s' "${CELL2_LABEL:-by-reference}" ;;
+	3) printf '%s' "${CELL3_LABEL:-w15}" ;;
+	4) printf '%s' "${CELL4_LABEL:-w15-w3}" ;;
+	esac
+}
 cell_xcmd()  { eval "printf '%s' \"\${CELL$1_XCMD:-}\""; }
 cell_henv()  { eval "printf '%s' \"\${CELL$1_HOST_ENV:-}\""; }
 cell_hargs() { eval "printf '%s' \"\${CELL$1_HOST_ARGS:-}\""; }

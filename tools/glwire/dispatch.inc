@@ -723,9 +723,13 @@ switch (opcode) {
 		    "row %d pixel %d rect %d,%d %dx%d bytes %d\n", texture, target, internal, width, height,
 		    format, type, row_bytes, pixel_bytes, x, y, w, h, bytes);
 		fflush(stdout);
-		names_texture_upload(g, texture, target, internal, width, height, format, type,
-		    row_bytes, pixel_bytes, data);
-		host_widget_rect(g, texture, x, y, w, h);
+		{
+			int blank = host_widget_blank(data, bytes, width, height, row_bytes, pixel_bytes);
+
+			names_texture_upload(g, texture, target, internal, width, height, format, type,
+			    row_bytes, pixel_bytes, data);
+			host_widget_rect(g, texture, x, y, w, h, blank);
+		}
 		break;
 	}
 	case 200: {

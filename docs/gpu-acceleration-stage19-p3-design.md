@@ -224,3 +224,21 @@ layer 树拿不到 contents 时才需要，且优先共享内存+Darwin notifica
 root.apfs → `XCMD="glwire_local=1 widget_surface=3,4 widget_rect=..."`、host
 `GLWIRE_WIDGET=1` → host log 出现 `widget upload`/`widget compose`，截图 widget 区域不再是
 白色占位；若 ID 变了，先用 P1c 的内核 `created surface` 行对表。
+
+## 9. 拉面 fallback：host 侧占位内容（交付项）
+
+真实 widget 在 P3a 里是整张近白 surface（surface 3），语义不对；fallback 在 **宿主合成器**
+里给 widget rect 一个明确可辨的占位，不依赖 guest/字体：
+
+- `GLWIRE_WIDGET_FALLBACK=1`（别名 `GLWIRE_WIDGET_PLACEHOLDER=1`），默认关；
+  可和 `GLWIRE_WIDGET=1` 组合，也可单独启用。
+- `GLWIRE_WIDGET_RECT=x,y,w,h`：没有收到 202 时，用这个固定 rect 画占位。
+- 收到 202 时先对上传数据做空白检测（BGRA/RGBA 或 LA08，≥90% 像素近白视为空白）；
+  只有空白 widget 用占位替换，正常 widget 仍画真实纹理。
+- 占位内容：24 px 高对比棋盘 + 3 px 白边框 + 两条黄色对角线（无字体）。
+- 日志：`glwire: widget fallback N rect(s) (NOT the real widget path)`；不改变
+  `widget compose` 的既有行。
+- 测试：`widget_test.py` 新增 white-fallback 与 "fallback keeps real widget" 两例，原有
+  full/clip/zero-rect 三例保留。
+- 明确口径：这是 **placeholder，不是真 widget 路径**；widget rect/裁剪正确性可用它验收，
+  但不代表 P3 内容语义完成。

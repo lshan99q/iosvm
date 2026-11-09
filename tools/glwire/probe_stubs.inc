@@ -93,7 +93,7 @@ host_program_skip(struct glstate *g)
 }
 
 static void
-host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h)
+host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, GLsizei h, int blank)
 {
 	(void)g;
 	(void)guest;
@@ -101,6 +101,7 @@ host_widget_rect(struct glstate *g, GLuint guest, GLint x, GLint y, GLsizei w, G
 	(void)y;
 	(void)w;
 	(void)h;
+	(void)blank;
 }
 
 static void
