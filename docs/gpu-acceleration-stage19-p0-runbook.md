@@ -1591,50 +1591,145 @@ PosterBoard（pid 43）日志：
 - 拿到产物后：只重建 root.apfs（`RC=rc.vtop`，不设 SYSTEM），boot `XCMD="glwire_local=1 layers_at=900"`、`UI_GRACE=900 MAXSECS=3000`；先验 `layers timer 900s fired` 与 `hakios: layers`，仍不加 4 个 job。
 - **P3 guest 同样依赖这个编译环境**：没有新 dylib，P3 的 guest 侧代码也进不了镜像。
 
-> **该阻塞已于 2026-11-09 解除**：owner 把工具链烤进镜像/同步到 4 容器；exp 已编出 108,248 B 的新 `libhakios.sb.dylib`，P2c-timer 已启动。路径与规矩见 **附录 C**，结果模板见 **§4.21**。
+> **该阻塞已于 2026-11-09 解除**：owner 把工具链烤进镜像/同步到 4 容器；exp 已编出 108,248 B 的新 `libhakios.sb.dylib`，P2c-timer 已跑完。路径与规矩见 **附录 C**，实测见 **§4.21**。
 
-### 4.21 s19o-p2c-timer 实测：进程内 `layers_at=900`（结果待填）
+### 4.21 s19o-p2c-timer 实测：timer 成功、壁纸 VC 链在屏，但 contents 为空（P2 未达成）
 
-> **状态：exp 已启动 `s19o-p2c-timer`，结果尚未回填。** 本节只写口径与判据，**不要预设通过**；P2 仍未达成。
+> 归档：`/host/iosvm/logs/s19o-p2c-timer/`（`report.md`、`layers.txt` 404 行层树、日志、截图、`apfs-verify.txt`）。**这些文件都不进 git**。
+> P2c-timer 实测；**timer 通、层树拿到，但壁纸内容是空的**，P2 仍未达成。
 
 **镜像/编译**
 
 | 项 | 值 |
 |---|---|
 | 构建 | 仅重建 `root.apfs`（不设 `SYSTEM`；system.apfs 未动） |
-| root.apfs | 2026-11-09 03:35Z，md5 **`dbf1c3d8…`**（完整 hash 待回填） |
+| root.apfs | 2026-11-09 03:35Z，5,902,336 B，md5 **`dbf1c3d85d9cb35eb121af4401d02d51`** |
 | system.apfs | 未动：2,476,748,800 B，md5 **`b75d80caaa5e276a58a4d45307d2165b`** |
-| 新 dylib | `userland/obj/libhakios.sb.dylib` **108,248 B**；`strings` 含 `layers_at`、`hakios: layers timer %lus scheduled`、`hakios: layers timer %lus fired` |
-| 旧库备份 | `/tmp/libhakios.sb.old.dylib`（exp 侧；本容器不一定有，按 exp 为准） |
+| 新 dylib | `userland/obj/libhakios.sb.dylib` **108,248 B**；镜像内 `/lib/libhakios.sb.dylib` md5 **`1cd3053c0e127be55204e861f36e4047`**；`strings` 含 `layers_at`、`layers timer %lus scheduled/fired` |
+| 旧库备份 | `/tmp/libhakios.sb.old.dylib`（108,040 B，exp 侧） |
+| root 备份 | `/tmp/root.apfs.bak-P2c-timer`（`5f8ba9ea…`，P2c-alt2 版） |
+| 核验 | `/etc/rc` = `rc.vtop`；libhakios 90,128 / gl 401,816 / libOSMesa 14,805,208 未回退 |
 
-**Boot 参数**
+**Boot**
 
 | 项 | 值 |
 |---|---|
-| `XCMD` | `glwire_local=1 layers_at=900` |
-| `HOST_ENV` | `GLWIRE_NO_PANEL=1` |
-| 时长/收尾 | `UI_GRACE=900`、`MAXSECS=3000`；`end=__`、`ui=__s`、`biggest=__`、`hostframes=__`、panic=__ |
+| 参数 | `XCMD="glwire_local=1 layers_at=900"`；`HOST_ENV=GLWIRE_NO_PANEL=1`；`UI_GRACE=900 MAXSECS=3000` |
+| `end=` | `end=ui`：`ui=690s`，`ui_bytes=314818`；最大截图 **333,347 B** |
+| 稳定性 | panic/SIGSEGV/usertrap=0；host **3,640** 帧 |
 
-**判据（逐条填，不要合并）**
+**Timer / 层树：成功拿到**
 
-| # | 判据 | 结果 | 证据 |
-|---|---|---|---|
-| 1 | guest log 出现 **`hakios: layers timer 900s fired`** | 待填 | |
-| 2 | guest log 出现 **`hakios: layers`** 层树行 | 待填 | |
-| 3 | 层树含 `SBWallpaperEffectView` / `PBUIWallpaperView` / `PRSPoster` / `CALayerHost` | 待填 | 类名 + frame/contents/opacity |
-| 4 | 宿主出现第二张 **750x1624 非 panel** 持续纹理 | 待填 | 非 `4294901761` |
-| 5 | 宿主出现 **1125x2436** | 待填 | |
-| 6 | 截图左右边缘非黑 | 待填 | __ / 36,000 |
-| 7 | PosterBoard 仍 running、无 exit/SIGKILL/panic | 待填 | |
-| 8 | **是否计入 P2** | 待填 | 只有「层树有 wallpaper 层」或「壁纸纹理上屏」才可作候选；否则仍 P2 未达成 |
+- `hakios: layers timer 900s scheduled` → **`hakios: layers timer 900s fired`** ✅
+- **404 行** `hakios: layers`、**9 个 window**，以 `hakios: layers: end` 结束。
 
-**判读（待填）**
+window 列表（level）：
 
-- 若 1 fired 但 2 无层树：`layers()` 执行失败/对象为空，下一步查 `layers()` 的 root layer/类名。
-- 若 2 有层树但 3 无 wallpaper 类名：poster scene 没接上，转配置/ExtensionKit。
-- 若 3 有 wallpaper 层但 `contents` 空：内容/快照问题。
-- 若 3 有内容且 4/5 有纹理：壁纸路径通，再查合成/位置。
-- **不要**在结果出来前写「P2 已修复」。
+```text
+_SBWallpaperSecureWindow -3
+SBHomeScreenWindow -2
+_UISystemGestureWindow 0
+SBRootSceneWindow 0
+UITextEffectsWindow 10 (x2)
+UIStatusBarWindow 999
+SSScreenshotsWindow 1115
+SBRecordingIndicatorWindow 1125
+```
+
+**壁纸层：window 与 VC 链都在，但 contents=0**
+
+`_SBWallpaperSecureWindow`（level -3，context `0x44de26d9`，secure，429 commits，scene `com.apple.springboard`）子树：
+
+```text
+UIWindowLayer "colour ( 0 1 )"
+  CALayer "VC:PBUIPosterWallpaperRemoteViewController" 375x812 opacity 1
+    CALayer "-" 375x812
+      CALayer "VC:PBUIPosterWallpaperViewController" 375x812
+        CALayer "VC:PBUIPosterViewController" 375x812      <- 没有 contents、没有子层
+  CALayer "-" colour ( 0 0 ) 375x812                       <- 黑层
+```
+
+- 壁纸子树内 `contents` = **0 处**；没有 `CALayerHost`、没有 `_UIRemoteView`。
+- 整棵树共 7 个 `CALayerHost`，全部在 `SBRootSceneWindow` 的 `_UISceneLayerHostContainerView` 下，host 的是 SpringBoard 自己的 window context（`0x44de26d9`/`0x15ae970`/`0xc0763e2d`/`0xdfcc84cb`/`0x32541f82`/`0x3dfc1379`）；**没有 PosterBoard 的 context**。
+- `SBWallpaperEffectView` 0 处（iOS 26 这代类名是 `PBUIPoster*`）；`PBUIPoster*` 3 处。
+
+**宿主纹理 / 背景：仍失败**
+
+- 上传：**1,261 张 `750x1624` 全为 panel `4294901761`**（外加启动期 1/4/7/10）；**无第二张持续非 panel 全屏纹理、无 1125x2436**。
+- 截图 shot/final 左右边缘均 **0 / 36,000** 非黑 → **背景纯黑**。
+- PosterBoard：`user/501/com.apple.PosterBoard [45]`，03:46:19 `Successfully spawned ... service state: running`；全程无 app 级日志/崩溃。
+
+**判据逐条**
+
+| # | 判据 | 结果 |
+|---|---|---|
+| 1 | `layers timer 900s fired` | ✅ |
+| 2 | `hakios: layers` 层树行 | ✅ 404 行 / 9 window |
+| 3 | wallpaper 类名 | `_SBWallpaperSecureWindow` + `PBUIPoster*` ✅；`SBWallpaperEffectView` 0（类名代际不同）；`CALayerHost` 无 PosterBoard context |
+| 4 | 第二张 750x1624 非 panel 纹理 | ❌（1,261 张全 panel） |
+| 5 | 1125x2436 | ❌ |
+| 6 | 截图左右边缘非黑 | ❌ 0/36,000 |
+| 7 | PosterBoard running、无 exit/SIGKILL/panic | ✅ |
+| 8 | 是否计入 P2 | **否**；P2 未达成 |
+
+**结论**
+
+- **壁纸 window 与 `PBUIPoster*` 远程 VC 链已经存在**，但**内容是空的**（无 contents、无 PosterBoard 的 CALayerHost、无壁纸纹理）。
+- 与 P2 对比：P2 是「lookup 失败、无 wallpaper」；现在 lookup 修复、window/VC 出现，**问题前移到「远程 poster 内容没接上/没画出来」**。
+- 按分支：**有 wallpaper 层、contents 空 = 内容/快照问题**，不是 scene 完全没接上；P2 未达成。
+
+### 4.22 P2d 计划：单变量加 4 个 job（待执行）
+
+> **状态：未执行。** P2c-timer 已证明 window/VC 链在、contents 空；P2d 只验证「那 4 个缺失 job 是否让 PosterBoard 建立 scene/产生 content」。**不要同时改 trim/其它变量。**
+
+**改动（单变量）**
+
+- 在 `build.sh` 的 `/LaunchDaemons` 拷贝段加入 4 个 stock plist（当前工作树约 455 行已有这四行；若检出没有就补）：
+
+  ```sh
+  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.managedconfiguration.profiled.plist root/LaunchDaemons/
+  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.powerlogHelperd.plist root/LaunchDaemons/
+  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.photos.VideoConversionService.plist root/LaunchDaemons/
+  cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.photos.ImageConversionService.plist root/LaunchDaemons/
+  ```
+
+- **只重建 root.apfs**，复用 P2c-timer 的 108,248 B `libhakios.sb.dylib`；**不设 `SYSTEM`**：
+
+  ```sh
+  cd /host/iosvm-work/hakios-xnu-kernel/userland
+  cp -a root.apfs /tmp/root.apfs.bak-P2d
+  PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
+  python3 ../tools/apfs/apfs.py ls root.apfs /LaunchDaemons | grep -E 'profiled|powerlog|Conversion'
+  ```
+
+- Boot 同 P2c-timer 参数（保留 `layers_at=900` 以便看层树）：
+
+  ```sh
+  cd /host/iosvm
+  export REPO=/host/iosvm
+  export KERNEL=/host/iosvm-work/hakios-xnu-kernel
+  export GLWIRE=$REPO/tools/glwire
+  export ROOT=$KERNEL/userland/root.apfs
+  LABEL=s19p2d-1
+
+  XCMD="glwire_local=1 layers_at=900" \
+  ZERO_RAM=1 QEMU_SMP=1 NOUI_BY=1800 MINFRAMES=99999 MAXSECS=3000 UI_GRACE=900 MINSHOT=200000 \
+  HOST_ENV="GLWIRE_NO_PANEL=1" \
+  IOSVM="$KERNEL" GLWIRE="$GLWIRE" \
+  tools/glwire/harness/boot-measure.sh "$LABEL" "$ROOT" 3000
+  ```
+
+**判据（三条，逐条填）**
+
+1. **层树**：`_SBWallpaperSecureWindow` 子树里出现 **PosterBoard 的 `CALayerHost` / `_UIRemoteView` / `contents`**（不只是 SpringBoard 自己的 host）。
+2. **宿主**：出现第二张 **750x1624 非 panel** 持续纹理（或 1125x2436）。
+3. **截图**：主屏背景非纯黑（左右边缘非黑 > 0）。
+
+**分支**
+
+- 三条任一改善 → 依赖/job 是原因之一，继续沿该方向；仍不算 P2 达成，需补全壁纸内容。
+- **仍无 PosterBoard 的 `CALayerHost`/contents → 写「依赖不是原因，回到 poster scene/配置」**，不要继续加 job。
+- 不要在同一发改 trim/其它变量；不要预设通过。
 
 ---
 
@@ -1853,65 +1948,6 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ---
 
-## 4.14（2026-11-09）编译环境验证 + P2c/P2d：`layers_at` 定时器与壁纸层树
-
-> 本节补 P2c/P2d。P2b 的 rc 后台 `rwtouch notify` 零输出；P2c-alt 的 LaunchDaemon 通知也只 `posted`、handler 没跑，跨进程 Darwin notify 判定不可用。owner 随后在容器里装好 clang 19 / ld64.lld / THEOS SDK / cctools，改走**进程内 `layers_at=SECONDS` dispatch_after 定时器**（`inject_sb.c` §1264–1300，提交 `c056fb6`）。
-
-### 4.14.1 编译环境（已验证）
-
-| 组件 | 位置 |
-|---|---|
-| clang 19.1.7 | `/usr/bin/clang`（→ llvm-19） |
-| ld64.lld | `/usr/bin/ld64.lld` |
-| THEOS SDK | `/host/iosvm-work/toolchain/theos/sdks/iPhoneOS16.5.sdk` |
-| cctools ld64 | `/host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld` |
-| 运行时库 | `/host/iosvm-work/toolchain/lib` |
-| xnu-clang 包装器 | `/host/iosvm-work/hakios-xnu-kernel/xnu-deps/host/bin/xnu-clang` |
-
-- 规则：guest 构建一律 **`IOSVM_USE_LLD=1`**；不再试 `IOSVM_USE_LLD=0`。缺 clang/SDK 先查 `.zshrc` 的 `THEOS`/`CCTOOLS_LD64`/`LD_LIBRARY_PATH`/`PATH`。
-- 验证 1（P2c-timer 用的 sb 库）：
-  ```
-  THEOS=/host/iosvm-work/toolchain/theos IOSVM_USE_LLD=1 \
-    xnu-clang -arch arm64 -isysroot $THEOS/sdks/iPhoneOS16.5.sdk -O1 -dynamiclib \
-    -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework IOKit \
-    -framework IOSurface -lobjc -o /tmp/libhakios.sb.test.dylib src/inject_sb.c
-  ```
-  → 0.57s，Mach-O arm64 magic `cffaedfe`，**108,248 B**（旧 108,040），strings 含 `layers_at` 与 `hakios: layers timer %lus fired|scheduled`；旧库备份 `/tmp/libhakios.sb.old.dylib`。
-- 验证 2（P3 guest 侧目标库）：
-  - `src/inject.c` → `libhakios.dylib`：**89,856 B**，`cffaedfe`，编译通过；
-  - `src/eagl.c src/gl_osmesa.c src/eagl_remote.c` → `libhakios.gl.dylib`：**400,656 B**，编译通过。
-  - 两者与镜像内 11-07 旧库（90,128 / 401,816）大小略异（clang/lld 版本不同，md5 不同），说明**工具链能产出 P3 patch 的两个目标库**；换库进镜像等 P3 GO 再做。
-- P2c-timer 镜像：`root.apfs` **`dbf1c3d85d9cb35eb121af4401d02d51`**（03:35Z，5,902,336 B；镜像内 sb 库 108,248 B / `1cd3053c0e127be55204e861f36e4047`）；`system.apfs` 仍 `b75d80caaa5e276a58a4d45307d2165b` 未动。备份 `/tmp/root.apfs.bak-P2c-timer`。
-
-### 4.14.2 P2c-timer boot
-
-`XCMD="glwire_local=1 layers_at=900"`、`HOST_ENV=GLWIRE_NO_PANEL=1`、`UI_GRACE=900 MAXSECS=3000`：
-
-```
-xb: s19o-p2c-timer end=ui ui=690s ui_bytes=314818 hostframes=3640
-    SIGSEGV=0 usertrap=0 panic=0 biggest=333347
-```
-
-- timer：`hakios: layers timer 900s scheduled` → **`hakios: layers timer 900s fired`**；**404 行**层树、**9 个 window**、以 `hakios: layers: end` 结束。
-- **关键层树**（`_SBWallpaperSecureWindow`，level −3，context `0x44de26d9`，secure，429 commits，scene `com.apple.springboard`）：
-  ```
-  UIWindowLayer "colour ( 0 1 )"
-    CALayer "VC:PBUIPosterWallpaperRemoteViewController" 375x812 opacity 1
-      CALayer "-" 375x812
-        CALayer "VC:PBUIPosterWallpaperViewController" 375x812
-          CALayer "VC:PBUIPosterViewController" 375x812     ← 无 contents、无子层
-    CALayer "-" colour ( 0 0 ) 375x812                      ← 黑层
-  ```
-- 壁纸子树内 `contents` = **0 处**，也没有 `CALayerHost`/`_UIRemoteView`；全树 7 个 `CALayerHost` 都在 `SBRootSceneWindow` 的 `_UISceneLayerHostContainerView` 下，host 的是 SpringBoard 自己的 window context（`0x44de26d9`/`0x15ae970`/`0xc0763e2d`/`0xdfcc84cb`/`0x32541f82`/`0x3dfc1379`），**没有 PosterBoard 的 context**。
-- 宿主：1,261 张 750x1624 全为 panel `4294901761`（+启动期 1/4/7/10）；**无第二张持续非 panel 全屏纹理、无 1125x2436**；截图 shot/final 左右边缘 0/36,000 非黑 → **背景纯黑**。
-- PosterBoard：`user/501/com.apple.PosterBoard [45]`，03:46:19 `Successfully spawned ... running`，无 app 级日志/崩溃。
-
-**结论**：壁纸 window 与 `PBUIPoster*` 远程 VC 链**已经存在**，但**内容是空的**（无 contents、无 PosterBoard 的 CALayerHost、无壁纸纹理）→ 按判据属于**内容/快照问题**，不是 scene 没接上。P2c 之前「lookup 失败/无 wallpaper」的结论已被推翻一半：job 与 window 都到位，剩下的是远程 poster 内容。
-
-### 4.14.3 P2d（下一发，待执行）
-
-单变量：在 `build.sh` 的 `DARWIN_JOBS` 里加 4 个 job（`com.apple.managedconfiguration.profiled`、`com.apple.powerlog.plxpc` 相关、`com.apple.photos.VideoConversionService`/`ImageConversionService` 的 XPC），其余不变，看 PosterBoard 是否建立 scene 并产生 content。判据：层树里 `PBUIPosterWallpaperRemoteViewController` 下出现 PosterBoard 的 `CALayerHost`/`contents`、宿主出现第二张 750x1624 非 panel 纹理、截图背景非纯黑。**不要同时改 trim/其它变量。**
-
 ## 附录 A：本手册引用的数字出处
 
 | 数字/结论 | 出处 |
@@ -1976,11 +2012,24 @@ cd /host/iosvm-work/hakios-xnu-kernel/userland
 PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 ```
 
+**编译验证（已跑）**
+
+- clang **19.1.7**（`/usr/bin/clang` → llvm-19）、`/usr/bin/ld64.lld`、包装器 `/host/iosvm-work/hakios-xnu-kernel/xnu-deps/host/bin/xnu-clang`。
+- 命令（0.57s）：
+  ```sh
+  THEOS=/host/iosvm-work/toolchain/theos IOSVM_USE_LLD=1 \
+    xnu-clang -arch arm64 -isysroot $THEOS/sdks/iPhoneOS16.5.sdk -O1 -dynamiclib \
+    -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework IOKit \
+    -framework IOSurface -lobjc -o /tmp/libhakios.sb.test.dylib src/inject_sb.c
+  ```
+  结果：Mach-O arm64 magic `cffaedfe`，**108,248 B**，strings 含 `layers_at` 与 `layers timer %lus fired|scheduled`。
+- P3 目标库也编译通过：`src/inject.c` → `libhakios.dylib` **89,856 B**；`src/eagl.c src/gl_osmesa.c src/eagl_remote.c` → `libhakios.gl.dylib` **400,656 B**（与镜像内 11-07 旧库 90,128 / 401,816 大小略异，clang/lld 版本不同；换库等 P3 GO）。
+
 **已产出的新 dylib（P2c-timer）**
 
 - `userland/obj/libhakios.sb.dylib`：**108,248 B**，`strings` 含 `layers_at`、`hakios: layers timer %lus scheduled`、`hakios: layers timer %lus fired`。
-- 旧库备份：`/tmp/libhakios.sb.old.dylib`（exp 侧）。
-- P2c-timer 镜像：只重建 root.apfs（03:35Z，md5 `dbf1c3d8…`）；system.apfs 未动 `b75d80ca…`。
+- 旧库备份：`/tmp/libhakios.sb.old.dylib`（108,040 B，exp 侧）。
+- P2c-timer 镜像：只重建 root.apfs（03:35Z，5,902,336 B，md5 `dbf1c3d85d9cb35eb121af4401d02d51`）；镜像内 sb 库 md5 `1cd3053c0e127be55204e861f36e4047`；system.apfs 未动 `b75d80ca…`。
 
 **规矩**
 
