@@ -205,28 +205,28 @@
 1. check-in 协议/launchd 侧有可复现修复，且 extension 活过 60s/checked in；
 2. 干净单变量测试出现不同结果（需 owner 重新立项）。
 
-## D9. P0 工作基线 system = `8bf5f838`；`6be494f1` 仅对照
+## D9. P0 历史 3/3 通过，但当前不可稳定复现
 
-**决定**：P0 的**唯一工作基线 system = `8bf5f838`**（P0 3/3 在它上面复现 **99.99%**）；`6be494f1` 保留为对照（89.50%，不可复现 P0），**不再当工作基线**。
+**决定**：P0 **历史 3/3 通过**（v7 99.85%、v9 99.98%、p0-3 98.81%，system `8bf5f838`），但**当前不可稳定复现 ≥95%**；交付基线降级为「**历史证据 + 复现性未达标**」。不写「P0 已稳定/当前可复现」，也不写「P0 3/3 被推翻」。
 
 **依据**：
 
-- 历史 p0-3：98.82%（f-panel vs f-picture），system `8bf5f838`。
-- 复现：8bf5 + root `3207a35e` + host `b1e87d` → **99.99% SAME**（missing 0/extra 0），P0 三判据 PASS；`logs/s20-p0-repro/`。
-- 对照：`6be494f1` + root `3207a35e` + host `b1e87d` → **89.50%**（missing 9.59%），不可复现；host `2be814a7` 的 f-picture 全黑是 59.57% 的直接原因（已修）。
-- 原件：`/tmp/system.apfs.bak-s20`（= 8bf5）；keep `/tmp/system-8bf5f838.keep`；6be keep `/tmp/system-6be494f1.keep`；均不许覆盖。
+- 历史：8bf5 上 v7/v9/p0-3 三发通过；p0-3 98.82%。
+- 8bf5 同配方（root 3207a35e + host b1e87d + DUMP_AT=800 PAIR/QEMU_SMP=1/glwire_local=1）：12:52 **99.99%**，15:42 **89.56% <95**（missing 9.60%，bbox 46,142–729,1603；f-picture `20640c60` 非黑，check_panel PASS，截图 316,377B）。
+- 6be 多次 ~89.50%。→ **8bf5 是必要条件但不是充分条件**；99.99 是单次好跑，不能当基线。
+- 证据：`logs/s20-p0-repro/`、`logs/s20-p0-8bf5-recheck/`、`logs/s20-p0-recheck/`、`isolateA/B`、`hostfix`；commits `fba31f8`/`767053f`/`fff2678`/`fda19b3`/`6935ed3`。
+- 原件：`/tmp/system.apfs.bak-s20`；keep `/tmp/system-8bf5f838.keep`；6be keep `/tmp/system-6be494f1.keep`；不许覆盖。
 
 **影响**：
 
-- **P0 判据只在 8bf5 上有效**；任何实验 report 必须写 **system md5**，不写视为不可比。
-- 6be 仅作对照/其他实验系统，不用于 P0 门禁；不要把 89.50 与 99.99 混用。
-- 若之后要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 89.5% 重设阈值或改成不依赖同帧配对）——**待定**，等 owner 定。
-- P0 未被推翻；写「3/3 在 8bf5 上复现，6be 不可复现」。
+- P0 不能作为**当前可复现**交付基线；只能作为历史证据。门禁至少 **2–3 次 boot 统计**，单次 99.99 不算。
+- 任何实验 report 必须写 **system md5**，否则不可比。
+- 若要把 6be 或别的 system 定为基线，必须**重新定义 P0 判据**（按该 system 的 ~89.5% 重设阈值，或改成不依赖同帧配对）——**待定**。
 
 **何时可推翻**：
 
-1. 8bf5 原件丢失/损坏，且找不到等价镜像；
-2. owner 决定把 6be 定为唯一基线并重定义 P0 判据（需新决策）。
+1. 8bf5 同配方连续 2–3 发都 ≥95%，且 P0 三判据稳定；
+2. owner 决定重定义 P0 判据（按 6be/其他 system 的阈值或非配对判据）。
 
 ## 阶段 20 移交接手清单（D4）
 
@@ -250,4 +250,4 @@
 | D6 | 20s fps 不可比；改 120 帧窗口、cell1 guest 时钟 | §8.0 | `ea835b7` |
 | D7 | P4 终局：纯本地可用；byref/w15 不具可用性；cell4 未跑是判决 | §8.0、§8.7 | `93f5d2a`、`logs/s19o-p4-cells/attempt3-framewindow` |
 | D8 | Stage 20 E1=C；control 完成；P2/P3 不重开；system 6be494f1 | §8、`stage20-e1-control.md` | `cac2a73`、`6be494f1` |
-| D9 | P0 工作基线=8bf5（99.99%）；6be 仅对照（89.50%） | §4.33、closure、handoff | `fba31f8`、`767053f`、`fff2678`、`logs/s20-p0-*`、`/tmp/system-8bf5f838.keep` |
+| D9 | P0 历史 3/3；当前不稳定（8bf 99.99/89.56）；6be 89.50 | §4.33、closure、handoff | `fba31f8`、`767053f`、`fff2678`、`fda19b3`、`6935ed3`、`logs/s20-p0-*` |

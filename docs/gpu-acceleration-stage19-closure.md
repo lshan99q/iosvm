@@ -1,6 +1,6 @@
 # Stage 19 收口包（最终状态 / 未达成 / 移交 / 复现）
 
-> **状态：2026-11-10 更新。** P0 **3/3 PASS**，**唯一工作基线 system = `8bf5f838`**（复现 99.99%）；`6be494f1` 仅对照（89.50%，不可复现 P0）；P1 重开后判 A、修复中（未修复）；P2 未达成；P3 真路径不可行 + fallback5 已交付；P4 0x502 通过。
+> **状态：2026-11-10 更新。** P0 **历史 3/3 通过**，但**当前不可稳定复现**：8bf5 同配方 12:52 99.99%、15:42 **89.56%**；6be 89.50%。交付基线降级为「历史证据 + 复现性未达标」。P1 重开后判 A、修复中（未修复）；P2 未达成；P3 真路径不可行 + fallback5 已交付；P4 0x502 通过。
 > 本页只做索引和结论，不重复实验细节；所有数字以 runbook/decisions/logs 为准。
 > 不写 P1/P2/P3 真路径通过；不写性能达标。
 > **下一阶段计划**：`docs/gpu-acceleration-stage20-plan.md`、`docs/gpu-acceleration-stage21-plan.md`（E1 `ExtensionWatchdog=false`，30 分钟限时；**E1 终局 C（不可判/不可行），control 完成；P2/P3 未重开；fallback5 仍是 P3 交付；system 恢复 6be494f1**）。
@@ -9,7 +9,7 @@
 
 | 项 | 最终状态 | 判据/证据 |
 |---|---|---|
-| **P0** | **3/3 PASS（工作基线 8bf5）** | **唯一工作基线 system = `8bf5f838`**：v7 99.85%、v9 99.98%、p0-3 98.81%；复现发 8bf5 + root 3207a35e + host b1e87d = **99.99% SAME**（missing 0/extra 0），P0 三判据 PASS。`6be494f1` 仅对照：89.50%，不可复现 P0；不再当工作基线。原件 `/tmp/system.apfs.bak-s20` + `/tmp/system-8bf5f838.keep`；对照 keep `/tmp/system-6be494f1.keep`。见 D9、`logs/s20-p0-repro/`。 |
+| **P0** | **历史 3/3；当前不可稳定复现** | 历史：v7 99.85%、v9 99.98%、p0-3 98.81%（system 8bf5f838）。当前 8bf5 同配方：12:52 **99.99%**，15:42 **89.56% <95**（missing 9.60%，bbox 46,142–729,1603；f-picture 20640c60 非黑，check_panel PASS）；6be 约 89.50%。→ **8bf5 是必要条件但不是充分条件；单次 99.99 不能当基线**，门禁至少 2–3 次 boot 统计。原件 `/tmp/system.apfs.bak-s20`、keep `/tmp/system-8bf5f838.keep`；6be keep `/tmp/system-6be494f1.keep`。见 D9、`logs/s20-p0-8bf5-recheck/`。 |
 | **P1** | **重开后判 A，修复中（未修复）** | 虚线段写在 **90 高 label tile 底部行**（guest 生成/行映射）：Photos row61 **54 px/alpha 247**；FaceTime row61–62 **47 px/alpha 241,253**；Wallet 58–61；label-4 53–56。**B（采样放大）已排除**（tile 行不是空行）。修复方向在 guest glyph/label tile 生成侧，不是 host sampler/linear/clamp。**第一次修复 FAIL**：`glyph_last_row=1` 清到 42 高 glyph 最后一行，Weather 掉笔画、虚线仍在；改向 label tile row61/62，验收看 guest 截图（`logs/s20-p1-validation/report.md`）。见 §4.32、`logs/s20-p1-54px-dash/report.md`。**P1 未修复，不许写已修。** |
 | **P2** | **关闭，未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；根因与 P3 同源 **extension check-in timeout**。不再投入（D3）。 |
 | **P3** | **真路径不可行 + fallback5 已交付** | 真路径 D1 不可行；guest-side placeholder（拉面）fallback5 PASS，yellow 13,733/white 11,174/black 1,825；**是占位，不是真 widget**。见 §4.29/§4.31、D1/D2。 |
@@ -17,7 +17,7 @@
 
 ## 2. 未达成项 / 边界
 
-1. **P0 工作基线 = `8bf5f838`**：复现 99.99%，3/3 PASS；6be 仅对照 89.50%，不再当工作基线。原件 `/tmp/system.apfs.bak-s20` / `/tmp/system-8bf5f838.keep`；6be keep `/tmp/system-6be494f1.keep`。任何实验 report 必须写 system md5，否则不可比。
+1. **P0 当前不可稳定复现**：历史 3/3 通过；8bf5 同配方 99.99%（12:52）与 89.56%（15:42）不一致，6be 89.50%。**8bf5 必要但不充分**；门禁需 2–3 次 boot 统计，不能拿单次 99.99 当基线。原件/keep 路径保留；任何实验 report 必须写 system md5。
 2. **P1 重开后判 A、修复中**：虚线段在 90 高 label tile 底部行（Photos 54px/alpha247、FaceTime 47px、Wallet 58–61、label-4 53–56）；B（采样放大）已排除。修复实验进行中；**P1 未修复**，不写已修。
 3. **P2 未达成**：壁纸没出；不是 lookup/geometry 问题，卡在 extension check-in。
 4. **P3 真路径不可行**：surface/CAContext 实时 widget 内容不可得；交付的是**占位**，不是真 widget。
@@ -48,7 +48,7 @@
 - 实验手册：`docs/gpu-acceleration-stage19-p0-runbook.md`（§4.29 P3 收口、§4.31 fallback5、§八 P4、附录 extension check-in）。
 - 计划：`docs/gpu-acceleration-stage19-plan.md`（P0–P4 状态、不做清单、D7 终局）。
 - 路线评估：`docs/gpu-acceleration-gpu-passthrough-assessment.md`（为什么不做 GPU 直通；glwire 现状；三条路线与代价）。
-- P0 复现性：`logs/s20-p0-repro/`（8bf5 99.99%）、`logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/B/`、`logs/s20-p0-hostfix/`（commits `fba31f8`/`767053f`/`fff2678`）。
+- P0 复现性：`logs/s20-p0-repro/`（8bf5 99.99%，单次）、`logs/s20-p0-8bf5-recheck/`（8bf5 89.56%）、`logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/B/`、`logs/s20-p0-hostfix/`（commits `fba31f8`/`767053f`/`fff2678`/`6935ed3`）。
 - P4 归档：`logs/s19o-p4-cells/`（`four-cell.md`、`report.md`、`attempt3-framewindow/`、`attempt1-1256/`）。
 - P3 归档：`logs/s19o-p3-fallback5/`、`logs/s19o-p3-surface-enum/`、`logs/s19o-p3b-d3/`。
 - `make test-open` PASS；`make test` 的 `test-gpu` 因缺 `/usr/share/vulkan/icd.d/lvp_icd.json` 失败（环境问题，不是代码）。

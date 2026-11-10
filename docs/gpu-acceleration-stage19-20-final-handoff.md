@@ -1,20 +1,20 @@
 # Stage 19 + 20 最终移交
 
-> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **3/3 PASS**，**唯一工作基线 system = `8bf5f838`**（复现 **99.99%**）；`6be494f1` 仅对照（89.50%，不可复现 P0），不再当工作基线。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
+> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **历史 3/3 通过**，但**当前不可稳定复现**：8bf5 同配方 12:52 **99.99%**、15:42 **89.56%**；6be 约 89.50%。交付基线 = 「历史证据 + 复现性未达标」。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
 > 本页只做结论、证据索引、未解决项与「不做」清单；细节以 runbook/decisions/logs 为准。
 > 不写 P2/P3 真路径通过，不写性能达标，不写 watchdog 已修。
 
-## 0. P0 工作基线与对照 system（必读）
+## 0. P0 参考 system 与复现性（必读）
 
 | 用途 | system md5 | 结果 | 位置/规则 |
 |---|---|---|---|
-| **唯一工作基线** | **`8bf5f838d52e46d6c8bf77f13a5ad946`** | **99.99%** 复现（P0-3 历史 98.82%） | 原件 `/tmp/system.apfs.bak-s20`；keep `/tmp/system-8bf5f838.keep`；**不许覆盖** |
-| **仅对照** | **`6be494f1…`**（C1 重建） | **89.50%**，不可复现 P0 | keep `/tmp/system-6be494f1.keep`；**不再当工作基线** |
+| **历史 P0 system** | **`8bf5f838d52e46d6c8bf77f13a5ad946`** | **99.99%**（12:52 单次）与 **89.56%**（15:42） | 原件 `/tmp/system.apfs.bak-s20`；keep `/tmp/system-8bf5f838.keep`；**不许覆盖** |
+| **对照** | **`6be494f1…`**（C1） | **89.50%** | keep `/tmp/system-6be494f1.keep` |
 
-- **P0 判据只在 `8bf5f838` 上有效**；任何实验 report 必须写 **system md5**，不写视为不可比。
-- 不要把 6be 的 89.50% 与 8bf5 的 99.99% 混用；需要 P0 门禁/对照时明确标注。
-- 若之后要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 6be 89.5% 重设阈值，或改成不依赖同帧配对）——**待定**。
-- 当前不写「P0 被推翻」；写「P0 3/3 在 8bf5 上复现，6be 不可复现」。
+- **P0 历史 3/3 通过，但当前不可稳定复现**：8bf5 同配方两次 99.99/89.56；6be ~89.50。**8bf5 是必要条件但不是充分条件**；单次 99.99 不能当基线。
+- 门禁至少要 **2–3 次 boot 统计**；任何实验 report 必须写 **system md5**，否则不可比。
+- 不写「P0 已稳定/当前可复现」；也不写「P0 3/3 被推翻」——是「历史通过、当前不稳定」。
+- 若要用 6be 或别的 system 当基线，必须**重新定义 P0 判据**（按该 system 的 ~89.5% 重设阈值，或改成不依赖同帧配对）——**待定**。
 
 ## 1. 两个阶段的终局结论
 
@@ -22,7 +22,7 @@
 
 | 项 | 终局 | 一句话依据 |
 |---|---|---|
-| **P0** | **3/3 PASS（工作基线 8bf5）** | 唯一工作基线 **8bf5f838**：v7 99.85%、v9 99.98%、p0-3 98.81%；复现 8bf5 + root 3207a35e + host b1e87d = **99.99% SAME**（missing 0/extra 0），三判据 PASS。`6be494f1` 仅对照：89.50%，不可复现；不再当工作基线。 |
+| **P0** | **历史 3/3；当前不可稳定复现** | 历史：v7 99.85%、v9 99.98%、p0-3 98.81%（8bf5）。当前 8bf5 同配方：12:52 **99.99%**、15:42 **89.56%**（missing 9.60%，bbox 46,142–729,1603）；6be ~89.50%。8bf5 必要但不充分；单次 99.99 不能当基线，门禁需 2–3 次 boot。 |
 | **P1** | **重开后判 A、修复中（未修复）** | 虚线段在 90 高 label tile 底部行：Photos row61 54px/alpha247、FaceTime 61–62 47px、Wallet 58–61、label-4 53–56；B 采样放大已排除。第一次 `glyph_last_row=1` FAIL（Weather 掉笔画、虚线仍在）；`label_dash_rows=53-62` crash；`61-62` 无效果。修法只走 label tile row61/62，验收 guest 截图；P1 未修复。 |
 | **P2** | **关闭/未达成** | lookup 已修、PosterBoard running，但壁纸 window/PBUI 远程 VC 链在屏而 contents=0；根因与 P3 同源：extension check-in timeout；四路径走完，不再投入 |
 | **P3** | **真路径不可行 + fallback5 已交付** | surface 枚举 30 面无 widget 候选；allContexts 按进程；无零参 snapshot；extension exec 后 ~0.5s 死亡；guest-side 占位（24px 棋盘+白框+双黄对角线）PASS，明确非真 widget |
@@ -42,8 +42,8 @@
 
 | 结论 | 文档 | 日志/产物 | 关键 commit |
 |---|---|---|---|
-| P0 3/3（工作基线 8bf5） | runbook §4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`、closure §1、decisions D9 | `logs/s19o-p0-3/`、`logs/s20-p0-repro/` | `498157c`、`66a7d54`、`024c10e` |
-| P0 当前复现性 | runbook §4.33、decisions D9、closure §1 | `logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/`、`logs/s20-p0-isolateB/`、`logs/s20-p0-hostfix/` | `fba31f8`、`767053f`、`fff2678` |
+| P0 历史 3/3（当前不稳定） | runbook §4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`、closure §1、decisions D9 | `logs/s19o-p0-3/`、`logs/s20-p0-repro/`、`logs/s20-p0-8bf5-recheck/` | `498157c`、`66a7d54`、`024c10e`、`fda19b3`、`6935ed3` |
+| P0 当前复现性 | runbook §4.33、decisions D9、closure §1 | `logs/s20-p0-8bf5-recheck/`、`logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/`、`logs/s20-p0-isolateB/`、`logs/s20-p0-hostfix/` | `fba31f8`、`767053f`、`fff2678`、`6935ed3` |
 | P1 重开 A/修复中 | runbook §4.32、`docs/gpu-acceleration-stage19-p1-ab-minimal.md`、closure §1 | `logs/s20-p1-54px-dash/`、`logs/s20-p1-validation/`、`logs/s20-p1-labeldash/` | `841bd93`、`a75efd1`、`c139a19` |
 | P2 未达成 | runbook §4.15/§4.17/§4.24/§4.25、decisions D3、closure §1 | `logs/s19o-p2/`、`logs/s19o-p2d/`、`logs/s19o-p2e/`、`logs/s19o-p2e-c2/` | `d73c1e8`、`f57eeb8`、`eac8128` |
 | P3 真路径不可行 | runbook §4.26–§4.30、decisions D1、closure §1 | `logs/s19o-p3a/`、`logs/s19o-p3b-d1/`、`logs/s19o-p3b-d2/`、`logs/s19o-p3b-d3/`、`logs/s19o-p3-surface-enum/` | `c2e9d23`、`97506d9`、`f339014`、`2acbd0d` |
@@ -100,7 +100,7 @@ cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、
 
 ## 5. 能否作为交付基线
 
-**P0 工作基线 = `8bf5f838`**：3/3 历史 + 复现 **99.99%**；原件 `/tmp/system.apfs.bak-s20`、keep `/tmp/system-8bf5f838.keep`。`6be494f1` 仅对照（89.50%，不可复现 P0），keep `/tmp/system-6be494f1.keep`，不再当工作基线。任何实验 report 必须写 system md5。
+**P0 不能作为当前可复现交付基线**：历史 3/3 通过；当前 8bf5 同配方 99.99%（12:52）/89.56%（15:42）不一致，6be ~89.50%；**复现性未达标**。8bf5 原件/keep 保留，但 8bf5 只是必要条件；门禁需 2–3 次 boot 统计，任何实验 report 必须写 system md5。
 
 **可作为历史交付证据**：P3 有明确标注的非真 widget 占位；P4 有 `0x502=0` 与唯一可用 cell1 fps。
 
