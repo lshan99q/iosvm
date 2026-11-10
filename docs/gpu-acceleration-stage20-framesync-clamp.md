@@ -32,3 +32,21 @@ candidate 1 degraded, do not change the sysctl.
   the archived logs.
 
 Artifacts: `/host/iosvm/logs/s20-framesync-clamp/`.
+
+## Waiting-point note (more important than fps)
+
+Host per-frame replay is 29–35 ms (≈28–34 fps capability) yet 120 frames took
+117.82 s — the host is **waiting ≈0.98 s per frame**, and the guest sent only
+8 frames (7→15) in the same window.  That wait is what the code's host-cadence
+switch will target; the socket buffer is not the lever.
+
+## Quick window table (120 frames)
+
+| host window fps | wall time |
+|---|---|
+| 1 fps | 120 s |
+| 5 fps | 24 s |
+| 10 fps | 12 s |
+
+Next after code's host-cadence switch: same cell3, same 120-frame window,
+baseline vs smaller cadence; **≥5 fps = valid**; cell1 10.91 fps ±10%.
