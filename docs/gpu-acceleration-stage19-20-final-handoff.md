@@ -1,8 +1,19 @@
 # Stage 19 + 20 最终移交
 
-> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **3/3 是历史 PASS**（system 8bf5f838，已不在盘）；当前 system 6be494f1 复现 **89.50%**，恢复等价镜像前不能当当前基线。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
+> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **3/3 是历史 PASS**（system **8bf5f838**；原件 `/tmp/system.apfs.bak-s20`，另存 `/tmp/system-8bf5f838.keep`，不许覆盖；exp 复现中）；当前 system **6be494f1** 复现 **89.50%**，原件复现 ≥95% 前不能当当前基线。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
 > 本页只做结论、证据索引、未解决项与「不做」清单；细节以 runbook/decisions/logs 为准。
 > 不写 P2/P3 真路径通过，不写性能达标，不写 watchdog 已修。
+
+## 0. P0 两套 system 镜像（必读）
+
+| 用途 | system md5 | 状态 | 位置/规则 |
+|---|---|---|---|
+| **P0 历史基线** | **`8bf5f838d52e46d6c8bf77f13a5ad946`** | **98.82%**（p0-3 历史） | 原件 `/tmp/system.apfs.bak-s20`；另存 `/tmp/system-8bf5f838.keep`，**不许覆盖**；exp 复现中 |
+| **当前 system** | **`6be494f1…`**（C1 等价） | **89.50%**，不可复现 P0 ≥95% | 当前盘上；不要和 8bf5 数字直接混用 |
+
+- **任何再跑 P0 判据的实验，必须在命令/表里显式声明 system md5**（8bf5 还是 6be）；不声明 → 数字不可比。
+- 若之后要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 6be 的 89.5% 重设阈值，或改成不依赖同帧配对）——**这一条待定**，等 exp 用 8bf5 原件的复现结果回来再定。
+- 当前不写「P0 3/3 被推翻」；写「历史 PASS、当前 6be 不可复现、8bf5 原件复现在途」。
 
 ## 1. 两个阶段的终局结论
 
@@ -10,7 +21,7 @@
 
 | 项 | 终局 | 一句话依据 |
 |---|---|---|
-| **P0** | **3/3 历史 PASS；当前不可复现** | 历史（system **8bf5f838**，不在盘）：v7 330,931 B/99.85%、v9 326,461 B/99.98%、p0-3 327,177 B/≥14/98.81%。当前 system **6be494f1** + host `b1e87d` + root `3207a35e`：f-picture 有内容，但 **diff 89.50%（missing 9.59%）<95**；host `2be814a7` 的 f-picture 全黑是 59.57% 的直接原因（已修）；89.35–89.50% 是当前 system 上限。P0 未被推翻，但**当前环境不能复现 ≥95%**。 |
+| **P0** | **3/3 历史 PASS；当前不可复现** | 历史（system **8bf5f838**；原件 `/tmp/system.apfs.bak-s20`，另存 keep；exp 复现中）：v7 330,931 B/99.85%、v9 326,461 B/99.98%、p0-3 327,177 B/≥14/98.81%。当前 system **6be494f1** + host `b1e87d` + root `3207a35e`：f-picture 有内容，但 **diff 89.50%（missing 9.59%）<95**；host `2be814a7` 的 f-picture 全黑是 59.57% 的直接原因（已修）；89.35–89.50% 是当前 system 上限。P0 未被推翻，但**当前环境不能复现 ≥95%**。 |
 | **P1** | **重开后判 A、修复中（未修复）** | 虚线段在 90 高 label tile 底部行：Photos row61 54px/alpha247、FaceTime 61–62 47px、Wallet 58–61、label-4 53–56；B 采样放大已排除。第一次 `glyph_last_row=1` FAIL（Weather 掉笔画、虚线仍在）；`label_dash_rows=53-62` crash；`61-62` 无效果。修法只走 label tile row61/62，验收 guest 截图；P1 未修复。 |
 | **P2** | **关闭/未达成** | lookup 已修、PosterBoard running，但壁纸 window/PBUI 远程 VC 链在屏而 contents=0；根因与 P3 同源：extension check-in timeout；四路径走完，不再投入 |
 | **P3** | **真路径不可行 + fallback5 已交付** | surface 枚举 30 面无 widget 候选；allContexts 按进程；无零参 snapshot；extension exec 后 ~0.5s 死亡；guest-side 占位（24px 棋盘+白框+双黄对角线）PASS，明确非真 widget |
@@ -82,7 +93,7 @@ cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、
 
 ## 5. 能否作为交付基线
 
-**P0 只能作为历史基线**：3/3 是 system **8bf5f838** 下的历史实测，该镜像已不在盘；当前 system **6be494f1** 只复现 **89.50%**（<95）。恢复/重建出 8bf5 等价 system 前，**不能把 P0 写成「当前可复现交付基线」**。
+**P0 只能作为历史基线**：3/3 是 system **8bf5f838** 下的历史实测；原件 `/tmp/system.apfs.bak-s20`（另存 `/tmp/system-8bf5f838.keep`，不许覆盖）正在被 exp 复现。当前 system **6be494f1** 只复现 **89.50%**（<95）。原件复现出 ≥95% 前，**不能把 P0 写成「当前可复现交付基线」**；任何 P0 复跑必须声明 system md5。
 
 **可作为历史交付证据**：P3 有明确标注的非真 widget 占位；P4 有 `0x502=0` 与唯一可用 cell1 fps。
 

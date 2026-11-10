@@ -207,11 +207,11 @@
 
 ## D9. P0 3/3 是历史基线；当前 system 6be 不可复现 ≥95%
 
-**决定**：P0 **3/3 仍成立（历史证据，system `8bf5f838`）**，但**当前 system `6be494f1` 不能复现 ≥95%**；在恢复/重建出 8bf5 等价 system 前，**不把 P0 写成「当前可复现交付基线」**。
+**决定**：P0 **3/3 仍成立（历史证据，system `8bf5f838`）**，但**当前 system `6be494f1` 不能复现 ≥95%**；8bf5 原件在 `/tmp/system.apfs.bak-s20`（另存 `/tmp/system-8bf5f838.keep`，不许覆盖），exp 正在用它复现；**复现结果回来前，不把 P0 写成「当前可复现交付基线」**。
 
 **依据**：
 
-- 历史 p0-3：98.82%（f-panel vs f-picture），system `8bf5f838`；该镜像已不在盘。
+- 历史 p0-3：98.82%（f-panel vs f-picture），system `8bf5f838`；**原件在 `/tmp/system.apfs.bak-s20`，另存 `/tmp/system-8bf5f838.keep`**（不许覆盖），exp 复现中。
 - 当前 `6be494f1` + host `b1e87d` + root `3207a35e`：f-picture 有内容（`4483abd6`，40.58% 非黑），check_panel 无 mask，f/f-n1 有效，但 **diff 89.50%（missing 9.59%，bbox 46,142–729,1603）<95**。
 - 排查：recheck 59.57% 是 host `2be814a7` 的 f-picture 全黑（已修）；isolate A（current lib + old host 28f）89.44%；isolate B（old lib + old host 28f）89.35%；hostfix（b1e87d）89.50% → lib/root 排除，剩余是 system 6be 的 SpringBoard/content 差异。
 - 证据：`logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/`、`logs/s20-p0-isolateB/`、`logs/s20-p0-hostfix/`；commit `fba31f8`/`767053f`/`fff2678`。
@@ -220,11 +220,12 @@
 
 - P0 历史 PASS 不变；当前环境只写 89.35–89.50%，不写 3/3 可复现。
 - closure / handoff 加 caveat；验收/交付基线必须注明 system 版本。
-- 不把当前 89.50% 说成「P0 被推翻」；是环境/镜像差异。
+- 不把当前 89.50% 说成「P0 被推翻」；是环境/镜像差异。任何 P0 复跑必须声明 system md5；8bf5 与 6be 的数字不可直接混用。
+- 若之后要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 6be 89.5% 重设阈值，或改成不依赖同帧配对）——**待定**，等 exp 用 8bf5 原件的复现结果回来再定。
 
 **何时可推翻**：
 
-1. 恢复 `8bf5f838` 或重建出等价 system，并复现 ≥95% / P0 三判据；
+1. 用 `/tmp/system.apfs.bak-s20` 的 `8bf5f838` 原件复现 ≥95% / P0 三判据（exp 进行中）；
 2. 找到当前 6be 下 ≥95% 的 root/host/system 组合并复现三发。
 
 ## 阶段 20 移交接手清单（D4）
@@ -249,4 +250,4 @@
 | D6 | 20s fps 不可比；改 120 帧窗口、cell1 guest 时钟 | §8.0 | `ea835b7` |
 | D7 | P4 终局：纯本地可用；byref/w15 不具可用性；cell4 未跑是判决 | §8.0、§8.7 | `93f5d2a`、`logs/s19o-p4-cells/attempt3-framewindow` |
 | D8 | Stage 20 E1=C；control 完成；P2/P3 不重开；system 6be494f1 | §8、`stage20-e1-control.md` | `cac2a73`、`6be494f1` |
-| D9 | P0 3/3 历史；当前 6be 89.50%，8bf5 不在盘 | §4.33、closure、handoff | `fba31f8`、`767053f`、`fff2678`、`logs/s20-p0-*` |
+| D9 | P0 3/3 历史；当前 6be 89.50%；8bf5 原件待复现 | §4.33、closure、handoff | `fba31f8`、`767053f`、`fff2678`、`logs/s20-p0-*`、`/tmp/system.apfs.bak-s20` |

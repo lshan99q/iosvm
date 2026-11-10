@@ -4,7 +4,19 @@
 > 输入：stage 19 D7、stage 20 E1 C、P1 最近三次失败、帧同步候选 1 未建立。
 > 相关：`docs/gpu-acceleration-stage20-plan.md`、`docs/gpu-acceleration-stage19-closure.md`、`docs/gpu-acceleration-stage19-decisions.md`。
 
-## Phase 0（进行中）：P1 最后定向修 + 帧同步复测
+## Phase 0（进行中）
+
+### 0.0 P0 两套 system 镜像（必读）
+
+| 用途 | system md5 | 结果 | 位置/规则 |
+|---|---|---|---|
+| **P0 基线** | **`8bf5f838d52e46d6c8bf77f13a5ad946`** | **98.82%**（历史 p0-3） | 原件 `/tmp/system.apfs.bak-s20`；另存 `/tmp/system-8bf5f838.keep`，**不许覆盖**；exp 复现中 |
+| **当前 system** | **`6be494f1…`**（C1） | **89.50%**，不可复现 P0 | 当前盘上；不要和 8bf5 数字混用 |
+
+- **任何 P0 复跑必须声明 system md5**；不声明，数字不可比。
+- 若要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 6be 89.5% 重设阈值，或改成不依赖同帧配对）——**待定**，等 exp 用 8bf5 原件的复现结果回来再定。
+- 当前只写「历史 PASS、6be 不可复现、8bf5 复现在途」，不写 P0 被推翻。
+
 
 ### 0.1 P1 最后定向修
 
