@@ -1,4 +1,4 @@
-# Stage 19 收口决定（D1–D8）
+# Stage 19 收口决定（D1–D9）
 
 - **Status:** Accepted
 - **Date:** 2026-11-09
@@ -205,6 +205,28 @@
 1. check-in 协议/launchd 侧有可复现修复，且 extension 活过 60s/checked in；
 2. 干净单变量测试出现不同结果（需 owner 重新立项）。
 
+## D9. P0 3/3 是历史基线；当前 system 6be 不可复现 ≥95%
+
+**决定**：P0 **3/3 仍成立（历史证据，system `8bf5f838`）**，但**当前 system `6be494f1` 不能复现 ≥95%**；在恢复/重建出 8bf5 等价 system 前，**不把 P0 写成「当前可复现交付基线」**。
+
+**依据**：
+
+- 历史 p0-3：98.82%（f-panel vs f-picture），system `8bf5f838`；该镜像已不在盘。
+- 当前 `6be494f1` + host `b1e87d` + root `3207a35e`：f-picture 有内容（`4483abd6`，40.58% 非黑），check_panel 无 mask，f/f-n1 有效，但 **diff 89.50%（missing 9.59%，bbox 46,142–729,1603）<95**。
+- 排查：recheck 59.57% 是 host `2be814a7` 的 f-picture 全黑（已修）；isolate A（current lib + old host 28f）89.44%；isolate B（old lib + old host 28f）89.35%；hostfix（b1e87d）89.50% → lib/root 排除，剩余是 system 6be 的 SpringBoard/content 差异。
+- 证据：`logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/`、`logs/s20-p0-isolateB/`、`logs/s20-p0-hostfix/`；commit `fba31f8`/`767053f`/`fff2678`。
+
+**影响**：
+
+- P0 历史 PASS 不变；当前环境只写 89.35–89.50%，不写 3/3 可复现。
+- closure / handoff 加 caveat；验收/交付基线必须注明 system 版本。
+- 不把当前 89.50% 说成「P0 被推翻」；是环境/镜像差异。
+
+**何时可推翻**：
+
+1. 恢复 `8bf5f838` 或重建出等价 system，并复现 ≥95% / P0 三判据；
+2. 找到当前 6be 下 ≥95% 的 root/host/system 组合并复现三发。
+
 ## 阶段 20 移交接手清单（D4）
 
 - **最终证据编号**：**E5**（fallback5 PASS，P3 fallback 已交付）；E1–E4 见 D1（真路径不可行）。
@@ -227,3 +249,4 @@
 | D6 | 20s fps 不可比；改 120 帧窗口、cell1 guest 时钟 | §8.0 | `ea835b7` |
 | D7 | P4 终局：纯本地可用；byref/w15 不具可用性；cell4 未跑是判决 | §8.0、§8.7 | `93f5d2a`、`logs/s19o-p4-cells/attempt3-framewindow` |
 | D8 | Stage 20 E1=C；control 完成；P2/P3 不重开；system 6be494f1 | §8、`stage20-e1-control.md` | `cac2a73`、`6be494f1` |
+| D9 | P0 3/3 历史；当前 6be 89.50%，8bf5 不在盘 | §4.33、closure、handoff | `fba31f8`、`767053f`、`fff2678`、`logs/s20-p0-*` |

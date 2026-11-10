@@ -22,7 +22,7 @@
    像半浮点被当浮点抄），同一块数组在启动早期是好的（`0.125..0.5`）。wire 的顶点数组按**客户端指针**直读，
    而 CA 在 UI 阶段很可能把数组放进 **VBO**（`glVertexAttribPointer` 的 pointer 是偏移）。
 5. 壁纸仍是「启动镜像作业表缺 PosterBoard」；widget 两个面仍不由 GL 链路画；四格表未刷新。
-6. **P0 已达成（3/3）：v7 99.85%、v9 99.98%、p0-3 98.81% 同帧 SAME FRAME；v8 因 dump 落在 UI 加载动画 89.53% NOT，不计入。** 详见 `docs/gpu-acceleration-stage19-p0-runbook.md` §4.8/§4.9/§4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`。P1 重开后判 A、修复中（未修复；第一次修复 glyph_last_row=1 FAIL）；P2 未达成；P3 真路径不可行 + fallback 已交付（占位，非真 widget）。
+6. **P0 历史 3/3（system 8bf5f838；当前 6be 89.50%，不可复现）：v7 99.85%、v9 99.98%、p0-3 98.81% 同帧 SAME FRAME；v8 因 dump 落在 UI 加载动画 89.53% NOT，不计入。** 详见 `docs/gpu-acceleration-stage19-p0-runbook.md` §4.8/§4.9/§4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`。P1 重开后判 A、修复中（未修复；第一次修复 glyph_last_row=1 FAIL）；P2 未达成；P3 真路径不可行 + fallback 已交付（占位，非真 widget）。
 
 ---
 
@@ -40,7 +40,7 @@
 
 | # | 需求 | 判据（可测） | 阻塞谁 |
 |---|---|---|---|
-| P0 | 标签是文字（**已达成 3/3：v7+v9+p0-3**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
+| P0 | 标签是文字（**历史 3/3：v7+v9+p0-3；当前 system 6be 89.50% 不可复现**） | 连续 3 发（`QEMU_SMP=1`）里 ≥2 发首页能读出 ≥5 个 App 名称；截图 ≥300 KB；同帧 `diffdump --tolerance 8` ≥95% | 可用性 |
 | P1 | 文字质量（**重开后判 A、修复中（未修复）**；虚线段在 90 高 label tile 底部行：Photos row61 54px/alpha247、FaceTime 61–62 47px、Wallet 58–61、label-4 53–56；**B 采样放大已排除**；修在 label tile 虚线行 row61/62，不查 host sampler/linear/clamp；第一次 `glyph_last_row=1` FAIL（清到 glyph 笔画底部，Weather 掉笔画、虚线仍在）） | 无重影；widget 左上角 40x40 白像素 875/1600（±2%）；标签为白 | 可用性 |
 | P2 | 壁纸（**关闭/未达成**：P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；与 P3 同源 extension check-in；不再投入（D3）） | SpringBoard 的 `posterboardservices` lookup 不再 `No such process`；宿主出现 1125x2436（或全屏）壁纸纹理；主屏背景非纯黑 | 可用性 |
 | P3 | widget（**真路径不可行（D1，提前收口）+ fallback 已交付（D2，fallback5 PASS）**：surface 枚举 30 面无候选、allContexts 按进程隔离、无零参 snapshot、extension CheckIn 未发出；host fallback2/3 截图不可见，转 guest-side `widget_placeholder=1`；占位不是真 widget，不写「可行」） | `312x202`/`184x124` 以纹理进宿主；否则交付「拉面」的最小实现（时间盒 2 天） | 可用性 |
