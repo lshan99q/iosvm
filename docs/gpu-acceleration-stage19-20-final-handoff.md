@@ -1,19 +1,20 @@
 # Stage 19 + 20 最终移交
 
-> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **3/3 是历史 PASS**（system **8bf5f838**；原件 `/tmp/system.apfs.bak-s20`，另存 `/tmp/system-8bf5f838.keep`，不许覆盖；exp 复现中）；当前 system **6be494f1** 复现 **89.50%**，原件复现 ≥95% 前不能当当前基线。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
+> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **3/3 PASS**，**唯一工作基线 system = `8bf5f838`**（复现 **99.99%**）；`6be494f1` 仅对照（89.50%，不可复现 P0），不再当工作基线。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
 > 本页只做结论、证据索引、未解决项与「不做」清单；细节以 runbook/decisions/logs 为准。
 > 不写 P2/P3 真路径通过，不写性能达标，不写 watchdog 已修。
 
-## 0. P0 两套 system 镜像（必读）
+## 0. P0 工作基线与对照 system（必读）
 
-| 用途 | system md5 | 状态 | 位置/规则 |
+| 用途 | system md5 | 结果 | 位置/规则 |
 |---|---|---|---|
-| **P0 历史基线** | **`8bf5f838d52e46d6c8bf77f13a5ad946`** | **98.82%**（p0-3 历史） | 原件 `/tmp/system.apfs.bak-s20`；另存 `/tmp/system-8bf5f838.keep`，**不许覆盖**；exp 复现中 |
-| **当前 system** | **`6be494f1…`**（C1 等价） | **89.50%**，不可复现 P0 ≥95% | 当前盘上；不要和 8bf5 数字直接混用 |
+| **唯一工作基线** | **`8bf5f838d52e46d6c8bf77f13a5ad946`** | **99.99%** 复现（P0-3 历史 98.82%） | 原件 `/tmp/system.apfs.bak-s20`；keep `/tmp/system-8bf5f838.keep`；**不许覆盖** |
+| **仅对照** | **`6be494f1…`**（C1 重建） | **89.50%**，不可复现 P0 | keep `/tmp/system-6be494f1.keep`；**不再当工作基线** |
 
-- **任何再跑 P0 判据的实验，必须在命令/表里显式声明 system md5**（8bf5 还是 6be）；不声明 → 数字不可比。
-- 若之后要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 6be 的 89.5% 重设阈值，或改成不依赖同帧配对）——**这一条待定**，等 exp 用 8bf5 原件的复现结果回来再定。
-- 当前不写「P0 3/3 被推翻」；写「历史 PASS、当前 6be 不可复现、8bf5 原件复现在途」。
+- **P0 判据只在 `8bf5f838` 上有效**；任何实验 report 必须写 **system md5**，不写视为不可比。
+- 不要把 6be 的 89.50% 与 8bf5 的 99.99% 混用；需要 P0 门禁/对照时明确标注。
+- 若之后要把 6be 作为唯一基线，必须**重新定义 P0 判据**（按 6be 89.5% 重设阈值，或改成不依赖同帧配对）——**待定**。
+- 当前不写「P0 被推翻」；写「P0 3/3 在 8bf5 上复现，6be 不可复现」。
 
 ## 1. 两个阶段的终局结论
 
@@ -21,7 +22,7 @@
 
 | 项 | 终局 | 一句话依据 |
 |---|---|---|
-| **P0** | **3/3 历史 PASS；当前不可复现** | 历史（system **8bf5f838**；原件 `/tmp/system.apfs.bak-s20`，另存 keep；exp 复现中）：v7 330,931 B/99.85%、v9 326,461 B/99.98%、p0-3 327,177 B/≥14/98.81%。当前 system **6be494f1** + host `b1e87d` + root `3207a35e`：f-picture 有内容，但 **diff 89.50%（missing 9.59%）<95**；host `2be814a7` 的 f-picture 全黑是 59.57% 的直接原因（已修）；89.35–89.50% 是当前 system 上限。P0 未被推翻，但**当前环境不能复现 ≥95%**。 |
+| **P0** | **3/3 PASS（工作基线 8bf5）** | 唯一工作基线 **8bf5f838**：v7 99.85%、v9 99.98%、p0-3 98.81%；复现 8bf5 + root 3207a35e + host b1e87d = **99.99% SAME**（missing 0/extra 0），三判据 PASS。`6be494f1` 仅对照：89.50%，不可复现；不再当工作基线。 |
 | **P1** | **重开后判 A、修复中（未修复）** | 虚线段在 90 高 label tile 底部行：Photos row61 54px/alpha247、FaceTime 61–62 47px、Wallet 58–61、label-4 53–56；B 采样放大已排除。第一次 `glyph_last_row=1` FAIL（Weather 掉笔画、虚线仍在）；`label_dash_rows=53-62` crash；`61-62` 无效果。修法只走 label tile row61/62，验收 guest 截图；P1 未修复。 |
 | **P2** | **关闭/未达成** | lookup 已修、PosterBoard running，但壁纸 window/PBUI 远程 VC 链在屏而 contents=0；根因与 P3 同源：extension check-in timeout；四路径走完，不再投入 |
 | **P3** | **真路径不可行 + fallback5 已交付** | surface 枚举 30 面无 widget 候选；allContexts 按进程；无零参 snapshot；extension exec 后 ~0.5s 死亡；guest-side 占位（24px 棋盘+白框+双黄对角线）PASS，明确非真 widget |
@@ -41,7 +42,7 @@
 
 | 结论 | 文档 | 日志/产物 | 关键 commit |
 |---|---|---|---|
-| P0 3/3（历史） | runbook §4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`、closure §1、decisions D9 | `logs/s19o-p0-3/`（含 `p0-3-weather-band2.png`） | `498157c`、`66a7d54`、`024c10e` |
+| P0 3/3（工作基线 8bf5） | runbook §4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`、closure §1、decisions D9 | `logs/s19o-p0-3/`、`logs/s20-p0-repro/` | `498157c`、`66a7d54`、`024c10e` |
 | P0 当前复现性 | runbook §4.33、decisions D9、closure §1 | `logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/`、`logs/s20-p0-isolateB/`、`logs/s20-p0-hostfix/` | `fba31f8`、`767053f`、`fff2678` |
 | P1 重开 A/修复中 | runbook §4.32、`docs/gpu-acceleration-stage19-p1-ab-minimal.md`、closure §1 | `logs/s20-p1-54px-dash/`、`logs/s20-p1-validation/`、`logs/s20-p1-labeldash/` | `841bd93`、`a75efd1`、`c139a19` |
 | P2 未达成 | runbook §4.15/§4.17/§4.24/§4.25、decisions D3、closure §1 | `logs/s19o-p2/`、`logs/s19o-p2d/`、`logs/s19o-p2e/`、`logs/s19o-p2e-c2/` | `d73c1e8`、`f57eeb8`、`eac8128` |
@@ -79,6 +80,12 @@ P1 重开后判 **A（tile 内容/行映射）**：虚线段写在 90 高 label 
 
 cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、cell3 2 帧/772s），不是 host 回放能力问题（host 单帧 29.6–59.0 ms，16–33 fps 能力）。**要谈性能必须换配置**：多核 guest、GPU 直通/更快的 GL 路径、或减少 wire 数据量；当前配置下不再追加性能实验。
 
+### 3.4 `s20-ack50b` 不可作为结论（已安排重跑）
+
+- `s20-ack50b` 的 **UI 未起、host 0 帧、ack timeout 仅 2 次且是 frame dropped**；不能拿它当「ack 50ms」结论。
+- 已安排重跑：**先 isolate，再 ack 版**；在重跑结果出来前，不写 ack 参数有效/无效。
+- 来源：`docs/gpu-acceleration-stage20-ack50.md`、`logs/s20-ack50b/`。
+
 ## 4. 「不做」清单（避免下一阶段重复烧时间）
 
 1. P1 只查 label tile row61/62；不再 scrub glyph last row、不再查 host sampler/linear/clamp、不再试全局 `GLYPH_TRIM`/`TC0_SANITIZE`/skip13。
@@ -93,7 +100,7 @@ cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、
 
 ## 5. 能否作为交付基线
 
-**P0 只能作为历史基线**：3/3 是 system **8bf5f838** 下的历史实测；原件 `/tmp/system.apfs.bak-s20`（另存 `/tmp/system-8bf5f838.keep`，不许覆盖）正在被 exp 复现。当前 system **6be494f1** 只复现 **89.50%**（<95）。原件复现出 ≥95% 前，**不能把 P0 写成「当前可复现交付基线」**；任何 P0 复跑必须声明 system md5。
+**P0 工作基线 = `8bf5f838`**：3/3 历史 + 复现 **99.99%**；原件 `/tmp/system.apfs.bak-s20`、keep `/tmp/system-8bf5f838.keep`。`6be494f1` 仅对照（89.50%，不可复现 P0），keep `/tmp/system-6be494f1.keep`，不再当工作基线。任何实验 report 必须写 system md5。
 
 **可作为历史交付证据**：P3 有明确标注的非真 widget 占位；P4 有 `0x502=0` 与唯一可用 cell1 fps。
 
