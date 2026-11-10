@@ -20,7 +20,7 @@ timeout --signal=TERM "$SECONDS_RUN" qemu-system-aarch64 \
 ```
 
 - 宿主是 **x86_64**；客机固定跑 **`qemu-system-aarch64 -M virt -cpu cortex-a76`**（aarch64）。
-- 两张 NVIDIA V100 是 **x86 PCIe 3D controller**：`10de:1db1`（GV100GL / Tesla V100 SXM2 16GB）。本容器没有 `lspci`，用 sysfs 等价证据：
+- sysfs 显示 **两个** NVIDIA V100 **x86 PCIe 3D controller**：`10de:1db1`（GV100GL / Tesla V100 SXM2 16GB）。本容器没有 `lspci`，用 sysfs 等价证据；`nvidia-smi` 当前只列 GPU0，是驱动可见性/权限问题，不改变 PCIe 设备有两个的事实：
 
 ```sh
 $ for d in /sys/bus/pci/devices/*; do
