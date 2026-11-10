@@ -54,7 +54,8 @@
 5. **不把 E1 的 A 当成 P2/P3 已通过**；A 只是允许进入重开判据。
 6. **不提交日志/截图/二进制**；只提交 `.md` 和可复现命令。
 7. **不倒腾 `ExtensionWatchdog` 布尔**：E1 已判 C；不再试 false/true 组合（干净单变量未做、当前不做）。
-8. **不为 byref/w15 追加性能实验**；**P1 不续**（除非满足 90 高定向 trim 判据）。
+8. **不为 byref/w15 追加性能实验**；P1 判 A、修复中，**不查 host sampler / linear / clamp**（B 已排除），只查 guest glyph/label tile 生成/行映射。
+9. **不擅自改宿主 GPU 驱动 / vfio**：直通评估判不可行；不 unbind/bind、不重装驱动、不改 IOMMU/GRUB。
 
 ## 5. 若 E1 = A：P2/P3 重开判据
 
@@ -152,3 +153,23 @@
 - **P2/P3 保持关闭、不重开**；P3 fallback5 仍是交付项，不回退。
 - 若 owner 仍要干净单变量：working C1 base + **只改 `ExtensionWatchdog=false`**（`CrashOnSIGTERMTimeout=true`）900–1200s；预计仍 C，当前不做。
 - 不写「watchdog 已修」「extension 已活」「P2/P3 已通过」。
+
+
+## 9. 帧同步审计（只读，未执行）
+
+> 来源：`docs/gpu-acceleration-stage19-gpu-route-audit.md`（code 分支 `e7b869c`，未合 main）。这里只列候选与最小实验，**不预写结论**；P4 最终数字仍以 D7 为准。
+> 前提：不碰 V100 直通；只查现有 glwire 的 guest↔host 帧同步。
+
+| # | 候选同步点 | 代码/日志证据 | 一次 boot 证伪 |
+|---|---|---|---|
+| 1 | **每帧 4.9 MB picture/panel 往返 + 默认 TCP 缓冲**：guest `send` 记录后 `recv` 回复；无 in-place 时 host 回送整张 4,872,000 B picture；byref 上传整张 panel；只有 `TCP_NODELAY`，**没有 SO_RCVBUF/SNDBUF** | `src/eagl_remote.c:462`（send/recv）、`:499`（仅 TCP_NODELAY）；`src/eagl.c:1339/1426`；host `serve_frame` 4048–4054 | cell3 开 `glframes=1 touch_lat=1`：看 `hakios-remote: f N wait <us>` 是否占帧周期绝大部分；`glwire_noflush=1` 若 fps 跳升 → 网络路径 |
+| 2 | **逐帧 lockstep**：guest 发完必须等 host replay 完才收 reply；host 单线程 `poll`/`serve_frame`，无第二帧在途/双缓冲 | `eagl_remote_flush` 的 send 后 recv；host `serve_frame` 只在 replay/readback 后 reply；cell4 无 picture 回传仍远低于本地 | host 加 `GLWIRE_FRAME_DELAY_MS=1000` 一发：guest 帧周期若 +≈1s → lockstep；不变则不是等 host |
+| 3 | **guest 本地 CA/显示等待**：`glFinish`/`glFenceSync`/`IOSurfaceLock`、TCG 软件光栅 | `frame_end` 1304–1319；`MiniIOMobileFramebuffer ... waiting for the GPU`；cell1 10.91 fps 说明本地绘制本身不慢 | `glwire_noflush=1` 仍低 → 本地/显示；跳升 → 网络/同步 |
+
+**最小可测改动（一处逻辑：socket 缓冲）**
+
+- guest `src/eagl_remote.c:499` 的 `TCP_NODELAY` 后设 `SO_RCVBUF`（可同时 `SO_SNDBUF`）为 8 MB；host `host_glwire.c:4340` 的 accepted fd 设 `SO_SNDBUF`。
+- **用 env 开关控制，默认不变**（具体变量名按 code 实现）；不改渲染/协议/镜像；cell1 没有 socket，不受影响。
+- 对照实验：cell3（`GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1`）+ **cell1 护栏**（确认本地不受影响）；记录 guest `f N wait`、host `frame ... ms`、`0x502` 仍为 0。
+- 若 socket 缓冲无提升：候选 1 降级，再测 `glwire_noflush=1`（候选 3）和 `GLWIRE_FRAME_DELAY_MS=1000`（候选 2）；**不要同时改协议和缓冲**。
+- 未跑；不把审计当「已修复」。

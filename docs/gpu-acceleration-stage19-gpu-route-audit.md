@@ -1,6 +1,8 @@
 # GPU “真路线”审计：瓶颈是 guest↔host 帧同步/4.9 MB 画面往返（只读）
 
 **前提**：不碰 V100 直通；宿主 x86_64、客机 aarch64、无 PCI/virtio-gpu 驱动，直通不成立。
+
+> **注（2026-11-10）**：本文的 P4 帧数是审计时的早期定位，**最终数字以 D7 为准**（cell2 183/343≈0.04 fps；cell3 2 帧/772,366ms≈0.003 fps；cell4 NOT RUN 是判决）。
 P4 真数据：纯本地 cell1 **10.91 fps**；byref cell2 ~2 frames/20 s；W1.5 cell3 2–6 frames/7–9 s；
 W1.5+W3 cell4 5–19 frames/6–20 s。cell4 的 in-place 行写比 cell3 的无 in-place 画面回传快约
 5×，但两者都远低于本地。

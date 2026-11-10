@@ -2167,7 +2167,7 @@ UIWindowLayer "colour ( 0 1 )"
 - **交付已走 guest-side**：`inject_sb.c` 的 `widget_placeholder=1` 在 UI 后插圆角 UIView（棋盘+白框+黄对角线），日志 `static widget placeholder ... (NOT the real widget path)`；**fallback5 PASS**。
 - 这是 **fallback 交付项**，截图验收前不要写成 P3 可行/已完成。
 
-**不要写**：P3 真路径通过 / widget 已正确 / P2 已修复。P3 真路径不可行，fallback 已交付（占位）；P0 最终 3/3；P1 暂停/未修复（C）。
+**不要写**：P3 真路径通过 / widget 已正确 / P2 已修复。P3 真路径不可行，fallback 已交付（占位）；P0 最终 3/3；P1 重开后判 A、修复中（未修复）。
 
 
 ### 4.30 s19o-p3-surface-enum 实测：widget 面不在 MiniIOSurface 表里
@@ -2259,19 +2259,18 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - 视觉：`logs/s19o-p3-fallback5/widget-area.png`（463x463）清晰 24px 棋盘 + 白框 + 两条黄对角线；无绿屏/白底覆盖。
 - 判定：**PASS（视觉 + 日志）**；这是拉面占位，**不是真 widget 内容**，P3 不写「可行/真路径通过」。
 
-### 4.32 P1 终局 C：点带是 42 高 glyph/label tile 的底部行（不是 A/B）
+### 4.32 P1 重开后判 A：虚线段在 90 高 label tile 底部行（修复中）
 
-> **结论：P1 终局 C/other。** 点带是 **42 高 glyph/label tile 的底部行**，不是 A（750x200 平铺），也不是 B（背板采样未裁到 glyph rect）。P1 **未修复、暂停/不续**；不再为 P1 起 boot（除非 owner 另定）。
-> 来源：`docs/gpu-acceleration-stage19-p0-3-results.md`、`docs/gpu-acceleration-stage19-p1-backdrop-or-tile.md`。
+> **P1 重开后的 A/B 二分类：A = tile 内容/行映射；B = 采样放大。** 本发判 **A**，B 已排除；**P1 未修复**，修复实验进行中，不许写「已修」。
+> 来源：`logs/s20-p1-54px-dash/report.md`、`shot-label-lower40.png`、`tile-f121-alpha-4x.png`；旧文 A（750x200 平铺）/B（背板采样）不是本轮分类。
 
-- UI-time Weather label（host log frame 117）：`text draw #549 prog13 178x90`、`#550 prog15 130x42`。
-- tile dump：178x90 label tile 的 row34–52 是字形，**row61 = 54 px 虚线**，rows62–89 = 0。row61 是 **130x42 glyph 纹理最后一行**（42 行映射到 tile 的 row20–61），不是 178x90 背板底（底是 row89）。
-- P1c 的 **101x42 Notes** 底部 8 行每行 29–30 px，是同源证据：42 高 tile 已直接贡献。
-- 早帧 750x200：`readrect 0,0 184x90`、`texmat 1,1,0,0`，**无 wrap/repeat**；750x200 只是早帧 label-tile 纹理/采样，不是被平铺的 backdrop。
-- 90 高 tile 底缘可能还有**第二来源**点线，但**不能归因于 750x200**；`host_backdrop_fill()` 只在 `GLWIRE_BACKDROP=1` 且目标 ≤256x256 时 blit，P1c 没开、750x200 超限，host 从未填它。
-- **续查条件**：只有「90 高 tile 定向 trim 后，至少两个 90 高标签带下降 ≥50% 且 42 高 Notes 不变」才续查 90 高生成；否则保持暂停。**当前：不续。**
-- **修法方向**：guest glyph/label tile 生成，不要把点线写进 42/90 高 tile；host 侧底行 discard 只能作为验证后的兜底，且不能削 descender/背板圆角。
-- **P1 仍未修复**；不要写「P1 已通过」。
+- **Photos**（P0-3 `tile-f121-t9-178x90`）：row61 = **54 px** 虚线，alpha max **247**；rows58–60/62 = 0。
+- **FaceTime**（s20 `tile-f171`）：row61/62 = **17/30 px**，alpha max **241/253**，共 **47 px**；rows58–60 = 0。
+- **Wallet**（`label-label-2`）：row58–61 = 42/32/32/40；**label-4**（y0=63）：row53–56 = 6/6/6/6。
+- Weather 屏幕 crop：label 113,433，row61 附近屏幕 y740/745 有 46/48 个亮点，x210–390（约 120 guest px），与 tile row 61 同位置。
+- 这些 tile 行**不是空行**（alpha 241–253，近不透明），所以 **B（采样放大）不成立**；虚线段是写进 90 高 label tile 底部行的。
+- **下一步（A）**：查 **guest glyph/label tile 生成侧** 的 row/stride/边界拷贝——130x42 glyph 纹理最后一行/虚线点如何写进 178x90 label tile；**不查 host sampler / linear / clamp**。最小改法草案见 `docs/gpu-acceleration-stage19-p1-ab-minimal.md`（只读，未实现）。
+- **P1 仍未修复**；修复实验进行中，不写「已修/已通过」。
 
 ### 4.33 P0 第三发 p0-3：3/3 PASS
 
