@@ -1,6 +1,6 @@
 # Stage 20 E1 — `ExtensionWatchdog=false` (30-minute timebox)
 
-**Verdict: C — need more information (inconclusive, not "infeasible").** The single
+**Verdict (at 21:13): C — need more information (inconclusive, not "infeasible"); final after control: C（不可判/不可行）.** The single
 700 s boot did not reach the extension phase: `checked in as alive` 0,
 `Extension is hanging` 0, `CHECK_IN_TIMEOUT` 0, and no extension exit code.  The
 only `EXC_CORPSE_NOTIFY` is **configd pid 22** (4 lines: launchd 2 + kernel 2),
@@ -9,6 +9,13 @@ not an extension.  The new system image boot is stuck at 2 frames / no UI
 reached the UI at 660 s and the first extension `hanging` at 611 s.  The 30-minute
 cap ended the experiment before the UI/extension phase; the watchdog-false effect
 could not be observed.
+
+> **Update after control (2026-11-10): final C（不可判/不可行）。** Control（system
+> `6be494f1`）到 UI 720s、hanging 10、CHECK_IN_TIMEOUT 10、alive 0；单变量
+> `a3a895b0` 只差 Watchdog，650s 已有 hanging → **`ExtensionWatchdog=false` 是坏键**；
+> check-in timeout 未解决，P2/P3 不重开，system 已恢复 `6be494f1`。详见
+> `docs/gpu-acceleration-stage20-e1-control.md`。下面的 “Why C/Next” 是当时记录；
+> “control 未跑”已不再适用。
 
 ## Build
 
@@ -51,7 +58,7 @@ the boot stop cannot be attributed to the plist false, to
 (ended 21:13:46) left no time for a control boot or a longer run; by the agreed
 rule, close as C and do not invest further.
 
-## Next (not run)
+## Next (control later run; historical plan)
 
 1. **Control:** same new system with `ExtensionWatchdog=true` /
    `CrashOnSIGTERMTimeout=true` for 700–900 s.  If it still stops at 2 frames,

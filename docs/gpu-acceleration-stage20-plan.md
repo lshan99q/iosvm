@@ -1,6 +1,6 @@
 # Stage 20 计划与 E1 收口：extension check-in
 
-> **状态：E1 已跑，终局 C（不可判/不可行），control 完成；P2/P3 未重开，system 恢复 6be494f1。** 本文件定义目标、E1、退出标准、不做清单、重开判据，并记录 E1 结果（§8）；**不预写 P2/P3 结论**。
+> **状态：E1 已跑，终局 C（不可判/不可行），control 完成；P2/P3 未重开；fallback5 仍是 P3 交付；system 恢复 6be494f1。** 本文件定义目标、E1、退出标准、不做清单、重开判据，并记录 E1 结果（§8）；**不预写 P2/P3 结论**。
 > 输入来自 stage 19 的 D4 移交：`docs/gpu-acceleration-stage19-decisions.md`、`docs/gpu-acceleration-stage19-closure.md`。
 
 ## 1. 目标
@@ -53,6 +53,8 @@
 4. **不在 E1 前跑 P2/P3**；不并发 boot/build；不用 4 vCPU。
 5. **不把 E1 的 A 当成 P2/P3 已通过**；A 只是允许进入重开判据。
 6. **不提交日志/截图/二进制**；只提交 `.md` 和可复现命令。
+7. **不倒腾 `ExtensionWatchdog` 布尔**：E1 已判 C；不再试 false/true 组合（干净单变量未做、当前不做）。
+8. **不为 byref/w15 追加性能实验**；**P1 不续**（除非满足 90 高定向 trim 判据）。
 
 ## 5. 若 E1 = A：P2/P3 重开判据
 

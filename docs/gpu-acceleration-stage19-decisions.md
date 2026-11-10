@@ -1,4 +1,4 @@
-# Stage 19 收口决定（D1–D7）
+# Stage 19 收口决定（D1–D8）
 
 - **Status:** Accepted
 - **Date:** 2026-11-09
@@ -182,6 +182,29 @@
 1. 换成多核/真 GPU 直通配置，重跑 by-reference/w15 得到不同的送帧/可用性结果；
 2. cell1 的 10.91 fps 在复跑中不成立，或 guest 时钟口径被证明有误。
 
+## D8. Stage 20 E1 = C（不可判/不可行）；P2/P3 不重开
+
+**决定**：Stage 20 的 E1（`ExtensionWatchdog=false`）最终判 **C（不可判/不可行）**；control 已完成，P2/P3 不重开，fallback5 仍是 P3 交付，system 恢复 `6be494f1`。
+
+**依据**：
+
+- E1（system `15167c8a…`，false/false）：700s `ui=0` / `biggest=24,960` / guestframes 2 / hostframes 2；`checked in as alive` 0、hanging 0、CHECK_IN_TIMEOUT 0；`EXC_CORPSE_NOTIFY` 4 条全是 configd pid22；extension 服务 0、`WILL_SPAWN` 68 全是 system jobs → **extension 根本没 spawn**。
+- Control（system `6be494f1…`，C1 三键）：900s 到 `ui=720s`、`ui_bytes=309280`、guestframes 32/hostframes 304；hanging **10**、CHECK_IN_TIMEOUT **10**、alive **0**、exit `0x3`；首个 PhotosReliveWidget[45] 666s → **重建不是瓶颈**。
+- 单变量 `a3a895b0`（Watchdog=true/Crash=false，只差 Watchdog）：650s 首 hanging `PeopleViewService.LockScreenPeopleWidget[44]`，共 6 条 → **`ExtensionWatchdog=false` 是坏键**；Crash false/重建都不是。
+- 结论：watchdog=false 不让 extension 活到 CheckIn，反而停 boot；control 仍 0 alive + 10 timeout/0x3 → **check-in timeout 未解决，不是单个 limits 布尔能修**。
+- system 已恢复 `6be494f1`；坏 `15167c8a` 备份 `/tmp/system.apfs.bak-s20-bad`。
+
+**影响**：
+
+- P2/P3 保持关闭、不重开；P3 fallback5 仍是交付项，不回退。
+- 不再倒腾 `ExtensionWatchdog` 布尔、不改 job、不盲调 `createImageSlot:`；不为 byref/w15 追加性能实验；P1 不续（除非满足 90 高定向 trim 判据）。
+- 干净单变量（C1 base + 只改 Watchdog=false、Crash=true）900–1200s 未做，当前不做；若 owner 另定再开。
+
+**何时可推翻**：
+
+1. check-in 协议/launchd 侧有可复现修复，且 extension 活过 60s/checked in；
+2. 干净单变量测试出现不同结果（需 owner 重新立项）。
+
 ## 阶段 20 移交接手清单（D4）
 
 - **最终证据编号**：**E5**（fallback5 PASS，P3 fallback 已交付）；E1–E4 见 D1（真路径不可行）。
@@ -203,3 +226,4 @@
 | D5 | 四格口径/脚本/dry-run | §八 | `e8a8ee7`、`9ce6e5b`、`b07d2da` |
 | D6 | 20s fps 不可比；改 120 帧窗口、cell1 guest 时钟 | §8.0 | `ea835b7` |
 | D7 | P4 终局：纯本地可用；byref/w15 不具可用性；cell4 未跑是判决 | §8.0、§8.7 | `93f5d2a`、`logs/s19o-p4-cells/attempt3-framewindow` |
+| D8 | Stage 20 E1=C；control 完成；P2/P3 不重开；system 6be494f1 | §8、`stage20-e1-control.md` | `cac2a73`、`6be494f1` |

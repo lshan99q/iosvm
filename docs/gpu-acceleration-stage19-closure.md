@@ -44,13 +44,13 @@
 
 ## 4. 复现入口
 
-- 决策：`docs/gpu-acceleration-stage19-decisions.md`（D1–D7，含每条的依据/影响/何时可推翻）。
+- 决策：`docs/gpu-acceleration-stage19-decisions.md`（D1–D8，含每条的依据/影响/何时可推翻）。
 - 实验手册：`docs/gpu-acceleration-stage19-p0-runbook.md`（§4.29 P3 收口、§4.31 fallback5、§八 P4、附录 extension check-in）。
 - 计划：`docs/gpu-acceleration-stage19-plan.md`（P0–P4 状态、不做清单、D7 终局）。
 - P4 归档：`logs/s19o-p4-cells/`（`four-cell.md`、`report.md`、`attempt3-framewindow/`、`attempt1-1256/`）。
 - P3 归档：`logs/s19o-p3-fallback5/`、`logs/s19o-p3-surface-enum/`、`logs/s19o-p3b-d3/`。
 - `make test-open` PASS；`make test` 的 `test-gpu` 因缺 `/usr/share/vulkan/icd.d/lvp_icd.json` 失败（环境问题，不是代码）。
 
-## 5. 待回填
+## 5. 回填状态
 
-**无。** P0 3/3 与 P1 C 终局均已回填；后续只按新实验更新。
+**全部已回填。** P0 3/3、P1 C 终局、E1 C/control 均已入档；后续只按新实验更新。
