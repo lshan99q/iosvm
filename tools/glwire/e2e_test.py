@@ -104,6 +104,10 @@ def main():
         raise SystemExit("e2e_test: FAIL: the old header layout drew a different picture")
     picture = picture_v2
 
+    painted = sum(1 for i in range(0, len(picture), 4) if any(picture[i:i + 3]))
+    print("e2e_test: painted %d of %d pixels (default path)" % (painted, len(picture) // 4))
+    if painted == 0:
+        raise SystemExit("e2e_test: FAIL: default host picture is all black")
     at = (2 * 4 + 2) * 4
     b, g, r, a = picture[at:at + 4]
     print("e2e_test: centre pixel B=%d G=%d R=%d A=%d" % (b, g, r, a))

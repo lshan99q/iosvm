@@ -13,6 +13,7 @@
  */
 #define GL_GLEXT_PROTOTYPES
 #include <EGL/egl.h>
+#include <errno.h>
 #include <EGL/eglext.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -259,6 +260,46 @@ recv_all(int fd, void *data, size_t bytes)
 		bytes -= (size_t)got;
 	}
 	return 1;
+}
+
+/* Stage 19 follow-up: the guest sends/receives a 4.9 MB picture each frame.  GLWIRE_SOCKBUF=<bytes>
+ * raises SO_RCVBUF/SO_SNDBUF on an accepted client; absent or <=0 leaves the default untouched. */
+static int
+host_socket_buffer(void)
+{
+	const char *value = getenv("GLWIRE_SOCKBUF");
+	char *end = NULL;
+	unsigned long parsed;
+
+	if (value == NULL || *value == '\0') {
+		return 0;
+	}
+	parsed = strtoul(value, &end, 0);
+	if (end == value || parsed < 65536UL) {
+		return 0;
+	}
+	if (parsed > 64UL * 1024UL * 1024UL) {
+		parsed = 64UL * 1024UL * 1024UL;
+	}
+	return (int)parsed;
+}
+
+static void
+host_apply_socket_buffer(int fd)
+{
+	int bytes = host_socket_buffer();
+
+	if (bytes <= 0) {
+		return;
+	}
+	if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes)) != 0 ||
+	    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes)) != 0) {
+		printf("host_glwire: socket buffer %d B not applied (errno %d)\n", bytes, errno);
+		fflush(stdout);
+		return;
+	}
+	printf("host_glwire: socket buffer %d B (GLWIRE_SOCKBUF)\n", bytes);
+	fflush(stdout);
 }
 
 static int
@@ -2087,6 +2128,9 @@ static int read_panel;              /* (stage 17: read the picture from the pane
 static GLuint panel_drawn_fbo;      /* the panel-sized target this frame last had a draw */
 static int panel_drawn_frame = -1;
 static int frame_delay_ms;          /* (stage 15: a deliberate per-frame delay, for the timing question) */
+/* GLWIRE_POLL_MS: bound the main loop's otherwise infinite poll.  It is a measurement knob, not a
+ * frame source: the host can only replay a frame after the guest sends it.  -1 keeps the old poll. */
+static int poll_timeout_ms = -1;
 static int fbo_client_fd = -1;
 static struct fbo_note fbo_notes[FBO_SEEN_MAX];
 static unsigned fbo_note_count;
@@ -4225,6 +4269,16 @@ main(int argc, char **argv)
 		keep_binding = keep == NULL || keep[0] != '0';
 	}
 	frame_delay_ms = getenv("GLWIRE_FRAME_DELAY_MS") != NULL ? atoi(getenv("GLWIRE_FRAME_DELAY_MS")) : 0;
+	{
+		const char *value = getenv("GLWIRE_POLL_MS");
+
+		if (value != NULL && value[0] != '\0') {
+			poll_timeout_ms = atoi(value);
+			if (poll_timeout_ms < 0) {
+				poll_timeout_ms = -1;
+			}
+		}
+	}
 	fbo_trace = getenv("GLWIRE_FBO_TRACE") != NULL;
 	/* (stage seventeen: the two probes for "the label composites and is then rebuilt over") */
 	panel_probe_on = getenv("GLWIRE_PANEL_PROBE") != NULL;
@@ -4296,7 +4350,8 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
-	printf("host_glwire: build marker uniform-ring-v2\n");
+	printf("host_glwire: build marker uniform-ring-v2 (poll %d ms%s, frame delay %d ms)\n",
+	    poll_timeout_ms, poll_timeout_ms < 0 ? ", infinite = wait for guest" : "", frame_delay_ms);
 	fflush(stdout);
 	printf("host_glwire: listening on %d%s%s\n", port,
 	    no_in_place ? " (GLWIRE_NO_INPLACE: the picture travels back instead)" : "",
@@ -4319,8 +4374,33 @@ main(int argc, char **argv)
 				nfds++;
 			}
 		}
-		if (poll(polled, (nfds_t)nfds, -1) < 0) {
-			continue;
+		if (poll_timeout_ms < 0) {
+			/* The default path is the pre-instrumentation loop, byte for byte: no timestamp,
+			 * no timeout branch, no idle formatting.  The new block below runs only when the
+			 * operator explicitly sets GLWIRE_POLL_MS. */
+			if (poll(polled, (nfds_t)nfds, -1) < 0) {
+				continue;
+			}
+		} else {
+			double began = now_seconds();
+			int ready = poll(polled, (nfds_t)nfds, poll_timeout_ms);
+
+			if (ready < 0) {
+				continue;
+			}
+			if (ready == 0) {
+				static double last_idle;
+
+				if (poll_timeout_ms > 0 && (last_idle == 0 || began - last_idle >= 1.0)) {
+					double gap = last_idle == 0 ? 0.0 : began - last_idle;
+
+					last_idle = began;
+					printf("host_glwire: poll idle %.2f s (timeout %d ms, no guest data)\n",
+					    gap, poll_timeout_ms);
+					fflush(stdout);
+				}
+				continue;
+			}
 		}
 		if (polled[0].revents & POLLIN) {
 			int fd = accept(listener, NULL, NULL);
@@ -4338,6 +4418,7 @@ main(int argc, char **argv)
 					clients[slot].surface = EGL_NO_SURFACE;
 					names_init(&clients[slot].names);
 					setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
+					host_apply_socket_buffer(fd);
 					printf("host_glwire: client %d connected\n", fd);
 					fflush(stdout);
 				}
