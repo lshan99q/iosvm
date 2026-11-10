@@ -5,7 +5,7 @@
 - **Owner:** lshan（总执行官）
 - **Scope:** stage 19 P2/P3 收口、extension check-in 移交、剩余时间转 P4
 - **Supersedes:** 无（本文件是 stage 19 的收口决定，不推翻历史实验记录）
-- **Related:** `docs/gpu-acceleration-stage19-p0-runbook.md`、`docs/gpu-acceleration-stage19-plan.md`、`docs/gpu-acceleration-stage19-closure.md`
+- **Related:** `docs/gpu-acceleration-stage19-p0-runbook.md`、`docs/gpu-acceleration-stage19-plan.md`、`docs/gpu-acceleration-stage19-closure.md`、`docs/gpu-acceleration-gpu-passthrough-assessment.md`
 
 > 本文件只记录决定与依据；实验数字仍以 runbook 各节的原始日志/报告为准。每条决定都给出「何时可推翻」，避免以后把收口当成永久结论。
 

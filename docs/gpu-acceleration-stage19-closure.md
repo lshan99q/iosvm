@@ -47,6 +47,7 @@
 - 决策：`docs/gpu-acceleration-stage19-decisions.md`（D1–D8，含每条的依据/影响/何时可推翻）。
 - 实验手册：`docs/gpu-acceleration-stage19-p0-runbook.md`（§4.29 P3 收口、§4.31 fallback5、§八 P4、附录 extension check-in）。
 - 计划：`docs/gpu-acceleration-stage19-plan.md`（P0–P4 状态、不做清单、D7 终局）。
+- 路线评估：`docs/gpu-acceleration-gpu-passthrough-assessment.md`（为什么不做 GPU 直通；glwire 现状；三条路线与代价）。
 - P4 归档：`logs/s19o-p4-cells/`（`four-cell.md`、`report.md`、`attempt3-framewindow/`、`attempt1-1256/`）。
 - P3 归档：`logs/s19o-p3-fallback5/`、`logs/s19o-p3-surface-enum/`、`logs/s19o-p3b-d3/`。
 - `make test-open` PASS；`make test` 的 `test-gpu` 因缺 `/usr/share/vulkan/icd.d/lvp_icd.json` 失败（环境问题，不是代码）。
