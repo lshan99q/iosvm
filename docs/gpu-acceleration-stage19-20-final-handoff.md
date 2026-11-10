@@ -12,7 +12,8 @@
 | **对照** | **`6be494f1…`**（C1） | **89.50%** | keep `/tmp/system-6be494f1.keep` |
 
 - **P0 历史 3/3 通过，但当前不可稳定复现**：8bf5 同配方两次 99.99/89.56；6be ~89.50。**8bf5 是必要条件但不是充分条件**；单次 99.99 不能当基线。
-- 门禁至少要 **2–3 次 boot 统计**；任何实验 report 必须写 **system md5**，否则不可比。
+- 门禁至少要 **2–3 次 boot 统计**；任何实验 report 必须写 **system md5 + lib md5**，否则不可比。
+- **P0 判据待重定义**：由「单次同帧 diff ≥95%」改为「**最佳相邻配对 ≥95%**（若 exp 配对矩阵证明确有这种配对），否则降级为**内容判据**（≥5 可读名称 + 截图 ≥300KB + panel/picture MATCH + 无 panic）。口径未定前，P0 一律写「历史证据，复现不稳」。
 - 不写「P0 已稳定/当前可复现」；也不写「P0 3/3 被推翻」——是「历史通过、当前不稳定」。
 - 若要用 6be 或别的 system 当基线，必须**重新定义 P0 判据**（按该 system 的 ~89.5% 重设阈值，或改成不依赖同帧配对）——**待定**。
 
@@ -22,7 +23,7 @@
 
 | 项 | 终局 | 一句话依据 |
 |---|---|---|
-| **P0** | **历史 3/3；当前不可稳定复现** | 历史：v7 99.85%、v9 99.98%、p0-3 98.81%（8bf5）。当前 8bf5 同配方：12:52 **99.99%**、15:42 **89.56%**（missing 9.60%，bbox 46,142–729,1603）；6be ~89.50%。8bf5 必要但不充分；单次 99.99 不能当基线，门禁需 2–3 次 boot。 |
+| **P0** | **历史 3/3；当前不可稳定复现；判据待重定义** | 历史：v7 99.85%、v9 99.98%、p0-3 98.81%（8bf5）。当前 8bf5 同配方：12:52 **99.99%**、15:42 **89.56%**（missing 9.60%，bbox 46,142–729,1603）；6be ~89.50%。→ 单配对指标不稳；**P0 判据待改为最佳相邻配对或内容判据**，口径未定前只写「历史证据，复现不稳」。 |
 | **P1** | **重开后判 A、修复中（未修复）** | 虚线段在 90 高 label tile 底部行：Photos row61 54px/alpha247、FaceTime 61–62 47px、Wallet 58–61、label-4 53–56；B 采样放大已排除。第一次 `glyph_last_row=1` FAIL（Weather 掉笔画、虚线仍在）；`label_dash_rows=53-62` crash；`61-62` 无效果。修法只走 label tile row61/62，验收 guest 截图；P1 未修复。 |
 | **P2** | **关闭/未达成** | lookup 已修、PosterBoard running，但壁纸 window/PBUI 远程 VC 链在屏而 contents=0；根因与 P3 同源：extension check-in timeout；四路径走完，不再投入 |
 | **P3** | **真路径不可行 + fallback5 已交付** | surface 枚举 30 面无 widget 候选；allContexts 按进程；无零参 snapshot；extension exec 后 ~0.5s 死亡；guest-side 占位（24px 棋盘+白框+双黄对角线）PASS，明确非真 widget |
@@ -80,11 +81,12 @@ P1 重开后判 **A（tile 内容/行映射）**：虚线段写在 90 高 label 
 
 cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、cell3 2 帧/772s），不是 host 回放能力问题（host 单帧 29.6–59.0 ms，16–33 fps 能力）。**要谈性能必须换配置**：多核 guest、GPU 直通/更快的 GL 路径、或减少 wire 数据量；当前配置下不再追加性能实验。
 
-### 3.4 `s20-ack50b` 不可作为结论（已安排重跑）
+### 3.4 ack 实验状态 = 未判定（tooling 坏）
 
-- `s20-ack50b` 的 **UI 未起、host 0 帧、ack timeout 仅 2 次且是 frame dropped**；不能拿它当「ack 50ms」结论。
-- 已安排重跑：**先 isolate，再 ack 版**；在重跑结果出来前，不写 ack 参数有效/无效。
-- 来源：`docs/gpu-acceleration-stage20-ack50.md`、`logs/s20-ack50b/`。
+- `s20-ack785` / `s20-ack785b` 的 **UI 没起**，是 lib **`4a7cd6` 的 boot 回归**，**不是 ack 假设被否**；不能写「ack 不是瓶颈」。
+- 状态：**未判定（tooling 坏）**；需在 lib 修复/回退后重跑，先 isolate 再 ack 版。
+- **lib 时间线**：`4a7cd6` 会让 UI 起不来；已回退/待修。所有实验 report 必须写 **lib md5 + system md5**。
+- 来源：`docs/gpu-acceleration-stage20-ack785.md`、`docs/gpu-acceleration-stage20-ack785b.md`、`docs/gpu-acceleration-stage20-iso785.md`、`logs/s20-ack785b/`。
 
 ## 4. 「不做」清单（避免下一阶段重复烧时间）
 
@@ -100,7 +102,7 @@ cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、
 
 ## 5. 能否作为交付基线
 
-**P0 不能作为当前可复现交付基线**：历史 3/3 通过；当前 8bf5 同配方 99.99%（12:52）/89.56%（15:42）不一致，6be ~89.50%；**复现性未达标**。8bf5 原件/keep 保留，但 8bf5 只是必要条件；门禁需 2–3 次 boot 统计，任何实验 report 必须写 system md5。
+**P0 不能作为当前可复现交付基线**：历史 3/3 通过；当前 8bf5 同配方 99.99%（12:52）/89.56%（15:42）不一致，6be ~89.50%；**单配对指标不稳，判据待重定义**。8bf5 原件/keep 保留，但 8bf5 只是必要条件；门禁需 2–3 次 boot 统计，report 必须写 system md5 + lib md5。
 
 **可作为历史交付证据**：P3 有明确标注的非真 widget 占位；P4 有 `0x502=0` 与唯一可用 cell1 fps。
 

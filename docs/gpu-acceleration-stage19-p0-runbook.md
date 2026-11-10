@@ -2282,7 +2282,7 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - **不是 v8 89.53%**：本发 missing 0、cross 100%；extra **14,555 px（1.19%，box 54,1092,173,1253）**只是一个小 UI 元素，不是加载动画采样错位。
 - 截图有 `rdar:45025538` overlay + 右缘首帧竞态；800s dump 是更晚的干净 pair，**不影响 P0 三条判据**。
 - 首发作废：18:51 误用 root-local（无 `GLREMOTE`，host 0 帧）；19:01 换 `/tmp/root-byref.apfs` 3207a35e（v9 同类）重起；P0 渲染 flag 未改。
-- **P0 历史 3/3 通过，但当前不可稳定复现**：历史 v7 99.85/v9 99.98/p0-3 98.81（8bf5）；8bf5 同配方 12:52 **99.99%**、15:42 **89.56% <95**；6be ~89.50%。**8bf5 必要但不充分**；单次 99.99 不能当基线，门禁需 2–3 次 boot。原件 `/tmp/system.apfs.bak-s20` / keep `/tmp/system-8bf5f838.keep`；6be keep `/tmp/system-6be494f1.keep`；任何实验 report 必须写 system md5。不要再用 v8 89.53% 当反例，也不要写「2/3」。
+- **P0 历史 3/3 通过，但当前不可稳定复现**：历史 v7 99.85/v9 99.98/p0-3 98.81（8bf5）；8bf5 同配方 12:52 **99.99%**、15:42 **89.56% <95**；6be ~89.50%。**8bf5 必要但不充分**；单次 99.99 不能当基线，门禁需 2–3 次 boot；**P0 判据待重定义**（最佳相邻配对 ≥95% 或内容判据），口径未定前只写「历史证据，复现不稳」。原件 `/tmp/system.apfs.bak-s20` / keep `/tmp/system-8bf5f838.keep`；6be keep `/tmp/system-6be494f1.keep`；任何实验 report 必须写 system md5 + lib md5；`4a7cd6` 会让 UI 起不来，ack785/785b 未判定。不要再用 v8 89.53% 当反例，也不要写「2/3」。
 
 ## 五、铁律与提交
 
@@ -2789,6 +2789,6 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | D6 | **P4 fps 判据改 120 帧计数窗口** | 20s 窗口只有 2–9 帧、仍在 UI 重建期，fps 不可比；改用 `WINDOW_FRAMES=120`，cell1 `WINDOW_CLOCK=guest`；当前只写 0x502 通过，不写性能达标 |
 | D7 | **P4 终局：纯本地可用；byref/w15 不具可用性** | cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2 183/343≈0.04 fps；cell3 2 帧/772,366ms≈0.003 fps、host frame 250；cell4 未跑是判决；0x502 四格全 0；不写性能达标 |
 | D8 | **Stage 20 E1=C（不可判/不可行）** | E1 false 700s 2帧/无UI；control 6be494f1 UI720/hanging10/timeout10/alive0；a3a895b0 只差 Watchdog→650s 有 hanging；P2/P3 不重开；system 恢复 |
-| D9 | **P0 历史 3/3；当前不稳定（8bf 99.99/89.56）** | 8bf5 同配方两次 99.99/89.56；6be 89.50%；8bf5 必要但不充分；门禁需 2–3 boot；任何实验 report 必须写 system md5 |
+| D9 | **P0 历史 3/3；当前不稳定（8bf 99.99/89.56）** | 8bf5 同配方两次 99.99/89.56；6be 89.50%；8bf5 必要但不充分；门禁需 2–3 boot；P0 判据待重定义；report 必须写 system+lib md5 |
 
 > 追溯：D1 见 §4.28/§4.30/附录 extension check-in；D2 见 §4.29/§4.31；D3 见 §4.22–§4.25；D4 见 §4.24/§4.25/附录 extension check-in；D5 见 §八。提交列表见 decisions.md 的追溯表。

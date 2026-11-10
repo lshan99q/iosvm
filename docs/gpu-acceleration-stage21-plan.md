@@ -14,7 +14,8 @@
 | **对照** | **`6be494f1…`**（C1） | **89.50%** | keep `/tmp/system-6be494f1.keep` |
 
 - **P0 历史 3/3 通过，但当前不可稳定复现**：8bf5 同配方 99.99/89.56；6be ~89.50%。**8bf5 必要但不充分**；单次 99.99 不能当基线。
-- 门禁至少 **2–3 次 boot**；任何实验 report 必须写 **system md5**，否则不可比。
+- 门禁至少 **2–3 次 boot**；任何实验 report 必须写 **system md5 + lib md5**，否则不可比。
+- **P0 判据待重定义**：单配对 99.99/89.56 说明「单次同帧 diff ≥95%」不稳。候选：①**最佳相邻配对 ≥95%**（若 exp 配对矩阵证明确有这种配对）；②否则降级为**内容判据**（≥5 可读名称 + 截图 ≥300KB + panel/picture MATCH + 无 panic）。口径未定前，P0 只写「历史证据，复现不稳」。
 - 不写「P0 已稳定/当前可复现」，也不写「P0 被推翻」；是「历史通过、当前不稳定」。
 - 若要用 6be 或别的 system 当基线，必须**重新定义 P0 判据**（按 ~89.5% 重设阈值或改成不依赖同帧配对）——**待定**。
 
@@ -39,11 +40,12 @@
   - `0x502` 仍为 0；画面/P0 三判据不回归。
 - **失败**：候选 1 未建立 → 按 Phase 2 第 5 条转 host 回放侧/guest 合成侧，不再单独调 host buffer。
 
-### 0.3 `s20-ack50b` 不可作为结论（已安排重跑）
+### 0.3 ack 实验 = 未判定（tooling 坏）
 
-- `s20-ack50b`：**UI 未起、host 0 帧、ack timeout 仅 2 次且是 frame dropped**；不能当 ack 50ms 的结论。
-- 已安排重跑：**先 isolate，再 ack 版**；重跑前不写 ack 参数有效/无效。
-- 来源：`docs/gpu-acceleration-stage20-ack50.md`、`logs/s20-ack50b/`。
+- `s20-ack785` / `s20-ack785b` 的 **UI 没起**，是 lib **`4a7cd6` 的 boot 回归**；**不是 ack 假设被否**，不能写「ack 不是瓶颈」。
+- 状态：**未判定（tooling 坏）**；lib 修复/回退后重跑，先 isolate 再 ack 版。
+- **lib 时间线**：`4a7cd6` 会让 UI 起不来；已回退/待修。所有实验 report 必须写 **lib md5 + system md5**。
+- 来源：`docs/gpu-acceleration-stage20-ack785.md`、`docs/gpu-acceleration-stage20-ack785b.md`、`docs/gpu-acceleration-stage20-iso785.md`。
 
 ## Phase 1：视觉完整性（P1 之后最高优先）
 
@@ -89,7 +91,7 @@
 ## Phase 3：工程化交付
 
 1. **一条命令复现**：建齐四格镜像（cell3/cell4 可共用一份，按 §8.1）→ 跑四格 → 出表 → 与基线比对。
-2. **门禁脚本**：P0 三判据 + P1 虚线 + 壁纸 + `0x502`，一条命令出 PASS/FAIL。
+2. **门禁脚本**：P0 判据（待定：最佳相邻配对或内容判据）+ P1 虚线 + 壁纸 + `0x502`，一条命令出 PASS/FAIL。
 3. **移交更新**：stage 21 状态、已知限制、复现入口；**virtio-gpu 仅保留评估，不启动**（大工程，见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`）。
 
 ## 判定规则
