@@ -37,3 +37,10 @@ the 178x90 label FBO.  Additionally the P0 same-frame diff regressed to
 - Do not use 53-62; 61-63 currently no-ops (skips) and P0 diff is down.
 
 Artifacts: `/host/iosvm/logs/s20-p1-labeldash-final/`.
+
+## Note on the 84.52% (pairing misalignment, NOT P0 regression)
+
+The 84.52% same-frame number is a **one-frame pairing offset**, not a content
+regression: `check_panel` cross pairing (`picture(N)==panel(N+1)`) is **100.00%**,
+and the 188,776 missing px sit in the widget band (46,142–479,799).  Treat it as
+a diff alignment artifact, not a P0 content regression.
