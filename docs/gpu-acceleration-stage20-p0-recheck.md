@@ -36,3 +36,24 @@ failure.
   isolate; but 59.57 is flagged now per instruction.
 
 Artifacts: `/host/iosvm/logs/s20-p0-recheck/`.
+
+## Isolate results (A/B) — 2026-11-10 11:18–11:52
+
+| boot | lib | host | system | f-panel vs f-picture |
+|---|---|---|---|---|
+| P0-3 | old | 28f484a1 | 8bf5f838 | **98.82%** |
+| recheck | 4a7cd6 | 2be814a7 | 6be494f1 | 59.57% (f-picture black) |
+| isolate A | 4a7cd6 | **28f484a1** | 6be494f1 | **89.44%** (content) |
+| isolate B | 568fa11e (P0-3 old) | **28f484a1** | 6be494f1 | **89.35%** (content) |
+
+- **Host 2be814a7 is the 59.57 cause**: its f-picture is 100% black; the old
+  host 28f restores a content f-picture (A/B), so 59.57 is a host dump/replay
+  artifact, not a render regression.
+- **Lib/root variable ruled out**: A (lib 4a7cd6) 89.44 vs B (P0-3 lib 568fa11e)
+  89.35 — no difference.
+- **Remaining ~9.6%**: the system `6be494f1` (SpringBoard content/layout vs
+  `8bf5f838`).  `8bf5f838` is no longer on disk; the system cannot be A/B'd, so
+  it is an unexcluded variable — do not claim it disproved.
+- With the current system the P0 same-frame diff is **89.35% <95**, so the P0
+  diff criterion fails on the current system; screenshot (321 K) and names are
+  fine, so this is a system content difference, not a render break.
