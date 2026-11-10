@@ -40,6 +40,7 @@
 | 编译环境 | runbook 附录 C | `/host/iosvm-work/toolchain/` | `cefbe6f` |
 
 补充：Stage 19 一页收口 `docs/gpu-acceleration-stage19-closure.md`；决策 `docs/gpu-acceleration-stage19-decisions.md`（D1–D7）；计划 `docs/gpu-acceleration-stage19-plan.md`、`docs/gpu-acceleration-stage20-plan.md`。
+交付自检（镜像/测试/归档/分支）：`docs/gpu-acceleration-stage19-20-delivery-selfcheck.md`。
 
 ## 3. 未解决项与建议
 
