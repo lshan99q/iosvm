@@ -3,7 +3,7 @@
 > **状态：2026-11-10 更新。** P0 3/3 PASS；P1 重开后判 A、修复中（未修复）；P2 未达成；P3 真路径不可行 + fallback5 已交付；P4 0x502 通过。
 > 本页只做索引和结论，不重复实验细节；所有数字以 runbook/decisions/logs 为准。
 > 不写 P1/P2/P3 真路径通过；不写性能达标。
-> **下一阶段计划**：`docs/gpu-acceleration-stage20-plan.md`（E1 `ExtensionWatchdog=false`，30 分钟限时；**E1 终局 C（不可判/不可行），control 完成；P2/P3 未重开；fallback5 仍是 P3 交付；system 恢复 6be494f1**）。
+> **下一阶段计划**：`docs/gpu-acceleration-stage20-plan.md`、`docs/gpu-acceleration-stage21-plan.md`（E1 `ExtensionWatchdog=false`，30 分钟限时；**E1 终局 C（不可判/不可行），control 完成；P2/P3 未重开；fallback5 仍是 P3 交付；system 恢复 6be494f1**）。
 
 ## 1. 一页状态
 

@@ -176,3 +176,5 @@
 - 若 socket 缓冲无提升：候选 1 降级，再测 `glwire_noflush=1`（候选 3）和 `GLWIRE_FRAME_DELAY_MS=1000`（候选 2）；**不要同时改协议和缓冲**。
 - **第一次验证（2026-11-10）：候选 1 未成立。** host 8MB 生效，但 guest `setsockopt` **errno 55 (ENOBUFS)**，只有单侧生效；cell3 host 窗口 **1.07 → 0.46 fps（更差）**，cell1 护栏 **10.91 fps 不变**。见 `logs/s20-framesync/report.md`。**不写已优化**；先修 guest ENOBUFS 再判候选 1。
 - 未跑完；不把审计当「已修复」。
+
+> 后续路线图（文字修好之后）：`docs/gpu-acceleration-stage21-plan.md`；Phase 0 从 P1 最后定向修 + 帧同步 clamp 复测开始。
