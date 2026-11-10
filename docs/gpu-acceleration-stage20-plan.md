@@ -56,6 +56,8 @@
 7. **不倒腾 `ExtensionWatchdog` 布尔**：E1 已判 C；不再试 false/true 组合（干净单变量未做、当前不做）。
 8. **不为 byref/w15 追加性能实验**；P1 判 A、修复中，**不查 host sampler / linear / clamp**（B 已排除），只查 guest glyph/label tile 生成/行映射。
 9. **不擅自改宿主 GPU 驱动 / vfio**：直通评估判不可行；不 unbind/bind、不重装驱动、不改 IOMMU/GRUB。
+10. **不再 scrub glyph last row**：`glyph_last_row=1` 已 FAIL；P1 只改 label tile row61/62。
+11. **不再单独调 host 侧 socket buffer**：必须 guest `setsockopt` 成功且两侧同时生效，才判候选 1。
 
 ## 5. 若 E1 = A：P2/P3 重开判据
 
@@ -172,4 +174,5 @@
 - **用 env 开关控制，默认不变**（具体变量名按 code 实现）；不改渲染/协议/镜像；cell1 没有 socket，不受影响。
 - 对照实验：cell3（`GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1`）+ **cell1 护栏**（确认本地不受影响）；记录 guest `f N wait`、host `frame ... ms`、`0x502` 仍为 0。
 - 若 socket 缓冲无提升：候选 1 降级，再测 `glwire_noflush=1`（候选 3）和 `GLWIRE_FRAME_DELAY_MS=1000`（候选 2）；**不要同时改协议和缓冲**。
-- 未跑；不把审计当「已修复」。
+- **第一次验证（2026-11-10）：候选 1 未成立。** host 8MB 生效，但 guest `setsockopt` **errno 55 (ENOBUFS)**，只有单侧生效；cell3 host 窗口 **1.07 → 0.46 fps（更差）**，cell1 护栏 **10.91 fps 不变**。见 `logs/s20-framesync/report.md`。**不写已优化**；先修 guest ENOBUFS 再判候选 1。
+- 未跑完；不把审计当「已修复」。

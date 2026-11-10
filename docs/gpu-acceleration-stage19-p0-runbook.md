@@ -2270,6 +2270,7 @@ id 14 28x65, 15 28x95, 16 28x28, 17 6x85, 18 6x6, 26 19x19（装饰面）
 - Weather 屏幕 crop：label 113,433，row61 附近屏幕 y740/745 有 46/48 个亮点，x210–390（约 120 guest px），与 tile row 61 同位置。
 - 这些 tile 行**不是空行**（alpha 241–253，近不透明），所以 **B（采样放大）不成立**；虚线段是写进 90 高 label tile 底部行的。
 - **下一步（A）**：查 **guest glyph/label tile 生成侧** 的 row/stride/边界拷贝——130x42 glyph 纹理最后一行/虚线点如何写进 178x90 label tile；**不查 host sampler / linear / clamp**。最小改法草案见 `docs/gpu-acceleration-stage19-p1-ab-minimal.md`（只读，未实现）。
+- **第一次修复 FAIL（2026-11-10）**：`glyph_last_row=1` 清的是 **42 高 glyph 最后一行（笔画底部）**，不是 label tile 的虚线行；结果 Weather 掉笔画、54px 虚线仍在。`diffdump` 99.50% SAME 只是数值过线，但「Notes/Weather 不回归」不达标。修法改向 **label tile 的虚线行（178x90 row61/62）**，验收面 = **guest 截图**（不是 host tile dump 原始指针）。见 `logs/s20-p1-validation/report.md`。
 - **P1 仍未修复**；修复实验进行中，不写「已修/已通过」。
 
 ### 4.33 P0 第三发 p0-3：3/3 PASS
@@ -2633,6 +2634,7 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - **结论固定**：**纯本地可用；by-reference / w15 在 TCG 单核 + softpipe 下不具可用性（guest 送帧停摆，不是没测）**。
 - **不写「性能达标」**；cell1 的 10.91 fps 是可用性数字，不是性能目标。
 - **不再为 by-reference / w15 追加性能实验**，除非换配置（多核/真 GPU 直通）另立项。
+- **镜像缺口**：`/tmp/root-w15w3.apfs`（cell4 的 root）当前缺失；后续要用需按 §8.1 重建，不要拿别的 root 冒充。
 
 ### 8.8 收尾清单
 

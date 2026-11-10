@@ -10,10 +10,10 @@
 | 项 | 最终状态 | 判据/证据 |
 |---|---|---|
 | **P0** | **3/3 PASS** | v7 330,931 B/10+2/99.85%；v9 326,461 B/10+2/99.98%；**p0-3 327,177 B/≥14/98.81%**（`end=ui` 660s, `ui_bytes=310605`, hostframes 1080, panic 0）。不是 v8 89.53%；extra 14,555 px（1.19%）只是小 UI；overlay/右缘首帧竞态不影响三判据。见 §4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`。 |
-| **P1** | **重开后判 A，修复中（未修复）** | 虚线段写在 **90 高 label tile 底部行**（guest 生成/行映射）：Photos row61 **54 px/alpha 247**；FaceTime row61–62 **47 px/alpha 241,253**；Wallet 58–61；label-4 53–56。**B（采样放大）已排除**（tile 行不是空行）。修复方向在 guest glyph/label tile 生成侧，不是 host sampler/linear/clamp。见 §4.32、`logs/s20-p1-54px-dash/report.md`。**P1 未修复，不许写已修。** |
+| **P1** | **重开后判 A，修复中（未修复）** | 虚线段写在 **90 高 label tile 底部行**（guest 生成/行映射）：Photos row61 **54 px/alpha 247**；FaceTime row61–62 **47 px/alpha 241,253**；Wallet 58–61；label-4 53–56。**B（采样放大）已排除**（tile 行不是空行）。修复方向在 guest glyph/label tile 生成侧，不是 host sampler/linear/clamp。**第一次修复 FAIL**：`glyph_last_row=1` 清到 42 高 glyph 最后一行，Weather 掉笔画、虚线仍在；改向 label tile row61/62，验收看 guest 截图（`logs/s20-p1-validation/report.md`）。见 §4.32、`logs/s20-p1-54px-dash/report.md`。**P1 未修复，不许写已修。** |
 | **P2** | **关闭，未达成** | P2d 四 job、P2e C1 limits、C2 xpcproxy、根因审计四路径走完；根因与 P3 同源 **extension check-in timeout**。不再投入（D3）。 |
 | **P3** | **真路径不可行 + fallback5 已交付** | 真路径 D1 不可行；guest-side placeholder（拉面）fallback5 PASS，yellow 13,733/white 11,174/black 1,825；**是占位，不是真 widget**。见 §4.29/§4.31、D1/D2。 |
-| **P4** | **0x502 通过；仅 cell1 可用** | `0x502` 四格历史全 0；**cell1-pure 120 帧/11.00s=10.91 fps（guest）唯一可用**；cell2 183/343≈0.04 fps、cell3 2 帧/772,366ms≈0.003 fps，均不可用；**cell4 NOT RUN 是判决，不是漏跑**。见 §8.7、D7。 |
+| **P4** | **0x502 通过；仅 cell1 可用** | `0x502` 四格历史全 0；**cell1-pure 120 帧/11.00s=10.91 fps（guest）唯一可用**；cell2 183/343≈0.04 fps、cell3 2 帧/772,366ms≈0.003 fps，均不可用；**cell4 NOT RUN 是判决，不是漏跑**；`/tmp/root-w15w3.apfs`（cell4 root）当前缺失，后续要用需重建。见 §8.7、D7。 |
 
 ## 2. 未达成项 / 边界
 
