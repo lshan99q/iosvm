@@ -7,7 +7,7 @@
 > UV 数据在 UI 阶段损坏；见 `IOSVM-GPU加速第十八阶段工程.md`）
 > 本文只回答：**下一阶段做什么、每件事的判据、怎么验、不做什么**
 >
-> **收口包**：`docs/gpu-acceleration-stage19-closure.md`（一页最终状态/未达成/移交/复现；P0 第三发待回填）
+> **收口包**：`docs/gpu-acceleration-stage19-closure.md`（一页最终状态/未达成/移交/复现；P0/P1/E1 已回填）
 
 ---
 
@@ -285,7 +285,8 @@ glwire: label draw #74 ...  866 nonzero pixels
 4. **不再说「合完 label 整个面板重建」**：逐笔哈希已推翻（第十七阶段 §十一）。
 5. **不动内核**：本阶段是客人机用户态 + 宿主。
 6. **不再为 by-reference / w15 追加性能实验**：TCG 单核 + softpipe 下 guest 送帧停摆已判不可用；除非换配置（多核/真 GPU 直通）另立项。
-7. **不再为 P1 起 boot**：90 高背板判否/不续；只有「90 高定向 trim 后至少两个 90 高标签带下降 ≥50% 且 42 高 Notes 不变」才续查，除非 owner 另定。
+7. **不再为 P1 起 boot**：P1 终局 C，不续；只有「90 高定向 trim 后至少两个 90 高标签带下降 ≥50% 且 42 高 Notes 不变」才续查，除非 owner 另定。
+8. **不倒腾 `ExtensionWatchdog` 布尔**：E1 已判 C，`ExtensionWatchdog=false` 是坏键；不改 job、不盲调 `createImageSlot:`（D8）。
 
 ---
 

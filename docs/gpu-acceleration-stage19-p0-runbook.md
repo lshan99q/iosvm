@@ -2103,7 +2103,7 @@ UIWindowLayer "colour ( 0 1 )"
 
 > **状态：正式收口。** 真路径判定 **不可行**（D1）；guest-side placeholder **fallback5 PASS**（D2），已交付。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不写「可行」。
 
-> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D7**。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不要写「可行」。
+> 本节是收口表；完整决定/依据/影响/可推翻条件见 **decisions D1–D8**。P3 最终结论：**不可行（真路径）+ 已交付 fallback（拉面占位，非真 widget）**；不要写「可行」。
 
 **Surface 枚举（2026-11-09 10:51Z，独立探针）**
 
@@ -2499,7 +2499,7 @@ grep -a -E 'PosterBoard|posterboardservices|failed lookup|SIGSEGV|panic\(' /tmp/
 
 ---
 
-## 八、P4 四格表与收尾（可直接执行，结果待填）
+## 八、P4 四格表与收尾（结果已填）
 
 > **状态：第二次实跑已完成（2026-11-09 13:25–14:27Z）。** `host 0x502` **四格全 0，P4 判据通过**；但 20s 窗口 fps 很低（0.00/0.10/0.46/0.20），**只是 0x502 判据通过，不写性能达标**。稳定态窗口未做，见 §8.0 说明。
 
@@ -2618,7 +2618,7 @@ make test          # test-open（provenance + proto，如果 submodule 已取）
 - host 帧：cell3 截图窗口从 `frame 128` 开始；frame128 = 82,080 records / **0 image refs**，frame129 = **236,026 records / 48 image refs（1,239,821 B）** 才是完整 home-screen；cell4 也在 frame 174 出现同量级完整帧。截图撞在第一张完整帧前。
 - cell1/2 是 guest 本地 scanout，没有 host replay 半帧窗口；cell3 红条 `rdar:45025538` 是 SpringBoard debug overlay，只在 cell3 出现，**不是 w15 dock 根因**。
 - 验证方案（**未跑**）：同 cell3/4 镜像，UI 后等 10s 再截 + `GLWIRE_DUMP` 同 late frame；裁 `x>562,y>1300` 与右 dock。late 全 → 截图时序；picture 全/scanout 半 → writeback 竞态；都半 → replay 源/裁剪。
-- attempt3 帧计数四格跑中：`four-cell.sh` 已支持 `WINDOW_FRAMES`/`WINDOW_SPAN`/`WINDOW_CLOCK`（cell1 guest、其余 host）与 `frame-window` 解析（code `e41a47a`，远端 `93f5d2a`）；结果待填。
+- attempt3 帧计数四格只到 cell2/cell3（cell4 按判决未跑），结果已收口到 D7/§8.7；`four-cell.sh` 已支持 `WINDOW_FRAMES`/`WINDOW_SPAN`/`WINDOW_CLOCK`（cell1 guest、其余 host）与 `frame-window` 解析（code `e41a47a`，远端 `93f5d2a`）。
 - **结论口径**：cell3/4 的部分主屏可能是截图时序，不是 w15 功能差异；P4 仍只写 `0x502` 通过，**不写性能达标 / 画面完整达标**。
 
 ### 8.7 P4 最终结论（D7，2026-11-09）
@@ -2774,7 +2774,7 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 `host 0x502` 只数宿主日志 `glerror 0x502` 行；`ui/frames/fps/span/shot B` 与 CSV 同表。正式四格仍等 P4 镜像。
 
 
-## 附录 D：阶段 19 收口决定 D1–D7（摘要）
+## 附录 D：阶段 19 收口决定 D1–D8（摘要）
 
 完整记录（决定/依据/影响/何时可推翻）见 **`docs/gpu-acceleration-stage19-decisions.md`**；一页状态/未达成/移交/复现见 **`docs/gpu-acceleration-stage19-closure.md`**。
 
@@ -2787,5 +2787,6 @@ PREBUILT=1 IOSVM_USE_LLD=1 GL=1 GLREMOTE=1 CONFIGD=1 RC=rc.vtop ./build.sh
 | D5 | **剩余时间全部转 P4 四格表实跑** | 三份镜像/四格 × 20s、host `0x502`=0、`make test`；dry-run 不算实测，四发真 QEMU 后填 |
 | D6 | **P4 fps 判据改 120 帧计数窗口** | 20s 窗口只有 2–9 帧、仍在 UI 重建期，fps 不可比；改用 `WINDOW_FRAMES=120`，cell1 `WINDOW_CLOCK=guest`；当前只写 0x502 通过，不写性能达标 |
 | D7 | **P4 终局：纯本地可用；byref/w15 不具可用性** | cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2 183/343≈0.04 fps；cell3 2 帧/772,366ms≈0.003 fps、host frame 250；cell4 未跑是判决；0x502 四格全 0；不写性能达标 |
+| D8 | **Stage 20 E1=C（不可判/不可行）** | E1 false 700s 2帧/无UI；control 6be494f1 UI720/hanging10/timeout10/alive0；a3a895b0 只差 Watchdog→650s 有 hanging；P2/P3 不重开；system 恢复 |
 
 > 追溯：D1 见 §4.28/§4.30/附录 extension check-in；D2 见 §4.29/§4.31；D3 见 §4.22–§4.25；D4 见 §4.24/§4.25/附录 extension check-in；D5 见 §八。提交列表见 decisions.md 的追溯表。
