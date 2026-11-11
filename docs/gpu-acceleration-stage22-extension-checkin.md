@@ -165,3 +165,45 @@ Decision:
 If boot 2 gets the serial and answers H1, boot 3 is only for H2 vs H3 (a live-pid sample).  If the
 serial is still missing, stop: the budget is better spent on a serial-capture fix than another
 content boot.
+
+## 6. Boot 3 (last budget): sample the live extension with the kernel's `ustacks`
+
+ext2 showed the extensions alive after `launchd_disable_all_timeouts=1` (no hang/kill) but still
+**0 `checked in as alive`**.  The remaining H2/H3 split is exactly "where is the live extension
+thread stuck": dyld/ObjC/init (H2) or xpc/checkin (H3).
+
+The kernel already has the sampler (`user_exception_trace.c`): `ustacks=NAME` prints every thread
+of that process; `qemu/symstack.py` symbolizes it.  No image change, no new tool.
+
+Base: C1 control system `6be494f1…`, root `/tmp/root-byref.apfs` (3207a35e…), `QEMU_SMP=1`,
+`ZERO_RAM=1`.
+
+```sh
+XCMD="glwire_local=1 launchd_disable_all_timeouts=1 \
+      ustacks=PodcastsWidget ustacks_at=680 ustacks_ms=1000 ustacks_count=90 \
+      ustacks_threads=8 ustacks_tname=*" \
+HOST_ENV="GLWIRE_NO_PANEL=1" \
+MINFRAMES=999999 MINSHOT=300000 UI_GRACE=300 NOUI_BY=900 MAXSECS=1000 \
+  ./harness/boot-measure.sh ext3 /tmp/root-byref.apfs 1000 --no-panel
+```
+
+`PodcastsWidget` is the first widget in ext2; `ustacks_at=680` is after its spawn and samples for
+90 s.  `ustacks_tname=*` sends named/all threads to the serial log; symbolize on the host:
+
+```sh
+grep -aE "ustacks: PodcastsWidget|checked in as alive|uncorking exec|EXC_CORPSE|xpcproxy spawned" /tmp/ext3.log
+python3 qemu/symstack.py /tmp/ext3.log PodcastsWidget
+```
+
+Decision:
+
+- sampled stack has **dyld / libobjc / UIKit / extension init** frames → **H2** (process stuck in
+  early startup; CheckIn not reached);
+- sampled stack has **xpc_main / bootstrap_check_in / xpc_connection / mach_msg** → **H3**
+  (CheckIn path/endpoint), even though the process is alive;
+- no `ustacks:` lines after 680 s / pid gone → process died before sampling (H2);
+- `checked in as alive` >0 → CheckIn did happen, revisit the launchd log (H1 was only partial).
+
+This is the cheapest H2/H3 discriminator and uses the remaining boot.  It still will not fix the
+CheckIn path; the next step after it must be source-level launchd/xpcproxy tracing or a rebuilt
+tracepoint, not another timeout/limits boot.
