@@ -126,3 +126,80 @@ cctools (not `ld64.lld`), checks `__TEXT vmaddr=0xfffffff007004000` and
 
 Run the probe first; add `hakios_hostport_trace=1` to the same boot (no extra
 experiment) to see whether `id=200` arrives.  Do not change timeout/job/watchdog.
+
+## 6. probe2: order changed, empty send last
+
+`guest/hostinfo_probe2.c` (also copied to the real
+`userland/src/hostinfo_probe2.c`) fixes the first probe's death point:
+
+1. `mach_host_self` (before/after);
+2. `host_info(HOST_BASIC_INFO)` (before/after);
+3. `host_info(HOST_LOAD_INFO)` (before/after);
+4. `host_statistics64(HOST_VM_INFO64)` (before/after);
+5. **header-only `mach_msg` to the host port, no reply** — last, so if it dies there
+   the last line is `probe2: before empty send (header only, no reply)`;
+6. `done`.
+
+Every print is followed by `fflush(stdout)`, so a missing `after` names the exact
+call.  The first probe had the empty send before `host_info`; ext10 died after the
+`mach_host_self` line, so this order isolates the crash.
+
+### Build (works with the SDK's `.tbd` only)
+
+`xnu-clang`/`ld64` with cctools cannot consume `libSystem.B.tbd` (`library not
+found for -lSystem`).  Use **LLD** for this guest executable; cctools is for the
+kernel.  Verified here:
+
+```sh
+SDK=${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk
+CC=${XNU_CLANG:-xnu-clang}
+LD64_LLD=${LD64_LLD:-/usr/lib/llvm-19/bin/ld64.lld}
+
+$CC -target arm64-apple-ios16.5 -isysroot "$SDK" -O1 \
+    -c src/hostinfo_probe2.c -o obj/hostinfo_probe2.o
+$CC -target arm64-apple-ios16.5 -isysroot "$SDK" \
+    -fuse-ld="$LD64_LLD" \
+    -Wl,-platform_version,ios,16.5,16.5 -Wl,-arch,arm64 \
+    -L"$SDK/usr/lib" -lSystem.B \
+    -o obj/hostinfo_probe2 obj/hostinfo_probe2.o
+```
+
+- `-lSystem.B` is the SDK's `.tbd`; the driver's default `-lSystem` can fail when
+  cctools is selected.
+- `CCTOOLS_LD64` is the kernel linker, **not** this guest executable.
+- Prebuilt binary: `/host/iosvm/logs/s22-ext/probe-bin/hostinfo_probe2`
+  (49K, md5 `c88a81fa3af096598861bd377d49adee`, `LC_LOAD_DYLIB
+  /usr/lib/libSystem.B.dylib`).
+
+### Inject
+
+```sh
+EXTRA="obj/hostinfo_probe2" RC_JOBS=<repo>/guest/rc.jobs.hostinfo2 \
+  ./build.sh root.apfs
+```
+
+`guest/rc.jobs.hostinfo2`:
+```sh
+/redwood/bin/hostinfo_probe2 >>/dev/console 2>&1
+```
+
+### Expected
+
+```
+probe2: start
+probe2: before mach_host_self
+probe2: after mach_host_self port=... valid=1
+probe2: before host_info(HOST_BASIC_INFO)
+probe2: after host_info basic kr=0 count=12 ncpu=... memory=... max_mem=...
+probe2: before host_info(HOST_LOAD_INFO)
+probe2: after host_info load ...
+probe2: before host_statistics64
+probe2: after host_statistics64 ...
+probe2: before empty send (header only, no reply)
+probe2: after empty send kr=...
+probe2: done
+```
+
+The last printed line identifies the crashing call.  If it dies after
+`before empty send`, the hand-built header message is the culprit; if it dies after
+`before host_info`, the real host_info call is.

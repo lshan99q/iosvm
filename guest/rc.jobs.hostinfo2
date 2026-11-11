@@ -1,0 +1,3 @@
+# One-shot host_info probe2: every step prints before/after and flushes.
+# Build with EXTRA="obj/hostinfo_probe2" RC_JOBS=guest/rc.jobs.hostinfo2 userland/build.sh
+/redwood/bin/hostinfo_probe2 >>/dev/console 2>&1
