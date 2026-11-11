@@ -1,0 +1,3 @@
+# One-shot host_info probe for the com.hakios.demo job.
+# Build with EXTRA="obj/hostinfo_probe" RC_JOBS=guest/rc.jobs.hostinfo userland/build.sh
+/redwood/bin/hostinfo_probe >>/dev/console 2>&1

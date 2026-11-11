@@ -4,12 +4,13 @@ Status: sources + build/injection instructions; no boot.
 
 ## 1. Probe
 
-Repo source: `guest/hostinfo_probe.c`.  The worktree's actual userland tree does not
-carry this repo's `guest/` directory, so copy it there for the build:
+Repo source: `guest/hostinfo_probe.m` (plain C in an `.m` file, matching the
+`$DYN` example).  The worktree's actual userland tree does not carry this repo's
+`guest/` directory, so copy it there for the build:
 
 ```sh
 cd /host/iosvm-work/hakios-xnu-kernel/userland
-cp <repo>/guest/hostinfo_probe.c src/hostinfo_probe.c
+cp <repo>/guest/hostinfo_probe.m src/hostinfo_probe.m
 ```
 
 It does exactly what the failing extension does, but from a plain executable:
@@ -25,23 +26,27 @@ the real `theos` iPhoneOS16.5 SDK):
 
 ```sh
 DYN='xnu-clang -arch arm64 -isysroot $THEOS/sdks/iPhoneOS16.5.sdk -O1'
-$DYN -o obj/hostinfo_probe src/hostinfo_probe.c
-cp obj/hostinfo_probe root/bin/
+$DYN -o obj/hostinfo_probe src/hostinfo_probe.m
 ```
 
-The small root image is mounted at **`/redwood`**, so the in-image path is
-**`/redwood/bin/hostinfo_probe`** (APFS member `redwood/bin/hostinfo_probe`), not
-`/bin`.
+The one-off path uses `userland/build.sh`'s existing `EXTRA`/`RC_JOBS` hooks,
+without touching `mkapfs`:
 
-Inject into `userland/rc.darwin` (the image's `rc`):
+```sh
+cd /host/iosvm-work/hakios-xnu-kernel/userland
+EXTRA="obj/hostinfo_probe" RC_JOBS=<repo>/guest/rc.jobs.hostinfo ./build.sh root.apfs
+```
+
+`EXTRA` copies the file into `root/bin/` (APFS `redwood/bin/`); `RC_JOBS` is copied
+to `root/etc/rc.jobs` and is run once by the `com.hakios.demo` job.  The small root
+image is mounted at **`/redwood`**, so the in-image path is
+**`/redwood/bin/hostinfo_probe`** (not `/bin`).
+
+`guest/rc.jobs.hostinfo` is the one-line job file:
 
 ```sh
 /redwood/bin/hostinfo_probe >>/dev/console 2>&1
 ```
-
-Then build the image with `RC=rc.darwin` (the existing `userland/build.sh` packs
-`root/bin` into `root.apfs` under `redwood/`).  The line runs once at boot; it does
-not depend on an extension.
 
 ### Expected serial
 
@@ -82,17 +87,18 @@ Patch: `patches/0011-hostport-mig-trace.patch`, applied to
 - `id=200` appears but `kern/host.c host_info()` still has no trace means the
   dispatch/handler path is the problem.
 
-Apply and build in the host kernel tree:
+Apply the patch and rebuild with the tree's one-command wrapper:
 
 ```sh
-cd /host/iosvm-work/hakios-xnu-kernel/xnu-src/xnu-8796.121.2
-git apply <repo>/patches/0011-hostport-mig-trace.patch
-cd ..
-LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib make kernel -j8
+cd /host/iosvm-work/hakios-xnu-kernel
+git -C xnu-src/xnu-8796.121.2 apply <repo>/patches/0011-hostport-mig-trace.patch
+./tools/kernel-rebuild.sh "hakios: host_info" "hakios: hostport msg"
 ```
 
-Use cctools ld64, not `ld64.lld`; verify `__TEXT vmaddr=0xfffffff007004000` and
-`__start` high before booting.  `strings | grep 'hostport msg'` must show the line.
+`tools/kernel-rebuild.sh` clears the stale intermediate/linked outputs, links with
+cctools (not `ld64.lld`), checks `__TEXT vmaddr=0xfffffff007004000` and
+`entry_va != 0`, and checks the marker strings.  It must print
+`kernel-rebuild: OK`; otherwise do not boot.
 
 ## 3. What each result means
 
