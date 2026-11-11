@@ -137,3 +137,63 @@ kprintf("hakios: exit pid=%d comm=%s status=%d\n",
 ```
 
 No timeout/job/watchdog changes; no host GPU changes.
+
+
+## 6. ext12 correction and exact sampling target
+
+ext12's `ustacks=GCWidgets` had **0 hits**.  `GCWidgets` is a log short name, not
+the process `p_comm`; the real extension executables are e.g.
+**`TVWidgetExtension`** and **`RemindersWidgetExtension`**.  More importantly, an
+**elided child before un-cork has not exec'd the extension**, so its `p_comm` is
+still **`launchd`** (the launchd(proxyless) fork), not the widget name.
+
+### Identification
+
+- `p_comm` is `launchd` for the forked-but-not-exec'd child; `ps -A`/`proc_name`
+  cannot distinguish it from launchd by name alone.
+- Distinguish by **pid** from the `service spawned with pid N` line (the launchd
+  log line may show `[launchd]` before uncork and `[TargetName]` after exec).
+- `proc_pidinfo(PROC_PIDTBSDINFO)` gives `pbi_ppid` (1 for launchd children),
+  `pbi_comm` (16-byte `p_comm`), `pbi_name`, and `pbi_flags`; the child is the one
+  whose `pbi_ppid` is launchd and whose pid is the logged N.  `PROC_PIDT_SHORTBSDINFO`
+  is enough if `pbi_name` is not populated.
+- `launchd`'s own strings include `launchd(proxyless)`; that is a title/descriptor,
+  not a 16-byte `p_comm`, so `ustacks=launchd(proxyless)` is not a reliable key.
+
+### ext13 sampling choice
+
+- **Target `launchd`**, because the elided child has `p_comm=launchd`:
+  `ustacks=launchd ustacks_at=<widget service spawned + 2s> ustacks_ms=1000
+  ustacks_count=60 ustacks_threads=8 ustacks_tname=*`.
+- `ustacks` prints the pid with each sample; use the pid from
+  `service spawned with pid N`, not the name.
+- If the log has `uncorking exec source upfront`/`created`, the child has exec'd;
+  then the next boot can target the real `TVWidgetExtension`/
+  `RemindersWidgetExtension` (`p_comm` may be truncated to 15 chars) to inspect
+  `NSExtensionMain`/`bootstrap_check_in`/`xpc_main`.
+- Look for frames: `posix_spawn`, `sandbox_apply`/`_sandbox*`, `mach_msg2_trap`,
+  `proc_exec`/`exec_activate_image` (kernel symbol if sampled), or a jump into the
+  target.  A stack in `posix_spawn`/`sandbox_apply` means the elide child is stuck
+  in setup; `mach_msg` means waiting for launchd's controller/event.
+
+### Un-cork conditions (from launchd strings)
+
+`SOURCE_ATTACH` is only the exec-source attach.  launchd then has
+`deferring exec source uncork`, `uncorking exec source after service init`,
+`uncorking exec source upfront`, and
+`Cannot setup an event for proxyless spawns!`.  The successful daemons show
+`SOURCE_ATTACH -> running/INIT -> Successfully spawned -> uncorking exec ->
+created`; the elided widgets stop after `Successfully spawned`/`SOURCE_ATTACH`.
+That is consistent with **launchd failing/deferring the proxyless event setup**;
+it is not waiting for `posix_spawn` to return (the pid/SPAWNED line is already
+there), and it is not a kernel host_info/sandbox-profile load alone.
+
+### Forcing no elision
+
+Only the public boot-arg **`launchd_proxyless_spawn=0`** exists (message:
+`service will always use xpcproxy, elision was disabled by boot-arg`).
+Historical C2 forced xpcproxy but CheckIn still failed, so it is a **diagnostic**
+for the GC/Batteries no-exec case, not a proven fix.  Private plist keys
+`_Proxyless` / `__Proxyless` exist in launchd strings, but their semantics are not
+documented; do not change them in the same boot.  No other public boot-arg appears
+in the binary.
