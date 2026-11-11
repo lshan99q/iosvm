@@ -445,3 +445,69 @@ GLWIRE_DUMP_TEXTURES=/tmp/r1tex
 - 若 host 有 `frame N` 但间隔 558s → host replay/readback 慢，不是环。
 
 `GLWIRE_ACK_MS` 是判定用，不是修复；**不改代码、不 boot**。
+
+## R1 ext35 host 分阶段计时（2026-11-13，只读设计）
+
+现有 `host_glwire: frame N ... X ms` 的 `took = now_seconds() - began` 从 **records 收完之后**开始，
+包含 replay、`glFinish`、`glReadPixels`、panel hash/in-place，**不含 request/segments/records 的 recv，也不含 reply send**。
+558 s 被平均进一个数，无法定位。
+
+### 建议打点（`serve_frame()`，host_glwire.c:3691）
+
+```c
+double t0 = now_seconds();              /* entry, before request line */
+/* after request line parsed */        double t_req = now_seconds();
+/* after segments recv */              double t_seg = now_seconds();
+/* after records recv */               double t_rec = now_seconds();
+double t_replay = 0, t_read = 0, t_panel = 0, t_reply = 0;
+...
+glFinish();                            t_replay = now_seconds();
+...
+glReadPixels(...);                     t_read = now_seconds();
+...
+panel_hash/in-place/write_picture_rows; t_panel = now_seconds();
+...
+send_all(done) + send_all(picture);    t_reply = now_seconds();
+```
+
+一行/帧（只在 `total > 1000 ms` 或每 100 帧打印，避免日志爆炸）：
+
+```c
+printf("host_glwire: stages frame %llu req=%.1f seg=%.1f rec=%.1f replay=%.1f "
+       "read=%.1f panel=%.1f reply=%.1f total=%.1f ms in_place=%d refs=%lu\n",
+       frames_replayed, (t_req-t0)*1e3, (t_seg-t_req)*1e3,
+       (t_rec-t_seg)*1e3, (t_replay-t_rec)*1e3, (t_read-t_replay)*1e3,
+       (t_panel-t_read)*1e3, (t_reply-t_panel)*1e3, (t_reply-t0)*1e3,
+       in_place, wire_image_refs);
+```
+
+要点：
+- `t_rec` 是**旧 `began`** 的位置；`rec` 大 = guest 的 request/segments/records 没到齐；
+- `replay` 包含 **record dispatch** 和 **glFinish**；**guest 的 panel upload 走 records（op201），也在这段**；
+- `read` 只包 `glReadPixels`；`panel` 包 hash/in-place/`write_picture_rows`；`reply` 包 `send_all`；
+- `seg`/`rec` 为 0 但 `req` 大 = 等 guest 连接/请求；`reply` 大 = guest 不读/网络背压。
+
+### `GLWIRE_ACK_MS` 的推荐值
+
+`eagl_remote.c`：
+- `remote_ack_effective_ms()` 只有在 **`ack_armed` 且未 disabled** 时返回 timeout；
+- **前 5 个完整帧不武装**（`REMOTE_ACK_ARM_AFTER=5`），第 6 帧起 `SO_RCVTIMEO` 生效；
+- **连续 3 次超时**（`REMOTE_ACK_MAX_DROPS=3`）后 **`remote_ack_disabled=1`**，回退到 **无限等**；
+- 超时那一次：`recv` 失败 → **close socket、return 0**，该帧丢弃，下一帧重连。
+
+推荐 **`GLWIRE_ACK_MS=30000`**（30 s）用于诊断：正常帧 5–30 s 不会误杀，558 s 会在 30 s 被抓住；**只用于判别**，不是修复。若设 5000，前 5 帧不生效，且 3 次慢帧后就自动回无限等，容易误判。需要更稳定可临时把 `REMOTE_ACK_MAX_DROPS` 调大，但那是代码改动，先不做。
+
+### 判据与修法方向
+
+| 计时 | 说明 | 最小修法方向 |
+|---|---|---|
+| `rec` 大 | guest 没发完 request/segments/records | 查 guest `send`/`upload_changed_layers`；不是 host replay |
+| `replay` 大 | record dispatch + `glFinish` + guest panel upload | 减少记录量/跳过 panel upload 回放；查 `glslots`/多余 draw |
+| `read` 大 | `glReadPixels` 等 GPU/读大 FBO | 用 `GLWIRE_READ_PANEL`/正确 panel target；避免读 64×19/越界大图 |
+| `panel` 大 | panel hash + `write_picture_rows` | 只在需要时 hash；in-place 行写分块/跳过 |
+| `reply` 大 | guest 不收/网络背压 | 查 guest `recv`/socket buffer；ACK 超时 |
+| `total` 大但各段小 | 段间空档/日志/外部 | 查 host 主循环 poll/其他 client |
+
+**注意**：`panel upload` 是 **guest→host 的 records**，不是 host 的上传；host 的 `replay` 段已包含它。若要看 guest 侧 panel upload 本身，用 `hakios-remote: end of frame` + `flush ->` + `f N wait`（`eagl.c`），不要把它和 host `readPixels` 混在一起。
+
+不改代码、不 boot；打点按上面片段落到 `serve_frame()` 即可。
