@@ -210,9 +210,18 @@ LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib make kernel -j8
 ```
 
 Do **not** set `LD64_LLD`/`IOSVM_USE_LLD=1` for this kernel.  The host's
-`libcc_kext` (present in the normal build environment) is needed; the container here
-does not have it, so relinking its existing objects locally stops at
-`library not found for -lcc_kext` — that is a library-path issue, not a source issue.
+`libcc_kext` is required.  The container here does **not** have `libcc_kext.a`
+(`find /host -name 'libcc_kext*'` is empty; only `libpthread_kext.a` and
+`libfirehose_kernel.a` exist), so relinking the existing objects locally with cctools
+stops at:
+
+```
+ld: library not found for -lcc_kext
+```
+
+or, with `-lcc_kext` removed, at kernel-export symbols (`_last_kernel_symbol`,
+`_mach_vm_allocate`, `_sysctlbyname`, ...).  This is a **missing host SDK library**,
+not a source/patch error.  Build on the host that has the complete theos/XNU SDK.
 
 Verify before boot:
 
