@@ -295,3 +295,48 @@ host_glwire: frame 255, 750x1624, 23765 records B ...
 
 **当前这份 records 不能回答 clear/scissor/draw bbox；R1 结论仍停在 host 无责、guest panel BR 黑。**
 不改代码、不 boot。
+
+## R1 真正的 panel 晚帧：panel-1 全幅、panel-3 只画 310×310（2026-11-13）
+
+`decrec.py` 假设旧的 8-byte 头；当前 records 是 **version 2, 12-byte 头**（opcode, length, context）。
+文件以 `glFlush(15, len 0, ctx 0)` 开头时，旧解码器把 context 当 opcode，才报 367/7939。
+新增 `tools/glwire/harness/decrec2.py`（自动选 8/12，按 `spec.def` 解码，输出 clear/viewport/scissor/draw/attr0 bbox）。
+
+### panel-1（7,381 B）
+
+```
+bindFramebuffer 5; viewport 0,0 750x1624
+drawElements count=6 x2, attr0 bbox 0,0 .. 750,1624
+bindFramebuffer 31; viewport 0,0 750x200
+CLEAR mask=0x4000 color=(0,0,0,0) viewport=(0,0,750,200) scissor=None
+glScissor 0,0 750x200
+```
+
+- **1 次 clear**，只在 **FBO31（750×200）**，不是 panel FBO5；
+- panel FBO5 的 **两次 draw 都是全幅 0..750/0..1624**，BR 被覆盖；
+- clear 后的 scissor 是 **0,0 750×200**，不是 375×812。
+
+### panel-3（21,457 B）
+
+```
+bindFramebuffer 5; viewport 0,0 750x1624
+drawElements count=6/24: attr0 bbox 46,142 .. 356,452（或 113,433..291,523）
+glScissor 46,142 310x310
+...
+bindFramebuffer 31; viewport 0,0 750x200
+CLEAR mask=0x4000 viewport=(0,0,750,200) scissor=(46,142,310,310)
+```
+
+- **1 次 clear**，仍在 **FBO31（750×200）**；**panel FBO5 没有 clear**；
+- **panel FBO5 的 draw 最大 bbox 只有 46..356 / 142..452（310×310）**，**BR（x>375,y>812）没有任何 draw**；
+- clear 后的 scissor 是 **46,142 310×310**，不是 375×812。
+
+### 结论
+
+1. **clear**：两帧各 1 次，`mask=0x4000`，`clearColor` 为 panel-1 的 `(0,0,0,0)`（panel-3 未在本帧重设，沿用）；视口都是 **750×200 的 FBO31**，**不是 panel FBO5**。
+2. **draw bbox**：panel-1 全幅；panel-3 只到 **x=356,y=452**，**没有 BR**。
+3. **clear 后 scissor**：panel-1 `(0,0,750,200)`，panel-3 `(46,142,310,310)`；**没有 375×812**。
+
+因此 R1 是 **CA 的 partial redraw**：panel-3 只重画左/上 310×310 区域，panel FBO5 又从不 clear，BR 保留旧的黑/绿。
+**最小修法**：让 guest 每帧对 panel FBO5 做全幅 clear 或重画全屏背景，再让 CA 的 partial draw 叠加；**不要**改 host readback/upload，也**不要**按 375 的 scissor 猜。
+判据仍为 **BR 非黑 + dock 通栏 4 图标 + Search 居中 + P0 不回退**。不改代码、不 boot。
