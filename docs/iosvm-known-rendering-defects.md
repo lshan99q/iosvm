@@ -264,3 +264,34 @@ hakios-gl: f 154 ... 9 draws, 0 clears; display surface 0, 0 draws into it, ...
 - 晚帧 `1 clear + 2/9 draws`；
 - 缺口在 guest CA 的 full clear 后 partial redraw；
 - **不 boot、不改代码**。
+
+## R1 late records 的原始文件仍是 96×96 子帧（2026-11-13）
+
+原始名 `r1late-100-750x1624-23765.records`（`/host/iosvm/logs/s22-ext/ext28/records/`）与旧副本
+**md5 相同**（`ada89556385f5e4279e0ed40480671a1`），不是改名/截断问题；文件本身就不是 panel 全帧。
+
+按 version-2 头解析出的内容：
+
+- `viewport 0,0 750x1624`，但 **`glScissor(384,704,96,96)`**；
+- draws：`count=6` ×3 与 `count=54` ×4，**顶点 bbox 全是 (384,704)–(480,800)**，即 **96×96 的 widget/图标子帧**；
+- 没有覆盖 panel 的 **full clear**，也没有 BR（x>375,y>812）的 draw；
+- 文件开头的 `0f 00…` 不是 panel 帧的 `glGetString/glClear` 序列，说明它是一条 **client 子帧**，不是 dock 那条带。
+
+host 日志对不上 `100`：
+
+```text
+host_glwire: frame 100, 750x1624, 9019 records B ...
+host_glwire: frame 255, 750x1624, 23765 records B ...
+```
+
+文件是 **23765 B → global frame 255**（或 client frame 100 → global 255），**不是 frame 100 的 9019 B**。
+`GLWIRE_SAVE_AT=100` 命中的是 **client 的 frame 100**，这一帧是 96×96 子帧，所以没有 BR 可分析。
+
+### 需要的下一份
+
+- 保存一个 **全 panel 帧**：host 日志 `records_bytes = 7241/9019` 的帧，或 **client frame 99/101**（不要用 client 100）；
+- 或者临时把 `GLWIRE_SAVE_RECORDS` 从“前 3 帧/单帧”改为“每 N 帧保存一次”（这是 host 侧小改，需另批）；
+- 同时保留 `host.log` 的 `frame N` 行，按 **records_bytes** 对齐，不要按 `SAVE_AT` 数字猜。
+
+**当前这份 records 不能回答 clear/scissor/draw bbox；R1 结论仍停在 host 无责、guest panel BR 黑。**
+不改代码、不 boot。
