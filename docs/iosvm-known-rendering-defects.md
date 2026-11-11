@@ -140,3 +140,42 @@ ext27（`glframes=1 GLWIRE_FBO_LOG=1 GLWIRE_DRAW_LOG=1 GLWIRE_SAVE_RECORDS=/tmp/
 
 **当前状态：records 未挂载到本容器**（`/tmp/r1-*` 与 `logs/s22-ext/ext27/` 均不存在），已请 exp 复制到
 `/host/iosvm/logs/s22-ext/ext27/records/`；拿到后补最终判定。仍**不改代码、不 boot**。
+
+## R1 records 1–3 解析结果（2026-11-13）
+
+解析 `/host/iosvm/logs/s22-ext/ext27/records/r1-{1,2,3}-750x1624-*.records`（version 2，12-byte header；opcode 顺序按 `spec.def`）：
+
+### 三帧都是全屏 draw
+
+| 帧 | FBO | viewport | clear | draw | 顶点 |
+|---|---|---|---|---|---|
+| r1-1 | 1 | 0,0 750x1624 | **无** | draw#1 program 3, #2 program 5, #3 program 0 | 4 顶点 quad，bbox **0,0–750,1624** |
+| r1-2 | 3 | 0,0 750x1624 | **无** | 3 draws（program 3/5/0） | 同上 |
+| r1-3 | 1 | 0,0 750x1624 | **无** | 2 draws（program 3/0） | 同上 |
+
+- `glDrawElements(mode=GL_TRIANGLES, count=6, type=GL_UNSIGNED_SHORT, indices=[0,1,2,2,3,0])`，四个顶点位置是
+  `(0,0) (750,0) (750,1624) (0,1624)`；**BR（x>375,y>812）在这三个 quad 内**；
+- `glUniformMatrix4fv`（prefix 13 字节后 16 floats）是
+  `[2/750,0,0,0, 0,2/1624,0,0, 0,0,0,0, -1,-1,0,1]`，**完整正交投影**，没有把 BR 裁掉；
+- `glScissor(0,0,0,0)` 且 scissor test 关闭；viewport 全幅；`glClear` **0 次**；
+- vertex color 全 1（r1-1/2）或全 0（r1-3），不是绿色。
+
+**结论：这三帧的 BR 有 draw 覆盖，且矩阵/视口/scissor 都不会裁掉 BR。**
+因此 BR 绿/黑不是这三帧“没画”；要么是**后续帧只做了部分更新**（CA 的 dirty rect 不再画 BR，而 FBO 从未 clear），要么是**读回/上载**在后续路径里出错。
+
+### stride 3072 的核对
+
+`upload texture ... row 3072` 是 **768 px** stride（750 多 18 px padding）。`write_picture_rows()` 每行只写
+`width*4=3000` 字节，`glReadPixels` 也按 750 读；**它最多解释右缘 18 px**，不解释整块 BR。不要先按它改。
+
+### 下一步（最小）
+
+这三个 records 是**开头三帧**（`GLWIRE_SAVE_RECORDS` 默认只存前 3 帧），不能证明结束截图那一帧。
+下一发只加 **`GLWIRE_SAVE_AT=<结束前的帧号>`**（host.log 里 frame 768 附近）存**后期帧**，仍用
+`glframes=1 GLWIRE_FBO_LOG=1 GLWIRE_DRAW_LOG=1`：
+
+- 若后期帧的 draw bbox 只到 375/812，或 `glClear` 只覆盖部分 → 修 CA/渲染的 dirty rect 或补全幅 clear；
+- 若后期帧 draw 仍全幅而 BR 绿 → 转 readback/upload（检查 `glReadPixels` 目标 attachment 与 `write_picture_rows` 的 row/segment）；
+- 若后期帧有 `glClear` 但只清 3/4 → 查 clear 的 scissor/viewport（虽然 ext27 前 3 帧 scissor off）。
+
+**当前不能把 R1 归因为 2×2 循环；records 证明前 3 帧是全屏 quad。** 仍不改代码、不 boot。
