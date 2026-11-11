@@ -383,12 +383,16 @@ draw_panel(struct client *client, const unsigned char *panel, int width, int hei
  * simply was not there.  Expand the three legacy formats to RGBA on the way in; the alpha becomes the
  * alpha, luminance its three channels.
  */
+static int label_row_scrub;  /* GLWIRE_LABEL_ROW_SCRUB=61-63: clear the tile dash rows */
+
 static int
 host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, GLsizei height, GLint border,
     GLenum format, GLenum type, const void *pixels)
 {
 	enum { LEGACY_ALPHA = 0x1906, LEGACY_LUMINANCE = 0x1909, LEGACY_LUMINANCE_ALPHA = 0x190a };
 	unsigned char *expanded;
+	unsigned char *upload_pixels = (unsigned char *)pixels;
+	unsigned char *scrubbed = NULL;
 	size_t count, i;
 	int kind;
 	static unsigned said;
@@ -423,12 +427,22 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 	} else {
 		return 0;
 	}
+	if (label_row_scrub && width == 178 && height == 90 && kind == 1 && pixels != NULL && level == 0) {
+		scrubbed = malloc((size_t)width * (size_t)height);
+		if (scrubbed != NULL) {
+			memcpy(scrubbed, pixels, (size_t)width * (size_t)height);
+			memset(scrubbed + 61 * width, 0, (size_t)3 * (size_t)width);
+			upload_pixels = scrubbed;
+			printf("glwire: legacy 178x90 scrub rows 61-63 before native alpha upload\n");
+			fflush(stdout);
+		}
+	}
 	if (mode != 1) {
 		GLenum error = GL_NO_ERROR;
 
 		while (glGetError() != GL_NO_ERROR) {
 		}
-		glTexImage2D(target, level, internal, width, height, border, format, type, pixels);
+		glTexImage2D(target, level, internal, width, height, border, format, type, upload_pixels);
 		error = glGetError();
 		if (error == GL_NO_ERROR || mode == 2) {
 			if (said < 8) {
@@ -437,6 +451,7 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 				    (int)width, (int)height, internal, format);
 				fflush(stdout);
 			}
+			free(scrubbed);
 			return 1;
 		}
 		printf("glwire: legacy texture %dx%d internal %#x format %#x: native upload refused %#x, "
@@ -449,7 +464,7 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 		return 0;
 	}
 	for (i = 0; i < count; i++) {
-		const unsigned char *source = pixels != NULL ? (const unsigned char *) pixels : NULL;
+		const unsigned char *source = upload_pixels;
 		unsigned char luma = 0, alpha = 0;
 
 		if (source != NULL) {
@@ -480,6 +495,7 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 	}
 	glTexImage2D(target, level, GL_RGBA8, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, expanded);
 	free(expanded);
+	free(scrubbed);
 	return 1;
 }
 
@@ -2367,7 +2383,6 @@ static unsigned drawn_target_count;
 static GLuint label_tiles[16];      /* textures a text pass has drawn into (the label tile) */
 static unsigned label_tile_count;
 static int label_composites;        /* draws that put such a tile back into the panel */
-static int label_row_scrub;         /* GLWIRE_LABEL_ROW_SCRUB=61-63: clear the tile dash rows */
 static unsigned probe_said;
 
 static int
