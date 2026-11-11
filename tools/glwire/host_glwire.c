@@ -2367,6 +2367,7 @@ static unsigned drawn_target_count;
 static GLuint label_tiles[16];      /* textures a text pass has drawn into (the label tile) */
 static unsigned label_tile_count;
 static int label_composites;        /* draws that put such a tile back into the panel */
+static int label_row_scrub;         /* GLWIRE_LABEL_ROW_SCRUB=61-63: clear the tile dash rows */
 static unsigned probe_said;
 
 static int
@@ -4765,6 +4766,11 @@ main(int argc, char **argv)
 		const char *value = getenv("GLWIRE_READ_PANEL");
 
 		read_panel = value == NULL || value[0] != '0';
+	}
+	{
+		const char *value = getenv("GLWIRE_LABEL_ROW_SCRUB");
+
+		label_row_scrub = value != NULL && strcmp(value, "61-63") == 0;
 	}
 	/* (the flag the argument loop set stays set: this used to overwrite it, so "--no-panel" on the
 	 * command line silently did nothing and every acceptance run drew the guest's own panel) */

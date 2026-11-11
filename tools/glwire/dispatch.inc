@@ -73,6 +73,38 @@ switch (opcode) {
 		GLsizei a6 = wire_get_i32(r);
 		GLsizei a7 = wire_get_i32(r);
 		glCopyTexSubImage2D(a0, a1, a2, a3, a4, a5, a6, a7);
+		if (a0 == GL_TEXTURE_2D) {
+			GLint texture = 0, width = 0, height = 0, internal = 0;
+
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+			if (texture != 0) {
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+				if (width == 178 && height == 90) {
+					int first = a5 + (61 - a3);
+					int last = a5 + (63 - a3);
+
+					printf("glwire: tile rows 61-63 <- layer rows %d-%d (copy %d,%d %dx%d -> %d,%d)\n",
+					    first, last, a4, a5, a6, a7, a2, a3);
+					if (label_row_scrub) {
+						unsigned char *zero = calloc((size_t)width * 3, 4);
+						GLenum format = GL_RGBA;
+
+						glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+						if (internal == GL_ALPHA || internal == GL_ALPHA8) {
+							format = GL_ALPHA;
+						}
+						if (zero != NULL && glIsTexture((GLuint)texture)) {
+							glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 61, width, 3, format,
+							    GL_UNSIGNED_BYTE, zero);
+							printf("glwire: cleared 178x90 tile rows 61-63 (format %#x)\n", format);
+							fflush(stdout);
+						}
+						free(zero);
+					}
+				}
+			}
+		}
 		break;
 	}
 	case 9: {
