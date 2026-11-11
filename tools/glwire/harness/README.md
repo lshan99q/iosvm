@@ -133,7 +133,9 @@ GATE: PASS  (checks: shot=302K names=7 0x502=0 panic=0)
 ```
 
 预期：`GATE: FAIL` + 每项 `GATE: FAIL reason: ...`（screenshot ... `<` ...），`gate.md` 里有同一行。
-`gate.sh` 对纯本地 cell1 固定 `REQUIRE_HOST_FRAMES=0`、`ZERO_RAM=1`，所以无 recorder 的 root 也能判 UI；
+`gate.sh` 默认 `IOSVM=/host/iosvm-work/hakios-xnu-kernel`、`QEMU_EFI=$IOSVM/qemu/efi64.fd`、
+`QEMU_VARS=$IOSVM/qemu/vars.fd`、`QEMU_SMP=1`（cell1 历史 10.91 是单核；多核会触发 ticket lock panic），
+并固定 `REQUIRE_HOST_FRAMES=0`、`ZERO_RAM=1`，所以无 recorder 的 root 也能判 UI；
 远端 root 仍用同一命令，host 帧不是 gate 的 PASS 条件（0x502 与截图才是）。
 `BOOTMINSHOT`（默认 300000）只决定 boot-measure 何时认为 UI 出现；`--minshot` 只决定 gate 的截图判据，
 所以 `--minshot 10MB` 可以先出截图再快速 FAIL，不用等 10MB 的 UI。

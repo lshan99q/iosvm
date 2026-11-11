@@ -18,6 +18,9 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 GLWIRE=$(cd "$HERE/.." && pwd)
 IOSVM=${IOSVM:-/host/iosvm-work/hakios-xnu-kernel}
+QEMU_EFI=${QEMU_EFI:-$IOSVM/qemu/efi64.fd}
+QEMU_VARS=${QEMU_VARS:-$IOSVM/qemu/vars.fd}
+QEMU_SMP=${QEMU_SMP:-1}
 ROOT=
 SYSTEM_MD5=
 WINDOW=20
@@ -39,6 +42,9 @@ usage: gate.sh --root <root.apfs> [--system <md5>] [--window 20|120]
 
 Env: IOSVM=/host/iosvm-work/hakios-xnu-kernel, HOST_ENV=..., XCMD=..., MAXSECS=...
      BOOTMINSHOT=300000 (UI detection; default 300000, independent of --minshot check)
+     IOSVM=/host/iosvm-work/hakios-xnu-kernel
+     QEMU_EFI=$IOSVM/qemu/efi64.fd, QEMU_VARS=$IOSVM/qemu/vars.fd
+     QEMU_SMP=1 (cell1 historical baseline is one vCPU; override for multi-core runs)
 Exit: 0 PASS, 1 FAIL, 2 usage.
 EOF
 }
@@ -58,6 +64,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$ROOT" ] || die_usage "--root is required"
 [ -f "$ROOT" ] || { echo "gate.sh: root not found: $ROOT" >&2; exit 1; }
+[ -f "$QEMU_EFI" ] || { echo "gate.sh: QEMU_EFI not found: $QEMU_EFI (set QEMU_EFI)" >&2; exit 1; }
+[ -f "$QEMU_VARS" ] || { echo "gate.sh: QEMU_VARS not found: $QEMU_VARS (set QEMU_VARS)" >&2; exit 1; }
+export IOSVM QEMU_EFI QEMU_VARS QEMU_SMP
 case "$WINDOW" in 20|120) ;; *) die_usage "--window must be 20 or 120" ;; esac
 
 # 300K / 10M / 300000
@@ -87,7 +96,9 @@ BOOTHOST=/tmp/$LABEL-host.log
 HOST_ENV=${HOST_ENV:-"GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1 GLWIRE_POLL_MS=16"}
 export HOST_ENV
 { echo "gate: label=$LABEL"; echo "gate: root=$ROOT"; echo "gate: window=$WINDOW minshot=$MINSHOT";
-  echo "gate: host_env=$HOST_ENV"; echo "gate: xcmd=${XCMD:-}"; } > "$BOOT"
+  echo "gate: host_env=$HOST_ENV"; echo "gate: xcmd=${XCMD:-}";
+  echo "gate: iosvm=$IOSVM"; echo "gate: qemu_efi=$QEMU_EFI"; echo "gate: qemu_vars=$QEMU_VARS";
+  echo "gate: qemu_smp=$QEMU_SMP"; } > "$BOOT"
 echo "gate: booting $ROOT (window ${WINDOW}s, minshot $MINSHOT), artifacts $OUT"
 (
 	cd "$GLWIRE" || exit 1
