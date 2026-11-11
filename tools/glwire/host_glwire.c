@@ -4070,6 +4070,14 @@ serve_frame(struct client *client)
 			glBindFramebuffer(GL_FRAMEBUFFER, target);
 		}
 	}
+	if (!frame_readback_ok && panel_upload_texture2 != 0 &&
+	    panel_upload_frame2 == (int)frames_replayed + 1) {
+		glBindTexture(GL_TEXTURE_2D, panel_upload_texture2);
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+		frame_readback_ok = 1;
+		printf("host_glwire: read-back fallback image1 texture %u\n", panel_upload_texture2);
+		fflush(stdout);
+	}
 	if (!frame_readback_ok && segment_count2 > 0 && row_bytes2 >= width * 4) {
 		if (read_picture_rows(picture, width, height, (size_t)row_bytes2, segments2,
 		    segment_count2)) {
@@ -4090,14 +4098,6 @@ serve_frame(struct client *client)
 		memcpy(picture, client->names.panel, (size_t)width * (size_t)height * 4);
 		frame_readback_ok = 1;
 		printf("host_glwire: read-back fallback panel (uploaded panel surface)\n");
-		fflush(stdout);
-	}
-	if (!frame_readback_ok && panel_upload_texture2 != 0 &&
-	    panel_upload_frame2 == (int)frames_replayed + 1) {
-		glBindTexture(GL_TEXTURE_2D, panel_upload_texture2);
-		glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, picture);
-		frame_readback_ok = 1;
-		printf("host_glwire: read-back fallback image1 texture %u\n", panel_upload_texture2);
 		fflush(stdout);
 	}
 	if (!frame_readback_ok && panel_upload_texture != 0 &&
