@@ -232,3 +232,35 @@ hakios-gl: f 154 ... 9 draws, 0 clears; display surface 0, 0 draws into it, ...
 - **不再**改 host readback/upload，也不再猜 FBO/scissor（已排除）。
 
 修复判据不变：**BR 非黑、dock 通栏 4 图标、Search 居中**，P0 内容判据不回退。仍不改代码、不 boot。
+
+## R1 late-frame records 解析受阻（2026-11-13）
+
+尝试解析 `/host/iosvm-work/hakios-xnu-kernel/logs/r1late-100.records`（23,765 B）失败：
+
+- `decrec.py` 在 2–3 条记录报 unknown opcode（367/7939）；
+- 我们的解析器按 **12-byte version-2 header**、**8-byte version-1 header**、以及 **8/12/16 字节头 + 0..127 偏移** 扫描，**都无法形成连续有效记录流**；
+- 文件开头是：
+
+```text
+0f 00 00 00 00 00 00 00 00 00 00 00 c8 00 00 00 d5 00 00 00 ...
+```
+
+  这里 `0f`/`c8`/`d5` 不像 `spec.def` 的 opcode+length 组合（例如 `glClearStencil` 的 payload 应为 4，而这里是 0），后面还直接出现 `1406`（`GL_FLOAT`）、`3000`、`c000`、`c0000000`、`3f000000` 这类 **GL 参数/浮点数据**，更像**从某条记录的 payload 中间开始**，或文件被截断/重命名/二次编码，而不是 `host_glwire` 原样写出的 `records`。
+
+因此**这一份文件无法回答**：
+- `glClear` 次数/clearColor/scissor/viewport；
+- late draws 的 bbox；
+- clear 后 `glScissor` 是否变成 375×812。
+
+### 需要的原始文件/日志
+
+1. `host_glwire: saved ...` 的**原始路径**（正常应为
+   `/tmp/r1late-100-750x1624-23765.records`，不要改名/截断/拼接）；
+2. 该发的 `host.log`（如果有 `GLWIRE_DRAW_LOG=1`，直接有 late draw 的 fbo/program/viewport/scissor）；
+3. 若 `GLWIRE_SAVE_RECORDS` 是从 **另一个 host build** 写的，给出该 build 的 `spec.def`/version。
+
+在拿到原始 records 前，R1 的结论仍停在：
+- host 无责（guest panel BR 黑）；
+- 晚帧 `1 clear + 2/9 draws`；
+- 缺口在 guest CA 的 full clear 后 partial redraw；
+- **不 boot、不改代码**。
