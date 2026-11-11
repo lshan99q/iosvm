@@ -187,3 +187,48 @@ ext27（`glframes=1 GLWIRE_FBO_LOG=1 GLWIRE_DRAW_LOG=1 GLWIRE_SAVE_RECORDS=/tmp/
   可按 `GLWIRE_DRAW_LOG` + 逐 draw 几何/状态（fbo、viewport、scissor、纹理来源）检查，
   或 dump CA 自己的 FBO（如果它是先把各层合成到中间 FBO 再整幅采样）。
 - 副作用证据：ext26 里 BR 是绿（未初始化）而不是黑，说明该象限有时连一次清屏都没覆盖到。
+
+### guest 侧的帧结构
+
+ext27 的 `glframes=1` 行（1154 行）显示：
+
+```
+hakios-gl: f 152 ... 9 draws, 0 clears; display surface 0, 0 draws into it, box off 0,0 0x0;
+          0 in place, 1 copied; ...
+hakios-gl: f 153 ... 2 draws, 1 clears; display surface 0, 0 draws into it, ...
+hakios-gl: f 154 ... 9 draws, 0 clears; display surface 0, 0 draws into it, ...
+```
+
+- **`display surface 0`、`0 draws into it`**：CA 不直接画 panel surface；panel 是 guest 把 host 的 picture 写回/合成出来的（`eagl_remote_flush` 的 surface 路径）。
+- **晚帧是 `1 clear + 2/9 draws`**（不是开头三帧的 `0 clear + 3 full draws`）；
+- `hakios-remote: s11 ...` 的采样行在晚帧最后几行是 `... 301e18b8 301e18b8 301e18b8 px ff000000 ff000000`：**最后一行/右侧像素是黑**，与 panel dump 一致。
+
+### 机制判断
+
+1. **不是「没画」**：开头 3 帧 4 顶点全屏 quad、索引 `[0,1,2,2,3,0]`、正交矩阵全幅；第 5/6 帧起出现 **clear**。
+2. **BR 黑而不是绿**：说明 **有一次全幅/近全幅的黑色 clear**（clearColor 0,0,0,0）覆盖了 BR；随后晚帧的 **partial draw 不再覆盖 BR**，于是 BR 保持黑色。若 clear 只覆盖 3/4，BR 应保持绿；实际平均亮度 0.2 → **BR 被黑 clear 过**。
+3. 所以缺口在 **guest 侧 CA 的合成/重绘矩形**：晚帧只重画了 TL/TR/BL（dirty rect），BR 没有新的 draw；host 的 readback/上载只是忠实搬运。
+
+### 最小观测（不改渲染逻辑）
+
+- 下一发把 **late frame** 存下来，而不是只存前 3 帧：
+  ```text
+  glframes=1 GLWIRE_DUMP_PAIR=1 GLWIRE_DUMP_AT=760
+  GLWIRE_SAVE_RECORDS=/tmp/r1late
+  GLWIRE_SAVE_AT=760          # 或结束前最后一帧
+  GLWIRE_DRAW_LOG=1
+  ```
+- 在 late records 里检查：
+  - `glClear` 的 **scissor/viewport**（是否只清 3/4，还是全幅）；
+  - 后续 `glDrawElements` 的 **bbox**（是否只到 375/812）；
+  - `glScissor` 是否在 clear 后又被设成 375×812；
+- 同时看 `hakios-gl: f` 的 `clears` 与 `display surface` 行，和 `s11` 最后一行像素。
+
+### 最小修法（按 late 结果）
+
+- **clear 只覆盖 3/4** → 修 clear 前的 scissor/viewport，恢复全幅 clear；
+- **clear 全幅、后续 draw 只到 3/4** → 修 CA 的 dirty rect/重绘范围，强制 BR 也重画（或重新提交全屏背景）；
+- **clear 全幅 + draw 全幅但 panel 仍黑** → 只可能是 guest 的 blit/写回矩形，检查 `glBlitFramebuffer`/`eagl_remote_surface2` 的 `copy_width/height`（目前代码是 750×1624，需日志确认）；
+- **不再**改 host readback/upload，也不再猜 FBO/scissor（已排除）。
+
+修复判据不变：**BR 非黑、dock 通栏 4 图标、Search 居中**，P0 内容判据不回退。仍不改代码、不 boot。
