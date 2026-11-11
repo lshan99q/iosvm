@@ -698,6 +698,13 @@ switch (opcode) {
 		    texture, target, internal, width, height, format, type, row_bytes, pixel_bytes, bytes);
 		fflush(stdout);
 		if (width == trace_width && height == trace_height && target == GL_TEXTURE_2D &&
+		    row_bytes >= width * 4 + 32 && row_bytes <= width * 4 + 4096) {
+			panel_upload_texture2 = texture;
+			panel_upload_frame2 = (int)frames_replayed + 1;
+			printf("host_glwire: tracked image1 texture %u row %d\n", texture, row_bytes);
+			fflush(stdout);
+		}
+		if (width == trace_width && height == trace_height && target == GL_TEXTURE_2D &&
 		    data != NULL && bytes >= (height - 1) * row_bytes + width * 4) {
 			int nonblack = 0;
 

@@ -2132,6 +2132,8 @@ static int frame_readback_ok = 1;   /* viewport nonzero: a frame with no panel d
 static GLuint panel_drawn_fbo;      /* the panel-sized target this frame last had a draw */
 static GLuint panel_upload_texture; /* a full-panel opcode-201 upload this frame: the fallback picture */
 static int panel_upload_frame;
+static GLuint panel_upload_texture2; /* the row-3072 (image1) full-panel texture upload */
+static int panel_upload_frame2;
 static unsigned char *panel_upload_copy;
 static size_t panel_upload_copy_bytes;
 static int panel_drawn_frame = -1;
@@ -3818,6 +3820,8 @@ serve_frame(struct client *client)
 	trace_height = height;
 	panel_upload_texture = 0;
 	panel_upload_frame = 0;
+	panel_upload_texture2 = 0;
+	panel_upload_frame2 = 0;
 	free(panel_upload_copy);
 	panel_upload_copy = NULL;
 	panel_upload_copy_bytes = 0;
@@ -4086,6 +4090,14 @@ serve_frame(struct client *client)
 		memcpy(picture, client->names.panel, (size_t)width * (size_t)height * 4);
 		frame_readback_ok = 1;
 		printf("host_glwire: read-back fallback panel (uploaded panel surface)\n");
+		fflush(stdout);
+	}
+	if (!frame_readback_ok && panel_upload_texture2 != 0 &&
+	    panel_upload_frame2 == (int)frames_replayed + 1) {
+		glBindTexture(GL_TEXTURE_2D, panel_upload_texture2);
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+		frame_readback_ok = 1;
+		printf("host_glwire: read-back fallback image1 texture %u\n", panel_upload_texture2);
 		fflush(stdout);
 	}
 	if (!frame_readback_ok && panel_upload_texture != 0 &&
