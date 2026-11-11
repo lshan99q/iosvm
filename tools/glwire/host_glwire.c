@@ -3448,6 +3448,34 @@ stage11_report(const char *which, const unsigned char *picture, int width, int h
 }
 
 static int
+read_picture_rows(unsigned char *picture, int width, int height, size_t row_bytes,
+    wire_segment *segments, int count)
+{
+	struct guest_cursor cursor = { segments, count, 0, 0 };
+	size_t used = (size_t)width * 4;
+
+	for (int y = 0; y < height; y++) {
+		size_t offset = (size_t)y * row_bytes;
+		size_t done = 0;
+
+		while (done < used) {
+			size_t available = 0;
+			unsigned char *source = cursor_at(&cursor, offset + done, &available);
+
+			if (source == NULL) {
+				return 0;
+			}
+			if (available > used - done) {
+				available = used - done;
+			}
+			memcpy(picture + (size_t)y * used + done, source, available);
+			done += available;
+		}
+	}
+	return 1;
+}
+
+static int
 write_picture_rows(const unsigned char *picture, int width, int height, size_t row_bytes,
     wire_segment *segments, int count)
 {
@@ -4036,6 +4064,14 @@ serve_frame(struct client *client)
 			/* (the compositor restores the state it found: bind the target that was just drawn
 			 * before the read-back, so the picture includes the widgets) */
 			glBindFramebuffer(GL_FRAMEBUFFER, target);
+		}
+	}
+	if (!frame_readback_ok && segment_count2 > 0 && row_bytes2 >= width * 4) {
+		if (read_picture_rows(picture, width, height, (size_t)row_bytes2, segments2,
+		    segment_count2)) {
+			frame_readback_ok = 1;
+			printf("host_glwire: read-back fallback guest surface2\n");
+			fflush(stdout);
 		}
 	}
 	if (!frame_readback_ok && panel_upload_copy != NULL &&
