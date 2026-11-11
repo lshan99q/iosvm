@@ -52,7 +52,7 @@ A prebuilt arm64 binary (49K, `/usr/lib/libSystem.B.dylib`, iOS 16.5) is availab
 so a container without clang can use it directly:
 
 ```sh
-EXTRA="/host/iosvm-work/hakios-xnu-kernel/userland/obj/hostinfo_probe" RC_JOBS=/host/iosvm-work/hakios-xnu-kernel/userland/guest-rc.jobs.hostinfo   ./build.sh root.apfs
+EXTRA="/host/iosvm-work/hakios-xnu-kernel/userland/obj/hostinfo_probe" RC_JOBS=<repo>/guest/rc.jobs.hostinfo   ./build.sh root.apfs
 ```
 
 `guest/rc.jobs.hostinfo` is the one-line job file:
