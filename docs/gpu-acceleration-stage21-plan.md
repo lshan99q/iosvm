@@ -4,6 +4,19 @@
 > 输入：stage 19 D7、stage 20 E1 C、P1 最近三次失败、帧同步候选 1 未建立。
 > 相关：`docs/gpu-acceleration-stage20-plan.md`、`docs/gpu-acceleration-stage19-closure.md`、`docs/gpu-acceleration-stage19-decisions.md`。
 
+## 实验开关的工程规则（必读）
+
+> 触发：`s20-rle-run` 的 RLE 开关没到客机（host 构建标记 `rgb565=1, rle=1`，但 host `bgra rle` / guest `upload-rle` 都 0 行）。这是同类问题**第 3 次**（565、boot-arg 512 截断、RLE）。
+
+1. **每个实验开关必须自报**：init 打一行
+   `options raw="<原文>" parsed local/fast/565/rle/dirty/ack`。
+   **没有这行，开关视为不可信**；不能拿它做任何性能/功能结论。
+2. **传参改文件**：开关写 `/tmp/glwire_opts`，boot args 只留 `glwire_local`。
+   理由：开关变多后，boot args 的长度/转义是持续风险（512 截断已经发生过）。
+3. **开关未生效的实验一律不作为性能结论**：RLE 这发（`s20-rle-run`，lib `974a0e52…`，root `3212f6a5…`，host `d80f7ca3…`）guest 4 帧/494 s、host 3 帧、无截图，**只能算 tooling 失败**，不能写「RLE 无效/有效」。
+4. **当前结论链**：payload（每帧 4.9 MB）→ 拷贝/序列化（~740 ms/帧）→ **压缩是唯一出路**（RLE 13.5x 待验证；rawpipe 0.68 MB/s 的 net_test 说明 wire 本身不是 4.5 MB/s 天花板，压缩路径才值得继续）。
+   - 在 RLE 开关自报通过前，不写「RLE 已实现/已生效」；13.5x 只是待验证目标。
+
 ## Phase 0（进行中）
 
 ### 0.0 P0 参考 system 与复现性（必读）
@@ -97,7 +110,8 @@
 
 ### 2.4 下一发（未跑）
 
-- 先修 565 开关不生效（host/guest 两边都要有行）和 host 12 帧卡死；然后**payload 减半**一发，看 host 端到端能否 ≥3 fps。
+- 先按「实验开关工程规则」修 565/RLE 自报与 `/tmp/glwire_opts`；再修 host 12 帧卡死。
+- 然后 **payload 减半 + RLE** 各一发（开关必须自报通过）；看 host 端到端能否 ≥3 fps，并验证 RLE 13.5x 是否成立。
 - 若 host 端到端有效：再复测 cell2/cell4（先重建 `/tmp/root-w15w3.apfs`），产出三路 120 帧对比，基准 cell1 10.91。
 - 若无效：转 host 回放侧/guest 合成侧，指出瓶颈层 + 一个可测改动。
 
