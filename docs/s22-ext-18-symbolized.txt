@@ -1,0 +1,100 @@
+ustacks: BooksWidgetExten[45] 1 threads, shared cache slide 0x4b73c000, uptime 726.883, at 726876761
+  thread 0x246
+    __kernelrpc_mach_vm_deallocate_trap + 8
+    __ZN11Diagnostics10clearErrorEv + 28
+    ____ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE_block_invoke + 1676
+    __ZN5dyld46Loader24forEachResolvedAtPathVarERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsENS_13ProcessConfig13PathOverrides4TypeERbU13block_pointerFvS4_SA_SB_E + 492
+    __ZNK5dyld413ProcessConfig13PathOverrides18forEachPathVariantEPKcN5dyld38PlatformEbbRbU13block_pointerFvS3_NS1_4TypeES6_E + 436
+    __ZN5dyld46Loader11forEachPathER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEU13block_pointerFvS6_NS_13ProcessConfig13PathOverrides4TypeERbE + 220
+    __ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE + 552
+    ____ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE_block_invoke + 368
+    ____ZNK5dyld39MachOFile21forEachDependentDylibEU13block_pointerFvPKcbbbjjRbE_block_invoke + 140
+    __ZNK5dyld39MachOFile18forEachLoadCommandER11DiagnosticsU13block_pointerFvPK12load_commandRbE + 280
+    __ZNK5dyld39MachOFile21forEachDependentDylibEU13block_pointerFvPKcbbbjjRbE + 144
+    __ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE + 136
+    __ZN5dyld4L7prepareERNS_4APIsEPKN5dyld313MachOAnalyzerE + 928
+    start + 1760
+    0x0 (not in the shared cache)
+ustacks: AppStoreWidgetsE[46] 1 threads, shared cache slide 0x4b73c000, uptime 729.015, at 729015411
+  thread 0x250
+    ____ZN5dyld412RuntimeState9setUpTLVsEPKN5dyld313MachOAnalyzerE_block_invoke + 36
+    __ZNK5dyld313MachOAnalyzer35forEachThreadLocalVariableInSectionIxEEvR11DiagnosticsRKNS_9MachOFile11SectionInfoEU13block_pointerFvPPFPvPNS0_9TLV_ThunkEEPmE + 96
+    ____ZNK5dyld39MachOFile14forEachSectionEU13block_pointerFvRKNS0_11SectionInfoEbRbE_block_invoke + 520
+    __ZNK5dyld39MachOFile18forEachLoadCommandER11DiagnosticsU13block_pointerFvPK12load_commandRbE + 280
+    __ZNK5dyld39MachOFile14forEachSectionEU13block_pointerFvRKNS0_11SectionInfoEbRbE + 164
+    __ZNK5dyld313MachOAnalyzer26forEachThreadLocalVariableER11DiagnosticsU13block_pointerFvPPFPvPNS0_9TLV_ThunkEEPmE + 160
+    __ZN5dyld412RuntimeState9setUpTLVsEPKN5dyld313MachOAnalyzerE + 232
+    __ZN5dyld412RuntimeState10initializeEv + 112
+    __ZN5dyld44APIs19_libdyld_initializeEPKNS_16LibSystemHelpersE + 284
+    _libSystem_initializer + 192
+    ____ZZNK5dyld46Loader25findAndRunAllInitializersERNS_12RuntimeStateEENK3$_0clEv_block_invoke + 152
+    ____ZNK5dyld313MachOAnalyzer18forEachInitializerER11DiagnosticsRKNS0_15VMAddrConverterEU13block_pointerFvjEPKv_block_invoke_4 + 332
+    ____ZNK5dyld39MachOFile14forEachSectionEU13block_pointerFvRKNS0_11SectionInfoEbRbE_block_invoke + 520
+    __ZNK5dyld39MachOFile18forEachLoadCommandER11DiagnosticsU13block_pointerFvPK12load_commandRbE + 280
+    __ZNK5dyld39MachOFile14forEachSectionEU13block_pointerFvRKNS0_11SectionInfoEbRbE + 164
+ustacks: GeneralMapsWidge[47] 1 threads, shared cache slide 0x4b73c000, uptime 731.154, at 731152916
+  thread 0x252
+    __simple_salloc + 72
+    __ZN11Diagnostics5errorEPKcPc + 40
+    __ZN11Diagnostics5errorEPKcz + 28
+    ____ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE_block_invoke + 1168
+    __ZN5dyld46Loader24forEachResolvedAtPathVarERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsENS_13ProcessConfig13PathOverrides4TypeERbU13block_pointerFvS4_SA_SB_E + 492
+    __ZNK5dyld413ProcessConfig13PathOverrides18forEachPathVariantEPKcN5dyld38PlatformEbbRbU13block_pointerFvS3_NS1_4TypeES6_E + 1036
+    __ZN5dyld46Loader11forEachPathER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEU13block_pointerFvS6_NS_13ProcessConfig13PathOverrides4TypeERbE + 220
+    __ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE + 552
+    ____ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE_block_invoke + 368
+    ____ZNK5dyld39MachOFile21forEachDependentDylibEU13block_pointerFvPKcbbbjjRbE_block_invoke + 140
+    __ZNK5dyld39MachOFile18forEachLoadCommandER11DiagnosticsU13block_pointerFvPK12load_commandRbE + 280
+    __ZNK5dyld39MachOFile21forEachDependentDylibEU13block_pointerFvPKcbbbjjRbE + 144
+    __ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE + 136
+    __ZN5dyld4L7prepareERNS_4APIsEPKN5dyld313MachOAnalyzerE + 928
+    start + 1760
+ustacks: HealthMedication[48] 1 threads, shared cache slide 0x4b73c000, uptime 733.292, at 733289942
+  thread 0x253
+    __ZN5dyld39MachOFile8trieWalkER11DiagnosticsPKhS4_PKc + 140
+    __ZNK5dyld46Loader17hasExportedSymbolER11DiagnosticsRNS_12RuntimeStateEPKcNS0_18ExportedSymbolModeEPNS0_14ResolvedSymbolEPN5dyld35ArrayIPKS0_EE + 356
+    __ZNK5dyld46Loader13resolveSymbolER11DiagnosticsRNS_12RuntimeStateEiPKcbbU13block_pointerFvjjRKNS0_14ResolvedSymbolEEb + 788
+    ____ZNK5dyld416JustInTimeLoader17forEachBindTargetER11DiagnosticsRNS_12RuntimeStateEU13block_pointerFvjjRKNS_6Loader14ResolvedSymbolEEbU13block_pointerFvS8_RbESD__block_invoke_2 + 104
+    ____ZNK6mach_o6Fixups31forEachBindTarget_ChainedFixupsER11DiagnosticsU13block_pointerFvRKNS0_14BindTargetInfoERbE_block_invoke + 64
+    __ZN5dyld39MachOFile25forEachChainedFixupTargetER11DiagnosticsPK26dyld_chained_fixups_headerPK21linkedit_data_commandU13block_pointerFviPKcybRbE + 224
+    __ZNK6mach_o6Fixups31forEachBindTarget_ChainedFixupsER11DiagnosticsU13block_pointerFvRKNS0_14BindTargetInfoERbE + 116
+    ____ZNK5dyld416JustInTimeLoader17forEachBindTargetER11DiagnosticsRNS_12RuntimeStateEU13block_pointerFvjjRKNS_6Loader14ResolvedSymbolEEbU13block_pointerFvS8_RbESD__block_invoke + 208
+    __ZNK5dyld313MachOAnalyzer12withVMLayoutER11DiagnosticsU13block_pointerFvRKN6mach_o6LayoutEE + 700
+    __ZNK5dyld416JustInTimeLoader11applyFixupsER11DiagnosticsRNS_12RuntimeStateERNS_34DyldCacheDataConstLazyScopedWriterEb + 432
+    __ZN5dyld4L7prepareERNS_4APIsEPKN5dyld313MachOAnalyzerE + 1784
+    start + 1760
+    0x0 (not in the shared cache)
+ustacks: RemindersWidgetE[49] 1 threads, shared cache slide 0x4b73c000, uptime 735.447, at 735444277
+  thread 0x266
+    __simple_salloc + 72
+    __ZN11Diagnostics5errorEPKcPc + 40
+    __ZN11Diagnostics5errorEPKcz + 28
+    ____ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE_block_invoke + 1168
+    __ZN5dyld46Loader24forEachResolvedAtPathVarERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsENS_13ProcessConfig13PathOverrides4TypeERbU13block_pointerFvS4_SA_SB_E + 492
+    __ZNK5dyld413ProcessConfig13PathOverrides18forEachPathVariantEPKcN5dyld38PlatformEbbRbU13block_pointerFvS3_NS1_4TypeES6_E + 1036
+    __ZN5dyld46Loader11forEachPathER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEU13block_pointerFvS6_NS_13ProcessConfig13PathOverrides4TypeERbE + 220
+    __ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE + 552
+    ____ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE_block_invoke + 368
+    ____ZNK5dyld39MachOFile21forEachDependentDylibEU13block_pointerFvPKcbbbjjRbE_block_invoke + 140
+    __ZNK5dyld39MachOFile18forEachLoadCommandER11DiagnosticsU13block_pointerFvPK12load_commandRbE + 280
+    __ZNK5dyld39MachOFile21forEachDependentDylibEU13block_pointerFvPKcbbbjjRbE + 144
+    __ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE + 136
+    __ZN5dyld4L7prepareERNS_4APIsEPKN5dyld313MachOAnalyzerE + 928
+    start + 1760
+ustacks: WorldClockWidget[50] 1 threads, shared cache slide 0x4b73c000, uptime 737.590, at 737585465
+  thread 0x285 (running)
+    _stat64 + 8
+    __ZN5dyld34statEPKcP4stat + 24
+    __ZNK5dyld415SyscallDelegate10fileExistsEPKcPNS_6FileIDEPi + 36
+    ____ZNK5dyld414PrebuiltLoader21invalidateInIsolationERKNS_12RuntimeStateE_block_invoke + 80
+    __ZNK5dyld413ProcessConfig13PathOverrides18forEachPathVariantEPKcN5dyld38PlatformEbbRbU13block_pointerFvS3_NS1_4TypeES6_E + 1036
+    __ZNK5dyld414PrebuiltLoader21invalidateInIsolationERKNS_12RuntimeStateE + 444
+    __ZNK5dyld414PrebuiltLoader7isValidERKNS_12RuntimeStateE + 556
+    __ZNK5dyld412RuntimeState18findPrebuiltLoaderEPKc + 112
+    __ZN5dyld46Loader19makeDyldCacheLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEjPKN6mach_o6LayoutE + 100
+    ____ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE_block_invoke + 1040
+    __ZN5dyld46Loader24forEachResolvedAtPathVarERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsENS_13ProcessConfig13PathOverrides4TypeERbU13block_pointerFvS4_SA_SB_E + 492
+    __ZNK5dyld413ProcessConfig13PathOverrides18forEachPathVariantEPKcN5dyld38PlatformEbbRbU13block_pointerFvS3_NS1_4TypeES6_E + 436
+    __ZN5dyld46Loader11forEachPathER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEU13block_pointerFvS6_NS_13ProcessConfig13PathOverrides4TypeERbE + 220
+    __ZN5dyld46Loader9getLoaderER11DiagnosticsRNS_12RuntimeStateEPKcRKNS0_11LoadOptionsE + 552
+    ____ZN5dyld416JustInTimeLoader14loadDependentsER11DiagnosticsRNS_12RuntimeStateERKNS_6Loader11LoadOptionsE_block_invoke + 368
