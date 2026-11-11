@@ -1,0 +1,43 @@
+diff --git a/osfmk/kern/ipc_kobject.c b/osfmk/kern/ipc_kobject.c
+index bd45ee7..28a94ff 100644
+--- a/osfmk/kern/ipc_kobject.c
++++ b/osfmk/kern/ipc_kobject.c
+@@ -79,6 +79,9 @@
+ #include <mach/ndr.h>
+ #include <mach/vm_param.h>
+ 
++#include <pexpert/pexpert.h>
++#include <kern/printf.h>
++
+ #include <mach/mach_vm_server.h>
+ #include <mach/mach_port_server.h>
+ #include <mach/mach_host_server.h>
+@@ -380,9 +383,11 @@ ipc_kobject_init_reply(
+  *	Conditions:
+  *		Nothing locked.
+  */
++static int hostport_trace = -1;
++
+ static kern_return_t
+ ipc_kobject_server_internal(
+-	__unused ipc_port_t port,
++	ipc_port_t port,
+ 	ipc_kmsg_t      request,
+ 	ipc_kmsg_t      *replyp)
+ {
+@@ -395,6 +400,15 @@ ipc_kobject_server_internal(
+ 	req_hdr = ikm_header(request);
+ 	request_msgh_id = req_hdr->msgh_id;
+ 
++	if (hostport_trace < 0) {
++		int trace = 0;
++		PE_parse_boot_argn("hakios_hostport_trace", &trace, sizeof(trace));
++		hostport_trace = trace;
++	}
++	if (hostport_trace) {
++		kprintf("hakios: hostport msg id=%d port=%p\n", request_msgh_id, port);
++	}
++
+ 	/* Find corresponding mig_hash entry, if any */
+ 	ptr = find_mig_hash_entry(request_msgh_id);
+ 
