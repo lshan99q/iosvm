@@ -160,7 +160,10 @@
 4. **`0x502`**：host log `glerror 0x502` 计数为 **0**；否则 FAIL。
 5. **产物**：把实际截图路径、字节数、三项结果写进 `gate-result.md`。
 
-输出：`gate-result.md`（PASS/FAIL + 每项证据 + system/lib md5），进程退出码 0/1。**本阶段只定义规范，脚本未实现。**
+输出：`gate-result.md`（PASS/FAIL + 每项证据 + system/lib md5），进程退出码 0/1。**本阶段只定义规范；脚本入口 `tools/glwire/harness/gate.sh`（code 正在实现，exp 会做 PASS/FAIL 双向验证）。**
+
+- 脚本入口：`tools/glwire/harness/gate.sh`
+- 验证记录见 `logs/s20-gate-verify/`。
 
 ### 「可用」判定
 
