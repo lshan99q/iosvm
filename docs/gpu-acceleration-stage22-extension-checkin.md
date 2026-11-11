@@ -119,3 +119,49 @@ is not delivered), but the actual CheckIn break needs evidence that a boot-only 
 
 Without one of those, the project can only say "watchdog or exec/check-in" and must not claim the
 root cause.  Three boots are enough to classify, not to fix.
+
+## 5. ext1 post-mortem and boot 2 (budget 3)
+
+`logs/s22-ext/ext1` ran to **acceptance at ui=660 s**, but the first extension in the C1 control
+appears at **666 s** (E1 control: PhotosReliveWidget hanging at 23:19:36 = 666 s).  So the run
+stopped **before the extension phase**; the five zero counters are expected, not a result.
+
+The guest serial file is only 2.3 KB (loader header).  `launchd_log_serial=1` was in the cmdline;
+it is the suspected cause of the serial console going quiet (launchd takes/logs the console), and
+must not be combined with the normal kernel console capture.
+
+### Boot 2 (H1 falsifier, no serial flag, past extension phase)
+
+Base: C1 control system `6be494f1…`, root `/tmp/root-byref.apfs` (3207a35e…), `QEMU_SMP=1`,
+`ZERO_RAM=1`.
+
+```sh
+XCMD="glwire_local=1 launchd_disable_all_timeouts=1" \
+HOST_ENV="GLWIRE_NO_PANEL=1" \
+MINFRAMES=999999 MINSHOT=300000 UI_GRACE=400 NOUI_BY=900 MAXSECS=1120 \
+  ./harness/boot-measure.sh ext2 /tmp/root-byref.apfs 1120 --no-panel
+```
+
+- `MINFRAMES=999999` disables the normal 200-frame acceptance;
+- `UI_GRACE=400` keeps running 400 s after the first 300 KB shot (UI ~660 s → through ~1060 s),
+  which covers the first extension at ~666 s and >300 s of extension lifetime;
+- no `launchd_log_serial`; kernel serial should stay in `/tmp/ext2.log`.
+
+Filters:
+
+```sh
+grep -aE "launch watchdog timeout|Extension is hanging|checked in as alive|CHECK_IN_TIMEOUT|uncorking exec|EXC_CORPSE|killing extension|xpcproxy spawned" /tmp/ext2.log
+```
+
+Decision:
+
+- `launch watchdog timeout = (globally disabled)` + hanging 0 → H1 boot-arg reached launchd;
+- `checked in as alive` >0 → **H1 confirmed** (watchdog gate);
+- extension pid alive after 900 s, no check-in, no kill → H2/H3;
+- extension still killed at INIT+5 s or corpse early → not H1;
+- **serial file still only loader header** → capture QEMU serial separately (for example a dedicated
+  `-serial file:` chardev without `launchd_log_serial`) before spending boot 3.
+
+If boot 2 gets the serial and answers H1, boot 3 is only for H2 vs H3 (a live-pid sample).  If the
+serial is still missing, stop: the budget is better spent on a serial-capture fix than another
+content boot.
