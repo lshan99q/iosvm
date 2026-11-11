@@ -39,6 +39,7 @@ ZERO_RAM=${ZERO_RAM:-0}
 MINFRAMES=${MINFRAMES:-200}
 MINSHOT=${MINSHOT:-300000}
 UI_GRACE=${UI_GRACE:-0}
+REQUIRE_HOST_FRAMES=${REQUIRE_HOST_FRAMES:-1}
 NOFRAMES_BY=${NOFRAMES_BY:-900}
 NOUI_BY=${NOUI_BY:-780}
 LOG=/tmp/$LABEL.log
@@ -102,7 +103,8 @@ for tick in $(seq 1 $((MAXSECS / 10))); do
 			size=$(stat -c %s "$SHOTIN")
 			cp "$SHOTIN" "$SHOT"
 			if [ "$size" -gt "$biggest" ]; then biggest=$size; cp "$SHOTIN" "$best"; fi
-			if [ "$ui_at" -eq 0 ] && [ "$size" -ge "$MINSHOT" ] && [ "$(grep -ac "host_glwire: frame " "$HLOG" 2>/dev/null)" -gt 0 ]; then
+			if [ "$ui_at" -eq 0 ] && [ "$size" -ge "$MINSHOT" ] && \
+			    { [ "$REQUIRE_HOST_FRAMES" = 0 ] || [ "$(grep -ac "host_glwire: frame " "$HLOG" 2>/dev/null)" -gt 0 ]; }; then
 				ui_at=$((tick * 10))
 				ui_bytes=$size
 				echo "xb: $LABEL ui at ${ui_at}s ($size B) $(date -Is)" >> "$LOG"
@@ -110,7 +112,7 @@ for tick in $(seq 1 $((MAXSECS / 10))); do
 		fi
 	fi
 	hostframes=$(grep -ac "host_glwire: frame " "$HLOG" 2>/dev/null)
-	if [ "$ui_at" -eq 0 ] && [ "$tick" -ge $((NOFRAMES_BY / 10)) ] && [ "$hostframes" -eq 0 ]; then
+	if [ "$ui_at" -eq 0 ] && [ "$REQUIRE_HOST_FRAMES" = 1 ] && [ "$tick" -ge $((NOFRAMES_BY / 10)) ] && [ "$hostframes" -eq 0 ]; then
 		reason=noframes
 		break
 	fi
@@ -132,7 +134,8 @@ done
 rm -f "/tmp/$LABEL-final.png"; bash qemu/screendump.sh "/tmp/$LABEL-final.png" >/dev/null 2>&1
 fsize=$(stat -c %s /tmp/$LABEL-final.png 2>/dev/null || echo 0)
 [ "$fsize" -gt "$biggest" ] && { biggest=$fsize; cp /tmp/$LABEL-final.png "$best"; }
-if [ "$ui_at" -eq 0 ] && [ "$biggest" -ge "$MINSHOT" ] && [ "$(grep -ac "host_glwire: frame " "$HLOG" 2>/dev/null)" -gt 0 ]; then
+if [ "$ui_at" -eq 0 ] && [ "$biggest" -ge "$MINSHOT" ] && \
+    { [ "$REQUIRE_HOST_FRAMES" = 0 ] || [ "$(grep -ac "host_glwire: frame " "$HLOG" 2>/dev/null)" -gt 0 ]; }; then
 	ui_at=$((tick * 10))
 	ui_bytes=$biggest
 	echo "xb: $LABEL ui at ${ui_at}s ($biggest B, final) $(date -Is)" >> "$LOG"

@@ -99,3 +99,39 @@ IMAGE=/tmp/root-fixed-net.apfs WANT=8 TRIES=12 TAG=m9p0 UI_GRACE=300 MAXSECS=120
   150 秒短启动**（有 ignition/launchd 行、没有 `kernel returned`）再交付；
 - `lpto_us` 是否生效：看代码（只剩 `os_atomic_store`）+ 启动能过入口；若又出现 `Spinlock` panic，
   它的 `timeout:` 会是 **3,750,000,000 ticks**（60 s @62.5 MHz）而不是 251,658,240。
+
+
+## Gate: 一条命令 PASS/FAIL（`gate.sh`）
+
+```sh
+./harness/gate.sh --root /tmp/root-local.apfs --out /tmp/gate-cell1
+```
+
+一条冷启动 + 固定检查，输出一行：
+
+```
+GATE: PASS  (checks: shot=302K names=7 0x502=0 panic=0)
+```
+
+`gate.md` 在 `--out` 目录，含每项明细、失败原因、`md5s.txt` 与截图/两份日志。
+`names=` 是 `gate_names.py` 的白色文字行启发式（镜像无 OCR）；不是 OCR 值。
+
+参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--root <root.apfs>` | 必填 |
+| `--system <md5>` | 可选，校验 `userland/system.apfs` |
+| `--window 20|120` | 首个截图后 UI 稳定窗口，默认 20 |
+| `--out <dir>` | 产物目录，默认 `/tmp/gate-<UTC>` |
+| `--minshot <bytes|300K|10M|1MB>` | 截图下限，默认 300000；环境 `MINSHOT` 同义 |
+
+失败验证（不换 root，只把门槛抬高）：
+
+```sh
+./harness/gate.sh --root /tmp/root-local.apfs --minshot 10MB --out /tmp/gate-fail   2>&1 | tail -8
+```
+
+预期：`GATE: FAIL` + 每项 `GATE: FAIL reason: ...`（screenshot ... `<` ...），`gate.md` 里有同一行。
+`gate.sh` 对纯本地 cell1 固定 `REQUIRE_HOST_FRAMES=0`、`ZERO_RAM=1`，所以无 recorder 的 root 也能判 UI；
+远端 root 仍用同一命令，host 帧不是 gate 的 PASS 条件（0x502 与截图才是）。
