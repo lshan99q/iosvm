@@ -385,3 +385,63 @@ GLWIRE_SAVE_RECORDS=/tmp/r1late
 4. 判据：**BR 非黑、dock 通栏 4 图标、Search 居中、P0 内容判据不回退**。
 
 不改代码、不 boot。
+
+## R1 ext35：默认路径 558s 不是 guest↔host 环；先分清 slow vs deadlock（2026-11-13）
+
+### 代码上的等待关系
+
+- `eagl.c:1271 frame_end()`：
+  - `composition_off = eagl_remote_no_local()`（`eagl_remote.c:463`，返回 `remote_only`）；
+  - `remote_only = wire_vtop_hook != NULL && !remote_wants_local()`（`eagl_remote.c:394`）；
+  - `composition_off` 只让 `frame_end` **跳过** `target_to_surface()`、`surface_to_texture()`、panel upload（`eagl.c:1298/1327/1343`），然后调用 `upload_changed_layers()`；
+  - 它**不等待 host**，也没有把 host 的输出接回这一步。
+- `eagl_remote_flush()`（`eagl_remote.c:930`）：
+  - `send(request + records + segments)` 后 **等 host 的 reply**；
+  - host 在 `serve_frame()` 里 replay、`glReadPixels`、写 picture，然后 reply；
+  - 没有“host 等 guest 的 composition”这一半：guest 在 `flush` 之前已经把 `upload_changed_layers()` 的 image refs 和 records 发出去了。
+- 所以 **不是**「guest 等 host 的 picture + host 等 guest 的 composition」的环；`composition_off` 只是少做本地工作，不会让 host 多等一个 guest 条件。
+
+### 558s 更像哪种
+
+1. **host 慢**：`serve_frame()` 的 replay/readback 卡住（尤其默认路径要 panel upload/readback），guest 在 `eagl_remote_flush` 的 `recv` 里等；
+2. **host 等 guest**：如果 guest 的 records/segments 没发完，host 会卡在 `recv_all`；但 `send()` 失败会立刻 `close`，不会 558s；
+3. **guest 等 host**：`recv` 无 ack timeout（`GLWIRE_ACK_MS` 默认 0 时是无限等）；host 若在 `glReadPixels`/GPU 上卡住，guest 就 558s。
+
+**判定**：不是代码环，是 **host 侧一次 panel/readback 极慢**（或 guest `recv` 无限等）。`GLWIRE_NO_PANEL` 能跑，是因为 host 不做 panel 那一半。
+
+### 默认路径修好后 R1 会不会自然消失？
+
+**取决于 `remote_only`：**
+
+- 若 `remote_only=1`（没有 `glwire_local`）：host 仍然用 records 重建，**R1 仍在**；
+- 若 `remote_only=0`（`glwire_local=1` 或 `/redwood/etc/glwire_local`）：guest 自己合成 panel，`panel_with_remote`/panel upload 把它交给 host，**R1 应自然消失**（画面来自 guest 合成，不是记录重建）。
+- 因此「默认路径」若只是去掉 `GLWIRE_NO_PANEL` 而仍是 `remote_only`，**不会**自动修 R1；需要 **`glwire_local=1` + panel upload**（或 `glwire_panel_remote=1`）。
+
+### 记录流缺什么
+
+- `image refs` 只有 **1 个 4,988,928 B**（750×1624 的 panel target）；
+- `upload_changed_layers()` 在 `eagl.c:895` 明确 **`if (image->target) continue`**，所以 **panel target 不按 image ref 发**；
+- 缺的是 **dock/Search/backdrop 这些非 target 图层的 IOSurface 内容或它们的 layer 纹理引用**，不是 draw 参数（panel-1 的 draw 已是全幅）。
+- 如果 host 只有 1 个 image ref，dock 带的图层纹理确实**没被引用/上载**，record 重建自然补不出来。
+
+### 最小可测（一发区分 slow/deadlock）
+
+同一发 boot 内：
+
+```text
+glframes=1
+GLWIRE_ACK_MS=5000          # 只用于判 deadlock：guest recv 超时就报错，不要无限等
+GLWIRE_DRAW_LOG=1
+GLWIRE_DUMP_TEXTURES=/tmp/r1tex
+```
+
+日志点：
+
+- `hakios-remote: end of frame ... panel_up=%d` → 当前是否 guest 合成；
+- `hakios-remote: s11 f N images ...` → image refs/图层数量；
+- `hakios-remote: flush -> %d ...` + `f N wait %llu us sent ...` → guest 在 flush 等多久；
+- host `host_glwire: frame N, ...` 的间隔 → host 是慢还是没收到；
+- 若 guest 卡在 `recv` 而 host 没有 `frame N` 行 → host 等 guest（records/segments 不完整）；
+- 若 host 有 `frame N` 但间隔 558s → host replay/readback 慢，不是环。
+
+`GLWIRE_ACK_MS` 是判定用，不是修复；**不改代码、不 boot**。
