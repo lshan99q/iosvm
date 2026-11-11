@@ -34,3 +34,14 @@
   未形成性能结论，已停。
 
 Artifacts: `/host/iosvm/logs/s20-p1-map/`、`/host/iosvm/logs/s20-p1-scrub/`.
+
+## P1 真实路径（code 11:32 确认）
+
+- 178x90 tile **不是** `glCopyTexSubImage2D`；真实入口是 `host_glwire.c:387
+  host_legacy_teximage()`，日志 `glwire: legacy texture 178x90 internal 0x1906
+  format 0x1906: taken natively`（`:436` native upload）。
+- 正确 scrub 已放在 legacy alpha 上传前（同一 `GLWIRE_LABEL_ROW_SCRUB=61-63`，
+  默认关）：`glwire: legacy 178x90 scrub rows 61-63 before native alpha upload`。
+- **P1 两发预算已用完，判死；不再 boot**，除非 lead 重开。
+- host 最新 `6aa395ce…`（132,720 B）；565-only 默认路径不受影响
+  （P1/RLE 默认关）。壁纸静态兜底 workaround 仍不成立。
