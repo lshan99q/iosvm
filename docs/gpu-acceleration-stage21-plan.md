@@ -28,20 +28,15 @@
 
 - **P0 历史 3/3 通过，但当前不可稳定复现**：8bf5 同配方 99.99/89.56；6be ~89.50%。**8bf5 必要但不充分**；单次 99.99 不能当基线。
 - 门禁至少 **2–3 次 boot**；任何实验 report 必须写 **system md5 + lib md5**，否则不可比。
-- **P0 判据已降级为内容判据**：adjacent-pair 矩阵无有效 ≥95（8bf 内容最高 89.56%；6be 的 100% 是 both-black mask，无效）。同帧/相邻 diff 只作历史证据；P0 门禁 = **≥5 可读名称 + 截图 ≥300KB + panel/picture MATCH + 无 panic**；内容判据也需 2–3 发统计，未复跑前只写「历史证据，复现不稳」。
+- **P0 判据已降级为内容判据**：adjacent-pair 矩阵无有效 ≥95（8bf 内容最高 89.56%；6be 的 100% 是 both-black mask，无效）。同帧/相邻 diff 只作历史证据；**本阶段门禁 = ≥5 可读名称 + 截图 ≥300KB + 无 panic**（panel/picture MATCH 只作诊断）；内容判据也需 2–3 发统计，未复跑前只写「历史证据，复现不稳」。
 - 不写「P0 已稳定/当前可复现」，也不写「P0 被推翻」；是「历史通过、当前不稳定」。
 - 若要用 6be 或别的 system 当基线，必须**重新定义 P0 判据**（按 ~89.5% 重设阈值或改成不依赖同帧配对）——**待定**。
 
-### 0.1 P1 第二次重开（2 发预算）
+### 0.1 P1 冻结（第二次重开不再进行）
 
-- 这是 P1 **第二次重开**：靶点从「scrub 开关」改为 **178x90 tile 的组装点**（不是再调 glyph_last_row/label_dash_rows）。
-- **预算 2 发**；两发不成即**永久判死**，进不做清单。
-- 验收判据（三项同时满足）：
-  1. guest 截图 Weather/Notes 下方 **虚线消失**；
-  2. **Notes/Weather 笔画完整**（不出现掉笔画）；
-  3. P0 内容判据不回退（≥5 可读名称 + 截图 ≥300KB + panel/picture MATCH + 无 panic）。
-- 历史三次失败（只作背景，不再重试）：`glyph_last_row=1` 清到笔画；`label_dash_rows=53-62` crash；`61-62` 无效果。
-- 失败记录：两发的命令、tile 行号、guest 截图；两发不成写「P1 永久判死」。
+- **状态：冻结**。虚线真实来源是 **native legacy `GL_ALPHA` teximage**；三个 scrub 点（`glyph_last_row=1`、`label_dash_rows=53-62`、`61-62`）都没打中，两次重开预算不再使用。
+- 历史只作背景：`glyph_last_row=1` 掉笔画；`53-62` crash；`61-62` 无效果。
+- code 会补一页 P1 终局说明；本文不预写「已修」。P1 **未修复、冻结**，不再起 boot。
 
 ### 0.2 帧同步 clamp 复测
 
@@ -62,14 +57,11 @@
 
 ## Phase 1：视觉完整性（P1 之后最高优先）
 
-### 1.1 壁纸静态兜底（评估中，不写结论）
+### 1.1 壁纸静态兜底：不成立
 
-- **状态：评估中**；不写成立/不成立，等实验。
-- **做什么**：给 wallpaper layer 塞静态图，绕开 extension check-in；不调用 PosterBoard/extension。
-- **判据**：
-  - 截图 top color 不是单一黑；主屏背景非黑（采样点非黑）；
-  - `diffdump` 与无壁纸基线相比**不劣化**（同帧 diff 不低于基线；P0 三判据不回归）。
-- **收口**：若静态图仍必须 extension 才能上屏 → 写 **「workaround 不成立」**，不再耗 P2 时间。
+- **结论：不成立。** PosterBoard 托管的是实时场景，SpringBoard 侧没有可替换的位图；静态兜底替代不了实时壁纸。
+- 只剩 **extension 路径**（已封）；不再走静态图 workaround，也不写「壁纸已有可行替代」。
+- 证据：P2 收口/runbook §4.15 系、`docs/gpu-acceleration-stage19-closure.md`。
 
 ### 1.2 主屏细节收口
 
@@ -136,8 +128,54 @@
 ## Phase 3：工程化交付
 
 1. **一条命令复现**：建齐四格镜像（cell3/cell4 可共用一份，按 §8.1）→ 跑四格 → 出表 → 与基线比对。
-2. **门禁脚本**：P0 内容判据 + P1 虚线 + 壁纸 + `0x502`，一条命令出 PASS/FAIL。
+2. **门禁脚本**：P0 内容判据 + `0x502` + 无 panic + 截图产物，一条命令出 PASS/FAIL（规范见「交付收尾包」；P1 冻结、壁纸无可行路径，不入门禁）。
 3. **移交更新**：stage 21 状态、已知限制、复现入口；**virtio-gpu 仅保留评估，不启动**（大工程，见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`）。
+
+## 交付收尾包（Stage 21 主交付）
+
+### 一页结论
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| **性能（565-only，已收口）** | 纯本地 **10.91 fps**；静止 **4.6–5.0 fps**；滚动 **~1.8 fps**；RLE **判死**（14 发，输入黑）；payload 链 = 4.9 MB 拷贝 → 逐像素 → wire 4.5 MB/s；dirty 只适用静止/局部 | `docs/gpu-acceleration-stage21-performance-current.md`、`logs/s20-dirty-idle/`、`logs/s20-rle14/`、`logs/s20-5653/` |
+| **P1（冻结）** | 虚线真实来源 = **native legacy `GL_ALPHA` teximage**；三个 scrub 点都没打中；code 补终局页；**未修复、冻结** | `docs/gpu-acceleration-stage20-p1-labeldash.md`、`logs/s20-p1-labeldash/`、`logs/s20-p1-validation/`；code 终局页待补 |
+| **壁纸（不成立）** | PosterBoard 托管实时场景，SpringBoard 无位图；静态兜底替代不了；只剩 extension 路径（已封） | P2 收口、`docs/gpu-acceleration-stage19-closure.md`、runbook §4.15 系 |
+| **P0** | 历史证据 + **内容判据**（≥5 名称 / 截图 ≥300KB / 无 panic）；P0 不是「当前同帧可复现」 | `logs/s20-p0-repro/`、`logs/s20-p0-8bf5-recheck/`、`logs/s20-p0-matrix/`、decisions D9 |
+
+### 门禁脚本规范（先写规范，不实现）
+
+**一条命令**跑：内容判据 + `0x502` + 无 panic + 截图产物 → `PASS/FAIL`。
+
+输入：
+
+- `--system-md5`、`--lib-md5`（必填；缺一不可比）
+- `--shot <png>`、`--host-log <log>`、`--names <txt>`（或 `--manual-names`）
+- 可选 `--guest-log`、`--out <dir>`
+
+检查项：
+
+1. **内容/名称**：`names` 至少 **5** 行（或人工勾选 recorded）；否则 FAIL。
+2. **截图**：`shot` 存在且 **≥300,000 B**；否则 FAIL。
+3. **无 panic**：host/guest log 中 `panic(` / `SIGSEGV` / `usertrap` 计数为 0；否则 FAIL。
+4. **`0x502`**：host log `glerror 0x502` 计数为 **0**；否则 FAIL。
+5. **产物**：把实际截图路径、字节数、三项结果写进 `gate-result.md`。
+
+输出：`gate-result.md`（PASS/FAIL + 每项证据 + system/lib md5），进程退出码 0/1。**本阶段只定义规范，脚本未实现。**
+
+### 「可用」判定
+
+| 项 | 结果 |
+|---|---|
+| 文字可读 | ✅ |
+| 壁纸非黑 | ❌ |
+| 无 panic | ✅ |
+
+→ **未达「可用」**：差的是**壁纸**，且静态兜底不成立、extension 路径已封，**当前没有可行路径**。不写「stage 21 可用」。
+
+### 下一阶段入口
+
+- **extension check-in**：需要 XNU/launchd 层改动；当前缺工具链/注入能力。若立项，见 stage 20 E1 C 与 D4。
+- **virtio-gpu**：大工程，**仅评估，不启动**；见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`。
 
 ## 不做（本阶段）
 
@@ -149,7 +187,7 @@
 
 ## 判定规则
 
-1. **同一方向失败 ≥3 次 → 判死**，进「不做」清单，不再起 boot（除非 owner 另定）。**P1 第二次重开是例外：预算 2 发，两发不成永久判死（见 0.1）。**
+1. **同一方向失败 ≥3 次 → 判死**，进「不做」清单，不再起 boot（除非 owner 另定）。**P1 已冻结（见 0.1），不再起 boot。**
 2. **host 端到端 fps 为准**：技术起步 ≥3 fps，目标 5+；**「加速可用」只认 ≥50% 纯本地**（≥5 fps）；低于 5 不叫可用。guest fps 只作诊断。
 3. **「可用」= 文字可读 + 壁纸非黑 + 无 panic**，三项齐；缺一项不写「可用」。
 4. 不写「性能达标」；只写实测数字与判据是否满足。
