@@ -1,0 +1,89 @@
+diff --git a/osfmk/kern/host.c b/osfmk/kern/host.c
+index 471f977..7f376bc 100644
+--- a/osfmk/kern/host.c
++++ b/osfmk/kern/host.c
+@@ -186,8 +186,10 @@ host_processors(host_priv_t host_priv, processor_array_t * out_array, mach_msg_t
+ 
+ extern int sched_allow_NO_SMT_threads;
+ 
+-kern_return_t
+-host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_number_t * count)
++static int host_info_trace = -1;
++
++static kern_return_t
++host_info_inner(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_number_t * count)
+ {
+ 	if (host == HOST_NULL) {
+ 		return KERN_INVALID_ARGUMENT;
+@@ -207,10 +209,14 @@ host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_num
+ 
+ 		basic_info = (host_basic_info_t)info;
+ 
+-		basic_info->memory_size = machine_info.memory_size;
++		/* machine_info.memory_size is a 32-bit field: the 12 GB QEMU memory
++		 * truncates to 0.  host_basic_info.memory_size is documented as capped
++		 * at 2 GB, so report the cap instead of zero. */
++		basic_info->memory_size = (natural_t)MIN(machine_info.max_mem,
++		    (uint64_t)0x80000000ULL);
+ 		basic_info->cpu_type = slot_type(master_id);
+ 		basic_info->cpu_subtype = slot_subtype(master_id);
+-		basic_info->max_cpus = machine_info.max_cpus;
++		basic_info->max_cpus = machine_info.max_cpus ? machine_info.max_cpus : 1;
+ #if defined(__x86_64__)
+ 		if (sched_allow_NO_SMT_threads && current_task()->t_flags & TF_NO_SMT) {
+ 			basic_info->avail_cpus = primary_processor_avail_count_user;
+@@ -218,20 +224,20 @@ host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_num
+ 			basic_info->avail_cpus = processor_avail_count_user;
+ 		}
+ #else
+-		basic_info->avail_cpus = processor_avail_count;
++		basic_info->avail_cpus = processor_avail_count ? processor_avail_count : 1;
+ #endif
+ 
+ 
+ 		if (*count >= HOST_BASIC_INFO_COUNT) {
+ 			basic_info->cpu_threadtype = slot_threadtype(master_id);
+-			basic_info->physical_cpu = machine_info.physical_cpu;
+-			basic_info->physical_cpu_max = machine_info.physical_cpu_max;
++			basic_info->physical_cpu = machine_info.physical_cpu ? machine_info.physical_cpu : 1;
++			basic_info->physical_cpu_max = machine_info.physical_cpu_max ? machine_info.physical_cpu_max : 1;
+ #if defined(__x86_64__)
+ 			basic_info->logical_cpu = basic_info->avail_cpus;
+ #else
+-			basic_info->logical_cpu = machine_info.logical_cpu;
++			basic_info->logical_cpu = machine_info.logical_cpu ? machine_info.logical_cpu : 1;
+ #endif
+-			basic_info->logical_cpu_max = machine_info.logical_cpu_max;
++			basic_info->logical_cpu_max = machine_info.logical_cpu_max ? machine_info.logical_cpu_max : 1;
+ 
+ 			basic_info->max_mem = machine_info.max_mem;
+ 
+@@ -401,6 +407,28 @@ host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_num
+ 	}
+ }
+ 
++kern_return_t
++host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_number_t * count)
++{
++	kern_return_t kr;
++
++	if (host_info_trace < 0) {
++		int trace = 0;
++		PE_parse_boot_argn("hakios_host_info_trace", &trace, sizeof(trace));
++		host_info_trace = trace;
++	}
++	if (host_info_trace) {
++		kprintf("hakios: host_info enter flavor=%d count=%d host=%p\n",
++		    flavor, *count, host);
++	}
++	kr = host_info_inner(host, flavor, info, count);
++	if (host_info_trace) {
++		kprintf("hakios: host_info ret=%d flavor=%d count=%d\n",
++		    kr, flavor, *count);
++	}
++	return kr;
++}
++
+ kern_return_t host_statistics(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_number_t * count);
+ 
+ kern_return_t
