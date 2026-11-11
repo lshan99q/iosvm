@@ -90,6 +90,8 @@ entitlement/early initialiser).
 Patch: `patches/0011-hostport-mig-trace.patch`, applied to
 `osfmk/kern/ipc_kobject.c`:
 
+- **include only `<pexpert/pexpert.h>`**; this tree has no `kern/printf.h`
+  (kprintf's prototype comes from pexpert), so do not add that include;
 - `hakios_hostport_trace=1` (default off) prints
   `hakios: hostport msg id=%d port=%p` at the MIG/kobject dispatch entry,
   before `find_mig_hash_entry()`;
