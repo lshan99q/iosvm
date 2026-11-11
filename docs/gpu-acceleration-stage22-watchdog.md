@@ -96,3 +96,26 @@ Keep the watchdogs enabled, but give extensions enough time.  Edit
 
 Do not compress the timeout to "fix" the slow path; fix the cache mapping/path
 scan if the hypothesis holds.
+
+## 6. `srmap` only pid 1 is expected
+
+`osfmk/kern/task.c:1582` copies the parent's shared region into a new task:
+
+```c
+shared_region = vm_shared_region_get(parent_task);
+if (shared_region != NULL) {
+    vm_shared_region_set(new_task, shared_region);
+}
+```
+
+launchd (pid 1) is the init task that maps the cache; its children inherit
+`task->task_shared_region`.  A trace showing `srmap` only for pid 1 (launchd,
+files/maps) is therefore **normal**, not evidence that extensions cannot see the
+cache.  Per-extension `sr_check`/`sr_start` prints, not another `srmap`, are the
+right check.
+
+ext25's 10-minute `checkin=0` while ext24 checked in at 38 s must not be
+explained as "just slow" without the spawn/exec lines: check whether the widgets
+were requested (`WILL_SPAWN`), exec'd (`hakios: exec pid/path`), and what
+`sr_check` says for those pids.  If there is no spawn, it is demand/order; if
+there is exec but no check-in after minutes, the post-exec stall is back.
