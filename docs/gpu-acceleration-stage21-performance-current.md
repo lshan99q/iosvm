@@ -37,3 +37,14 @@ host 源缓冲选择/覆盖（image0 黑、fallback 被 readback 覆盖），**R
 
 `logs/s20-rle3` … `logs/s20-rle13`、`logs/s20-dirty-idle`、`logs/s20-5653`、
 `logs/s20-payload2`、`logs/s20-payload4`；system `8bf5f838` 未覆盖。
+
+## RLE 最终判定（2026-11-11 10:19，code 确认）
+
+- **RLE 判死**：image1 texture 被选中，但输入断言 `nonblack=0.00%`；FBO/
+  panel/segments2/image1 四个源全黑，host 源已穷尽。按规则不再跑 RLE。
+- 收口：性能线用 **565-only**（`GLWIRE_UPLOAD_565=1` / `glwire_upload_565=1`），
+  证据 2,436,000 B、329 host 帧、UI 正常。
+- code 侧：RLE 代码保留但默认关（`rle_wanted=0` 不执行任何 RLE fallback/assert），
+  默认 565 路径恢复无条件 glReadPixels，逐字节等价；e2e default PASS。
+- host 收口版 `78c135e2…`（132,592 B）；guest lib 仍 `3a42016b…`；branch 1723b7f。
+- 后续若还优化，是 guest present/frame_end 写 surface，不是 payload codec。
