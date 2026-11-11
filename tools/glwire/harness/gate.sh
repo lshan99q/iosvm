@@ -23,6 +23,7 @@ SYSTEM_MD5=
 WINDOW=20
 OUT=
 MINSHOT=${MINSHOT:-300000}
+BOOTMINSHOT=${BOOTMINSHOT:-300000}
 MAXSECS=${MAXSECS:-1050}
 
 usage() {
@@ -37,6 +38,7 @@ usage: gate.sh --root <root.apfs> [--system <md5>] [--window 20|120]
   --minshot   minimum screenshot bytes (default 300000; env MINSHOT also accepted)
 
 Env: IOSVM=/host/iosvm-work/hakios-xnu-kernel, HOST_ENV=..., XCMD=..., MAXSECS=...
+     BOOTMINSHOT=300000 (UI detection; default 300000, independent of --minshot check)
 Exit: 0 PASS, 1 FAIL, 2 usage.
 EOF
 }
@@ -89,7 +91,7 @@ export HOST_ENV
 echo "gate: booting $ROOT (window ${WINDOW}s, minshot $MINSHOT), artifacts $OUT"
 (
 	cd "$GLWIRE" || exit 1
-	MINFRAMES=0 REQUIRE_HOST_FRAMES=0 ZERO_RAM=1 MINSHOT="$MINSHOT" UI_GRACE="$WINDOW" \
+	MINFRAMES=0 REQUIRE_HOST_FRAMES=0 ZERO_RAM=1 MINSHOT="$BOOTMINSHOT" UI_GRACE="$WINDOW" \
 		NOUI_BY=${NOUI_BY:-900} MAXSECS="$MAXSECS" XCMD="${XCMD:-}" HOST_ENV="$HOST_ENV" \
 		./harness/boot-measure.sh "$LABEL" "$ROOT" "$MAXSECS" >> "$BOOT" 2>&1
 )
