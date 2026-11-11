@@ -42,6 +42,19 @@ to `root/etc/rc.jobs` and is run once by the `com.hakios.demo` job.  The small r
 image is mounted at **`/redwood`**, so the in-image path is
 **`/redwood/bin/hostinfo_probe`** (not `/bin`).
 
+A prebuilt arm64 binary (49K, `/usr/lib/libSystem.B.dylib`, iOS 16.5) is available at:
+
+```
+/host/iosvm-work/hakios-xnu-kernel/userland/obj/hostinfo_probe
+/host/iosvm/logs/s22-ext/probe-bin/hostinfo_probe
+```
+
+so a container without clang can use it directly:
+
+```sh
+EXTRA="/host/iosvm-work/hakios-xnu-kernel/userland/obj/hostinfo_probe" RC_JOBS=/host/iosvm-work/hakios-xnu-kernel/userland/guest-rc.jobs.hostinfo   ./build.sh root.apfs
+```
+
 `guest/rc.jobs.hostinfo` is the one-line job file:
 
 ```sh
