@@ -1,35 +1,40 @@
-# Stage 21 gate.sh 端到端验证（cell1 分支未 PASS）
+# Stage 21 gate.sh 端到端验证（PASS + FAIL 两发）
 
-**结论：gate.sh 本身能跑通、产物与 FAIL 明细正确；但 cell1 基线在这台机上三次
-都没 PASS —— 前两次是 gate.sh 调用侧环境（IOSVM / QEMU_EFI / QEMU_VARS）没传，
-第三次进 UI 阶段 panic（Ticket spinlock timeout）+ hostframes=0、截图 20K。**
+**结论：gate.sh 通过端到端验证。**
+- **PASS**：`GATE: PASS  (checks: shot=427K names=18 0x502=0 panic=0)`（cell1 纯本地基线，`QEMU_SMP=1`）。
+- **FAIL**：`GATE: FAIL  (checks: shot=435K names=18 0x502=0 panic=0)` +
+  `GATE: FAIL reason: screenshot 445074 B < 10485760 B`（`--minshot 10MB` 故意缺项，精确指出哪一项不满足）。
 
-## 三次尝试
+## PASS（cell1）
 
-| # | 问题 | 结果 |
+- root `/tmp/root-local.apfs` `f39b910543189be4934a48c4d495e928`；system `8bf5f838…`；
+- `gate.sh --root /tmp/root-local.apfs --out /tmp/gate-cell1`；
+- 输出：`GATE: PASS (checks: shot=427K names=18 0x502=0 panic=0)`；
+- `gate.md`：screenshot 436770 B / names 18 / 0x502 0 / panic 0 / SIGSEGV 0 / artifacts PASS；
+- `boot.log`：`end=ui ui=870s ui_bytes=436770 guestframes=22 hostframes=0 panic=0 biggest=436770`；
+- 产物：`shot.png`（427K）、`guest.log`、`host.log`、`boot.log`、`md5s.txt`、`gate.md`。
+
+## FAIL（--minshot 10MB）
+
+- `gate.sh --root /tmp/root-local.apfs --minshot 10MB --out /tmp/gate-fail`；
+- 输出：`GATE: FAIL (checks: shot=435K names=18 0x502=0 panic=0)`；
+- `GATE: FAIL reason: screenshot 445074 B < 10485760 B`（只有 screenshot 一项 FAIL，
+  names/0x502/panic 仍 PASS —— 说明脚本能指出具体失败项，而不是只给 FAIL）；
+- `gate.md` 表格同样只把 screenshot 标 FAIL。
+
+## 调用侧修复记录（验证中发现并已由 code 修）
+
+| # | 问题 | 修复 |
 |---|---|---|
-| 1 | `boot-measure.sh` 的 `IOSVM` 默认 `/home/lshan/...`，gate.sh 未导出 | `no such directory`，立即 FAIL |
-| 2 | 补 `IOSVM`：`run.sh: no UEFI firmware found`（gate.sh 未传 QEMU_EFI/QEMU_VARS） | qemu 起不来，0 帧 |
-| 3 | 补 `QEMU_EFI/QEMU_VARS` | UI 阶段 **panic=1**（`Ticket spinlock[...] timeout @lock_ticket.c:386`）、hostframes=0、shot=20K |
+| 1 | `boot-measure.sh` 的 `IOSVM` 默认 `/home/lshan/...` | gate.sh 内置并 export `IOSVM` |
+| 2 | `run.sh` 缺 `QEMU_EFI/QEMU_VARS` | gate.sh 内置并 export |
+| 3 | `boot-measure.sh` 的 `GLWIRE` 默认 `/home/lshan/...` | 运行时用 `GLWIRE=` 覆盖（建议同样内置） |
+| 4 | `QEMU_SMP` 未传导致 cell1 用 4 核、Ticket spinlock panic | gate.sh 默认 `QEMU_SMP=1` |
 
-## 第三发关键日志
+- 第 1/2/4 已由 code 的 `006c44e` 修掉；第 3 我用 `GLWIRE=/host/iosvm/tools/glwire`
+  覆盖跑通，建议 gate.sh 也内置 `GLWIRE` 默认值。
 
-- guest：`panic(cpu 1 caller 0xfffffff007af0024): Ticket spinlock[0xfffffff007b0d880] timeout after 60000047 ticks ... @lock_ticket.c:386`
-- boot：`end=crash ui=0s ui_bytes=0 guestframes=3 hostframes=0 panic=1 biggest=19602`
-- gate.md：screenshot 20K < 300K、names 0 < 5、0x502=0、panic=1。
+## 归档
 
-## 判断
-
-- **gate.sh 的产物/明细是对的**：out 下有 `gate.md`、`md5s.txt`、`shot.png`、
-  `guest.log`、`host.log`、`boot.log`，FAIL 能指出 screenshot/names/panic 三项。
-- 前两次 FAIL 是**脚本读错/缺失环境**（符合用户「先判断是不是脚本读错产物路径」），
-  不是判据问题；第三次是 cell1 本身 panic，未复现 10.91 fps 基线。
-- 建议 code：gate.sh 内置 `IOSVM` / `QEMU_EFI` / `QEMU_VARS` 默认值；并核对
-  cell1 当前 root（`f39b9105`）+ system（`8bf5f838`）组合是否仍能 PASS。
-
-## 未完成
-
-- FAIL 分支的「故意缺项」用 `--minshot 10MB` 还没单独跑（cell1 已 FAIL，未获得
-  干净 PASS 基线对照）；等 code 修 gate.sh 默认值 + cell1 组合后可补。
-
-Artifacts: `/host/iosvm/logs/s20-gate-verify/cell1/`.
+`logs/s20-gate-verify/cell1-pass/`（PASS）、`logs/s20-gate-verify/cell1-fail-10mb/`（FAIL）、
+`logs/s20-gate-verify/cell1/`（早期 panic 失败记录）。
