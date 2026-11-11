@@ -83,11 +83,16 @@ cd /host/iosvm-work/hakios-xnu-kernel
 make kernel
 ```
 
-Current container blocker: the generated XNU build config references
-`/home/lshan/DSH-desktop/iosvm-work/...`; `/home/lshan` is not writable here, so the
-build stops with `No rule to make target '/home/lshan/...'` (not a compile error in the
-patch).  Re-run in the build container where the tree is at that path, or regenerate the
-build config from the current root (`xnu/export.sh`, `make kernel`).
+Current container blockers (after deleting the stale `BUILD/obj`; that removed the
+`/home/lshan/...` path errors):
+
+1. `bison: No such file or directory` for `SETUP/config/parser.c` (host build tool);
+2. `fatal error: 'uuid/uuid.h' file not found` in the host tools.
+
+Both are missing build dependencies, not patch errors.  A build container needs
+bison/flex/m4 and libuuid headers (or the tree's generated `BUILD/obj` from a matching
+host), then `make kernel`; `strings hakios-kernel | grep 'hakios: host_info'` is the
+no-boot proof that the patch linked.
 
 Self-check without boot:
 
