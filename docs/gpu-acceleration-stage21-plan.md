@@ -138,7 +138,7 @@
 | 项 | 结论 | 证据 |
 |---|---|---|
 | **性能（565-only，已收口）** | 纯本地 **10.91 fps**；静止 **4.6–5.0 fps**；滚动 **~1.8 fps**；RLE **判死**（14 发，输入黑）；payload 链 = 4.9 MB 拷贝 → 逐像素 → wire 4.5 MB/s；dirty 只适用静止/局部 | `docs/gpu-acceleration-stage21-performance-current.md`、`logs/s20-dirty-idle/`、`logs/s20-rle14/`、`logs/s20-5653/` |
-| **P1（冻结）** | 虚线真实来源 = **native legacy `GL_ALPHA` teximage**；三个 scrub 点都没打中；code 补终局页；**未修复、冻结** | `docs/gpu-acceleration-stage20-p1-labeldash.md`、`logs/s20-p1-labeldash/`、`logs/s20-p1-validation/`；code 终局页待补 |
+| **P1（冻结）** | 虚线真实来源 = **native legacy `GL_ALPHA` teximage**；三个 scrub 点都没打中；终局页见 `stage21-p1-copyscrub.md`；**未修复、冻结** | `docs/gpu-acceleration-stage21-p1-copyscrub.md`、`docs/gpu-acceleration-stage20-p1-labeldash.md`、`logs/s20-p1-copyscrub/`、`logs/s20-p1-labeldash/` |
 | **壁纸（不成立）** | PosterBoard 托管实时场景，SpringBoard 无位图；静态兜底替代不了；只剩 extension 路径（已封） | P2 收口、`docs/gpu-acceleration-stage19-closure.md`、runbook §4.15 系 |
 | **P0** | 历史证据 + **内容判据**（≥5 名称 / 截图 ≥300KB / 无 panic）；P0 不是「当前同帧可复现」 | `logs/s20-p0-repro/`、`logs/s20-p0-8bf5-recheck/`、`logs/s20-p0-matrix/`、decisions D9 |
 
@@ -158,9 +158,10 @@
 2. **截图**：`shot` 存在且 **≥300,000 B**；否则 FAIL。
 3. **无 panic**：host/guest log 中 `panic(` / `SIGSEGV` / `usertrap` 计数为 0；否则 FAIL。
 4. **`0x502`**：host log `glerror 0x502` 计数为 **0**；否则 FAIL。
-5. **产物**：把实际截图路径、字节数、三项结果写进 `gate-result.md`。
+5. **产物**：把实际截图路径、字节数、三项结果写进 `gate.md`。
 
-输出：`gate-result.md`（PASS/FAIL + 每项证据 + system/lib md5），进程退出码 0/1。**本阶段只定义规范；脚本入口 `tools/glwire/harness/gate.sh`（code 正在实现，exp 会做 PASS/FAIL 双向验证）。**
+输出：`gate.md`（PASS/FAIL + 每项证据 + system/lib md5），进程退出码 0/1。**脚本已实现并验证：`tools/glwire/harness/gate.sh`（code 实现，exp 做 PASS/FAIL 双向验证）。**
+- 已验证 PASS：`GATE: PASS (checks: shot=427K names=18 0x502=0 panic=0)`；FAIL 分支能精确报 `screenshot 445074 B < 10485760 B`。
 
 - 脚本入口：`tools/glwire/harness/gate.sh`
 - 验证记录见 `logs/s20-gate-verify/`。
@@ -179,6 +180,48 @@
 
 - **extension check-in**：需要 XNU/launchd 层改动；当前缺工具链/注入能力。若立项，见 stage 20 E1 C 与 D4。
 - **virtio-gpu**：大工程，**仅评估，不启动**；见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`。
+
+### A. 三条命令复现
+
+> 前提：system 必须是 **`8bf5f838`**（P0 参考 system；不是 6be）；root 镜像来源见下，换机器必须用同 md5 的 root/system。
+
+1. **纯本地基线（cell1）**
+   ```bash
+   tools/glwire/harness/gate.sh --root /tmp/root-local.apfs --out /tmp/gate-cell1
+   ```
+   - `/tmp/root-local.apfs` = **P4 attempt3 cell1** 构建（root md5 `f39b910543189be4934a48c4d495e928`）。
+
+2. **远程路径对照（cell3）**
+   ```bash
+   tools/glwire/harness/gate.sh --root /tmp/root-w15.apfs --out /tmp/gate-cell3
+   ```
+   - `/tmp/root-w15.apfs` = **P4 attempt2 cell3**（root md5 `785bcbac82c9a117684b2d40b7375d48`；cell3/cell4 同一份）。
+   - 若要 **565/fast**，加 env 前缀：
+     ```bash
+     XCMD="glwire_local=0 glframes=1 touch_lat=1 glwire_upload_565=1 glwire_upload_fast=1 glwire_dirty_upload=0 glwire_ack_ms=0" \
+     HOST_ENV="GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1 GLWIRE_POLL_MS=16 GLWIRE_UPLOAD_565=1" \
+     tools/glwire/harness/gate.sh --root /tmp/root-w15.apfs --out /tmp/gate-cell3
+     ```
+
+3. **看结果**
+   ```bash
+   cat /tmp/gate-cell1/gate.md
+   ```
+   - `gate.md` 含 shot/names/`0x502`/panic 与产物 md5。
+
+### B. 现在能做什么 / 不能做什么
+
+**能：**
+
+1. 纯本地 **10.91 fps** 可交互。
+2. 标签可读（P0 内容判据 PASS）。
+3. 门禁一条命令判 PASS/FAIL（已验证 PASS shot=427K/names=18；FAIL 能精确指出 `screenshot ... < ...`）。
+
+**不能：**
+
+1. 远程路径不能用：滚动 **~1.8 fps**、RLE 判死。
+2. 壁纸黑：PosterBoard 托管实时场景，静态兜底不成立。
+3. 标签下虚线仍在（P1 冻结）；真 widget 仍是占位。
 
 ## 不做（本阶段）
 
