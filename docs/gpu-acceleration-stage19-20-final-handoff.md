@@ -1,6 +1,6 @@
 # Stage 19 + 20 最终移交
 
-> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **历史 3/3 通过**，但**当前不可稳定复现**：8bf5 同配方 12:52 **99.99%**、15:42 **89.56%**；6be 约 89.50%。交付基线 = 「历史证据 + 复现性未达标」。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 判 A、修复中。
+> **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **历史 3/3 通过**，但**当前不可稳定复现**：8bf5 同配方 12:52 **99.99%**、15:42 **89.56%**；6be 约 89.50%。交付基线 = 「历史证据 + 复现性未达标」。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 冻结（Stage 21 判死，不再修复）。
 > 本页只做结论、证据索引、未解决项与「不做」清单；细节以 runbook/decisions/logs 为准。
 > 不写 P2/P3 真路径通过，不写性能达标，不写 watchdog 已修。
 
@@ -24,7 +24,7 @@
 | 项 | 终局 | 一句话依据 |
 |---|---|---|
 | **P0** | **历史 3/3；当前同帧不稳；判据=内容判据** | 历史：v7 99.85%、v9 99.98%、p0-3 98.81%（8bf5）。当前 8bf5 同配方：12:52 **99.99%**、15:42 **89.56%**；6be ~89.50%。adjacent-pair 矩阵：**无有效 ≥95 配对**（最高 89.56%；100% 是 both-black 无效）→ **P0 同帧 diff 只作历史证据，门禁降级为内容判据**（≥5 可读名称 + 截图 ≥300KB + panel/picture MATCH + 无 panic）；内容判据未复跑前不写当前 PASS。 |
-| **P1** | **重开后判 A、修复中（未修复）** | 虚线段在 90 高 label tile 底部行：Photos row61 54px/alpha247、FaceTime 61–62 47px、Wallet 58–61、label-4 53–56；B 采样放大已排除。第一次 `glyph_last_row=1` FAIL（Weather 掉笔画、虚线仍在）；`label_dash_rows=53-62` crash；`61-62` 无效果。修法只走 label tile row61/62，验收 guest 截图；P1 未修复。 |
+| **P1** | **冻结/未修复（Stage 21 判死）** | 虚线真实来源 = native legacy `GL_ALPHA` teximage；三个 scrub 点未命中（mapping 0/cleared 0）；`glyph_last_row=1` 掉笔画、`label_dash_rows=53-62` crash、`61-62` 无效果；按预算冻结，不再修复。见 `docs/gpu-acceleration-stage21-p1-scrub.md`、`stage21-performance-current.md`。 |
 | **P2** | **关闭/未达成** | lookup 已修、PosterBoard running，但壁纸 window/PBUI 远程 VC 链在屏而 contents=0；根因与 P3 同源：extension check-in timeout；四路径走完，不再投入 |
 | **P3** | **真路径不可行 + fallback5 已交付** | surface 枚举 30 面无 widget 候选；allContexts 按进程；无零参 snapshot；extension exec 后 ~0.5s 死亡；guest-side 占位（24px 棋盘+白框+双黄对角线）PASS，明确非真 widget |
 | **P4** | **`0x502` 通过；仅 cell1 可用** | 四格/三格历史 `0x502` 全 0；cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2/3 远程路径不可用；cell4 NOT RUN 是判决；不写性能达标 |
@@ -45,7 +45,7 @@
 |---|---|---|---|
 | P0 历史 3/3（当前不稳定） | runbook §4.33、`docs/gpu-acceleration-stage19-p0-3-results.md`、closure §1、decisions D9 | `logs/s19o-p0-3/`、`logs/s20-p0-repro/`、`logs/s20-p0-8bf5-recheck/` | `498157c`、`66a7d54`、`024c10e`、`fda19b3`、`6935ed3` |
 | P0 当前复现性 | runbook §4.33、decisions D9、closure §1 | `logs/s20-p0-8bf5-recheck/`、`logs/s20-p0-recheck/`、`logs/s20-p0-isolateA/`、`logs/s20-p0-isolateB/`、`logs/s20-p0-hostfix/`、`logs/s20-p0-matrix/` | `fba31f8`、`767053f`、`fff2678`、`6935ed3`、`e80e1f5` |
-| P1 重开 A/修复中 | runbook §4.32、`docs/gpu-acceleration-stage19-p1-ab-minimal.md`、closure §1 | `logs/s20-p1-54px-dash/`、`logs/s20-p1-validation/`、`logs/s20-p1-labeldash/` | `841bd93`、`a75efd1`、`c139a19` |
+| P1 冻结/判死 | `docs/gpu-acceleration-stage21-p1-scrub.md`、`docs/gpu-acceleration-stage21-performance-current.md`、runbook §4.32 | `logs/s20-p1-54px-dash/`、`s20-p1-validation/`、`s20-p1-labeldash/` | `841bd93`、`a75efd1`、`c139a19`、`e420b6a` |
 | P2 未达成 | runbook §4.15/§4.17/§4.24/§4.25、decisions D3、closure §1 | `logs/s19o-p2/`、`logs/s19o-p2d/`、`logs/s19o-p2e/`、`logs/s19o-p2e-c2/` | `d73c1e8`、`f57eeb8`、`eac8128` |
 | P3 真路径不可行 | runbook §4.26–§4.30、decisions D1、closure §1 | `logs/s19o-p3a/`、`logs/s19o-p3b-d1/`、`logs/s19o-p3b-d2/`、`logs/s19o-p3b-d3/`、`logs/s19o-p3-surface-enum/` | `c2e9d23`、`97506d9`、`f339014`、`2acbd0d` |
 | P3 fallback5 PASS | runbook §4.31、decisions D2/E5、closure §1 | `logs/s19o-p3-fallback5/`（`widget-area.png`、report） | `453e9ae`、`66a7d54`、`024c10e` |
@@ -69,14 +69,9 @@
 4. 退出标准：extension 活过 60s + `checked in as alive` → 回 P2/P3 重开判据；明确 exit code/backtrace → 评估单点修复；都没有 → 写「不可行/需更多信息」，不再投入。
 5. 权限/工具：guest 工具链 `IOSVM_USE_LLD=1`（clang 19.1.7 + THEOS SDK）；launchd limits 路径 `/private/etc/com.apple.xpc.launchd.limits.plist`；当前没有改 extension 二进制的产物。
 
-### 3.2 P1 文字质量（未修，修复中）
+### 3.2 P1 文字质量（冻结，未修复）
 
-P1 重开后判 **A（tile 内容/行映射）**：虚线段写在 90 高 label tile 底部行（Photos row61 54px/alpha247；FaceTime 61–62 47px；Wallet 58–61；label-4 53–56）；B（采样放大）已排除。修在 **guest label tile 生成/行映射**，不是 host 合成。
-
-**已失败**：`glyph_last_row=1` 清到 42 高 glyph 笔画底部（Weather 掉笔画、虚线仍在）；`label_dash_rows=53-62` crash；`61-62` 无可见效果。
-
-**下一步**：只改 label tile 虚线行（row61/62，实际还出现 61–63，按 per-tile offset），验收 guest 截图；**P1 未修复**，不写已修。不要再用全局 `GLYPH_TRIM`/`TC0_SANITIZE`/skip13 盲试。
-
+P1 已按 Stage 21 预算**冻结**：虚线真实来源是 native legacy `GL_ALPHA` teximage；三个 scrub 点（`glyph_last_row`、`label_dash_rows=53-62`、`61-62`）均未命中或引入掉笔画/crash。P1 未修复，不再续查；证据见 `docs/gpu-acceleration-stage21-p1-scrub.md`。
 ### 3.3 by-reference / w15 性能
 
 cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、cell3 2 帧/772s），不是 host 回放能力问题（host 单帧 29.6–59.0 ms，16–33 fps 能力）。**要谈性能必须换配置**：多核 guest、GPU 直通/更快的 GL 路径、或减少 wire 数据量；当前配置下不再追加性能实验。
