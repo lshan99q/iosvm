@@ -156,3 +156,29 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 - 不再猜 boot-arg（追踪默认开）；
 - 不碰宿主 GPU；不启动 virtio-gpu；
 - 不写 P2/P3 已修：CheckIn 从未发生。
+
+## 8. Tool/method: `ustacks` name vs pid
+
+`ustacks` matches names with:
+
+```c
+strncmp(proc_name_address(proc), ustacks_name, sizeof(ustacks_name))
+```
+
+`ustacks_name` is 32 bytes but `proc_name_address()` is the **16-byte `p_comm`**.
+A name longer than **15 characters** therefore cannot match:
+`BooksWidgetExtension` (21) is stored as `BooksWidgetExte` (15).  The QEMU input
+path `touch.py stacks NAME` is also uppercase-hostile (the guest virtio keyboard
+does not process shift), so a mixed-case `p_comm` is effectively untypable that
+way.  Boot-arg names are not keyboard-typed, but the 15-character limit still
+applies.
+
+The newer kernel (`06bf09c…`) adds a numeric mode in `ustacks_fire()`: if the
+target is all digits, it matches `proc_pid(proc)`.  Use the pid from
+`hakios: exec pid=N path=…` or launchd's `service spawned with pid N` and
+`touch.py stacks <pid>`.
+
+Consequence for ext3: `PodcastsWidget` was a valid sample because it is
+**14 characters** (fits `p_comm`) and the boot argument could carry its uppercase
+letters; the stack is valid, but this is **not a general extension-sampling
+method**.  Do not infer that arbitrary appex names can be sampled by name.

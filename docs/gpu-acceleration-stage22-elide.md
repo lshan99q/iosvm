@@ -48,16 +48,19 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 
 ## 4. Sampling: names change at exec
 
-- Before exec, the child's p_comm is `launchd` / launchd(proxyless); after exec it
-  is the real extension name.
-- ext12 `ustacks=GCWidgets` and ext13 `ustacks=launchd` both got **0 hits** because
-  the names were wrong; ext13's actual launcher is `/sbin/launchd.darwin`
-  (p_comm likely `launchd.darwin`).
-- **ext15**: sample the true post-exec names (`BooksWidgetExtension`,
-  `PeopleWidget_iOSExtension`, `WeatherWidget`, `mobilenotes.WidgetExtension`),
-  preferably by pid if the tool supports it.
-- Method lesson: confirm the real p_comm from the `exec pid=... path=...` trace;
-  do not use log short names.
+- Before exec the child's p_comm is `launchd`; after exec it is the real
+  extension name (truncated to 15 characters).
+- **Never use a name longer than 15 chars**: `ustacks` does
+  `strncmp(proc_name_address(proc), name, 32)` against a 16-byte `p_comm`.
+  `BooksWidgetExtension` is stored as `BooksWidgetExte`; `GCWidgets` is not a
+  `p_comm` at all.
+- `touch.py stacks NAME` also cannot type uppercase through the guest virtio
+  keyboard; use the numeric mode of the newer kernel (`06bf09c…`):
+  `touch.py stacks <pid>`, with the pid from `exec pid=N` / `service spawned with
+  pid N`.
+- ext12 `ustacks=GCWidgets` and ext13 `ustacks=launchd` missed for these name
+  limits, not because the process does not exist.  ext3's `PodcastsWidget` was a
+  valid but non-general 14-character boot-arg sample.
 
 ## 5. What to look for next
 

@@ -73,12 +73,15 @@ now stops **earlier**, before even that call.
 
 ## 6. ext15 sampling and trace choice
 
-- Sample the **real exec'd pid**: `BooksWidgetExtension` p_comm is 15 chars
-  (`BooksWidgetExt`), `PeopleWidget_iOSExtension` is `PeopleWidget_iO`,
-  `WeatherWidget`, etc.  Use the pid from `exec` plus `p_comm` from the launchd
-  `[name]` line.
-- `ustacks=<p_comm>`, `ustacks_at=<exec+1s>`, `ustacks_ms=1000`,
-  `ustacks_count=120`, `ustacks_threads=8`, `ustacks_tname=*`.
+- Sample the **real exec'd pid**: use the pid from `hakios: exec pid=N path=…`
+  or launchd's `service spawned with pid N`.  Do **not** derive a name from
+  `BooksWidgetExtension`: `p_comm` is 16 bytes, so its stored name is
+  `BooksWidgetExte` (15 chars), and `strncmp(..., 32)` cannot match a longer
+  string.  Mixed-case names are also awkward through the QEMU keyboard.
+- Current kernel (`06bf09c…`) numeric mode: `touch.py stacks <pid>` (or a numeric
+  `ustacks` target) matches `proc_pid()` directly.
+- Window: exec+1 s, 120 samples, `ustacks_tname=*`; 15-char p_comm aliases are
+  `BooksWidgetExte`, `PeopleWidget_iO`, `WeatherWidget`.
 - If the stack is not one of the named frames because of truncation, symbolize
   with `tools/glwire/harness/symstack.py`; the full output is richer than the
   short `ustacks` line.
