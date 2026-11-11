@@ -340,3 +340,48 @@ CLEAR mask=0x4000 viewport=(0,0,750,200) scissor=(46,142,310,310)
 因此 R1 是 **CA 的 partial redraw**：panel-3 只重画左/上 310×310 区域，panel FBO5 又从不 clear，BR 保留旧的黑/绿。
 **最小修法**：让 guest 每帧对 panel FBO5 做全幅 clear 或重画全屏背景，再让 CA 的 partial draw 叠加；**不要**改 host readback/upload，也**不要**按 375 的 scissor 猜。
 判据仍为 **BR 非黑 + dock 通栏 4 图标 + Search 居中 + P0 不回退**。不改代码、不 boot。
+
+## R1 gl=0/gl=1 对照：GL 路径特有，缺失边界 = 375×812 pt（2026-11-13）
+
+- gl=0（`inject.c:1624`，CA 保持软件渲染）：dock 4 图标、Search 居中、图标 4 列，BR 非黑 **39.3%**；
+- gl=1（Mesa/GL）：BR 非黑 **0.7%**，dock 只剩 2 图标；
+- panel 750×1624 px = 375×812 pt @2x，缺失边界 **x=375,y=812** 正好是点数。
+
+### 绘制者
+
+dock、Search、backdrop 不是某一笔 GL draw，而是 **SpringBoard 的 CoreAnimation 层**（`SBDockView`/`SBSearch`/backdrop 层）由 CA 的 EAGL renderer 合成；我们的 `eagl.c` 在
+`CA::WindowServer::EAGLServer::renderer()` 下面接管 GL。CA 软件路径按 px 直接画；GL 路径由 CA 把 layer 的 bounds（pt）交给 EAGL renderer，若 `contentsScale` 被当成 1，layer 只有 375×812，右下自然空白。
+
+### 代码检查（只读）
+
+- `inject.c` 的 `gl=0` 逻辑只负责“不加载 eagl.c，让 CA 用软件 renderer”（`inject.c:1624`）；
+- `inject.c:83` 的 `widget_scale` 只给 **widget_placeholder** 的 750-space 矩形用，和 dock/Search 无关；
+- `inject.c:1235` 的 `EDGE_SIDE 16/375`、`EDGE_TOP 16/812` 是状态栏安全区 shader 的 pt 常量，不是绘制目标；
+- `eagl_remote.rle5.c:638` 的 `remote_upload_scale` 只影响 **host 返回图像的缩放**（默认 1），不改 guest 的 viewport/scissor；
+- `eagl.c:1477` 的 `copy_width/height /= scale` 也只用于 surface 回写，不参与 CA 的绘制裁剪；
+- 全树没有在 CA 的 window/layer 上设置 `contentsScale`/`contentScaleFactor` 的代码；`inject_sb.c:1106` 只**打印** `layer.scale`，没有设置。
+
+→ **最可能：CA 的 GL renderer 拿到的 layer bounds 是 375×812 pt，`contentsScale` 没有按 2x 换算，于是只覆盖 TL/TR/BL 的一部分，BR 缺失。** 这不是 eagl 的 upload scale，也不是 host 读回。
+
+### 最小可测
+
+```text
+gl=1
+GLWIRE_DRAW_LOG=1
+GLWIRE_DUMP_TEXTURES=/tmp/r1tex
+GLWIRE_SAVE_WH=750x1624 GLWIRE_SAVE_AFTER=700
+GLWIRE_SAVE_RECORDS=/tmp/r1late
+```
+
+- `GLWIRE_DUMP_TEXTURES` 里找 **宽度≈375** 或右半全黑的纹理；`GLWIRE_DRAW_LOG` 找 **viewport/scissor 375×812** 的 pass；
+- `inject_sb.c` 的 `layers_at`（或 layer dump）打印 dock/Search/backdrop 的 **frame/contentsScale**；对照 CPU/GL 两发；
+- 若 `layers` 的 dock/Search frame 是 375×812（pt）而 `contentsScale` 为 1，即确认 pt 当 px。
+
+### 最小修法候选
+
+1. 在 SpringBoard 注入里对 **window/layer 设 `contentsScale=2`**（或 `UIScreen.mainScreen.scale` 保持 2），确保 CA 的 GL renderer 得到 750×1624；
+2. 或对 dock/Search/backdrop 这些 **pt bounds 的 layer** 在交给 GL 前按 `contentsScale` 换算成 px；
+3. 不改 `eagl_remote_upload_scale`（它只管上载），也不改 host readback；
+4. 判据：**BR 非黑、dock 通栏 4 图标、Search 居中、P0 内容判据不回退**。
+
+不改代码、不 boot。
