@@ -167,3 +167,61 @@ event, because the fault is below `host_info`, not in its switch.
 - If ext4 shows `enter`+`ret` but the extension remains at `mach_msg2`, **two boots are
   not enough**; the next evidence needed is a reply-port/MIG trace (or a rebuilt
   tracepoint in `ipc_kobject_server_internal`), not another timeout/limits boot.
+
+## 7. ext4 loader failure: `ld64.lld` does not implement the kernel layout
+
+ext4 serial (new kernel, md5 `0847e956…`, 15,902,536 B):
+
+```
+payload entry 'kernel' size f2a748
+kernel va 0..1314000 entry 0
+unexpected kernel layout
+```
+
+`llvm-objdump --macho -p hakios-kernel` shows `__TEXT vmaddr 0x0000000000000000`
+and `__PRELINK_TEXT` at `0xfa4000`; the old `hakios-kernel.prebuilt` has
+`__TEXT vmaddr 0xfffffff007004000` and `__start` at `0xfffffff00745e4a8`.
+
+Cause: **LLVM `ld64.lld` does not implement `-image_base` or `-segaddr`** (it prints
+`warning: Option '-image_base' is not yet implemented` and links the executable at
+its default `0x100000000`/relative base).  The link arguments (`linkarguments`) do
+contain `-Wl,-image_base,0xfffffff007004000` and
+`-Wl,-segaddr,__PRELINK_TEXT,0xfffffff004004000`, but LLD ignores them.
+
+The worktree has the **cctools Apple ld64** at
+`/host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld`; the `ld64`
+wrapper prefers it unless `IOSVM_USE_LLD=1`, but it failed earlier only because
+`libBlocksRuntime.so`/`libdispatch.so` were not on the loader path.  With the library
+path set, the same `-image_base` links at the right address:
+
+```sh
+LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib \
+  /host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld \
+  -arch arm64 -platform_version ios 16.5 16.5 -pie -static -e __start \
+  -image_base 0xfffffff007004000 -o /tmp/t /tmp/t.o
+# __TEXT vmaddr = 0xfffffff007004000
+```
+
+Build the kernel with cctools (not LLD):
+
+```sh
+cd /host/iosvm-work/hakios-xnu-kernel
+LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib make kernel -j8
+```
+
+Do **not** set `LD64_LLD`/`IOSVM_USE_LLD=1` for this kernel.  The host's
+`libcc_kext` (present in the normal build environment) is needed; the container here
+does not have it, so relinking its existing objects locally stops at
+`library not found for -lcc_kext` — that is a library-path issue, not a source issue.
+
+Verify before boot:
+
+```sh
+llvm-objdump --macho -p hakios-kernel | grep -A3 'segname __TEXT'
+# vmaddr 0xfffffff007004000
+llvm-nm -n hakios-kernel | grep ' S __start$'
+# fffffff00745e4a8 (or the current link address)
+strings hakios-kernel | grep -c 'hakios: host_info'   # 2
+```
+
+Only after `__TEXT vmaddr` is high should ext4 be re-run.
