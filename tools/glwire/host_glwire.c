@@ -2129,6 +2129,7 @@ static int probe_errors;
 static int keep_binding;
 static int read_panel;              /* (stage 17: read the picture from the panel-sized target) */
 static int frame_readback_ok = 1;   /* viewport nonzero: a frame with no panel draw must not send black */
+static int picture_from_fallback;  /* a fallback filled picture; do not let glReadPixels overwrite it */
 static GLuint panel_drawn_fbo;      /* the panel-sized target this frame last had a draw */
 static GLuint panel_upload_texture; /* a full-panel opcode-201 upload this frame: the fallback picture */
 static int panel_upload_frame;
@@ -4070,6 +4071,7 @@ serve_frame(struct client *client)
 			glBindFramebuffer(GL_FRAMEBUFFER, target);
 		}
 	}
+	picture_from_fallback = 0;
 	if (!frame_readback_ok && panel_upload_texture2 != 0 &&
 	    panel_upload_frame2 == (int)frames_replayed + 1) {
 		glBindTexture(GL_TEXTURE_2D, panel_upload_texture2);
@@ -4082,6 +4084,7 @@ serve_frame(struct client *client)
 		if (read_picture_rows(picture, width, height, (size_t)row_bytes2, segments2,
 		    segment_count2)) {
 			frame_readback_ok = 1;
+			picture_from_fallback = 1;
 			printf("host_glwire: read-back fallback guest surface2\n");
 			fflush(stdout);
 		}
@@ -4090,6 +4093,7 @@ serve_frame(struct client *client)
 	    panel_upload_copy_bytes == (size_t)width * (size_t)height * 4) {
 		memcpy(picture, panel_upload_copy, panel_upload_copy_bytes);
 		frame_readback_ok = 1;
+		picture_from_fallback = 1;
 		printf("host_glwire: read-back fallback nonblack panel upload\n");
 		fflush(stdout);
 	}
@@ -4097,6 +4101,7 @@ serve_frame(struct client *client)
 	    client->names.panel_width == width && client->names.panel_height == height) {
 		memcpy(picture, client->names.panel, (size_t)width * (size_t)height * 4);
 		frame_readback_ok = 1;
+		picture_from_fallback = 1;
 		printf("host_glwire: read-back fallback panel (uploaded panel surface)\n");
 		fflush(stdout);
 	}
@@ -4105,10 +4110,13 @@ serve_frame(struct client *client)
 		glBindTexture(GL_TEXTURE_2D, panel_upload_texture);
 		glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 		frame_readback_ok = 1;
+		picture_from_fallback = 1;
 		printf("host_glwire: read-back fallback texture %u (full-panel upload)\n", panel_upload_texture);
 		fflush(stdout);
 	}
-	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+	if (!picture_from_fallback) {
+		glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
+	}
 	/*
 	 * Stage seventeen, P0: the label composite is in the shadow.  Either it supplies the picture
 	 * (mode 1, the whole target as it stood right after the composite) or only the text's own
@@ -4290,7 +4298,26 @@ serve_frame(struct client *client)
 		unsigned char *upload = picture;
 		unsigned char *packed = NULL;
 		int length;
+		int rle_black = 0;
 
+		{
+			size_t samples = 0, nonblack = 0;
+
+			if (rle_wanted) {
+				for (size_t i = 0; i < frame_bytes; i += 4096) {
+					samples++;
+					if (picture[i] != 0) {
+						nonblack++;
+					}
+				}
+				rle_black = samples != 0 && nonblack * 1000 < samples * 5;
+				if (rle_black) {
+					printf("host_glwire: rle input looks black (nonblack=%.2f%%), skipped\n",
+					    samples ? (double)nonblack * 100.0 / (double)samples : 0.0);
+					fflush(stdout);
+				}
+			}
+		}
 		if (rle_wanted && !rgb565_wanted && !in_place && !frame_readback_ok) {
 			/* A frame that ends with a 0x0 viewport has no panel draw; reading it would send a
 			 * black picture over the previous one.  A D 0 reply makes the guest keep its surface. */
@@ -4302,6 +4329,18 @@ serve_frame(struct client *client)
 				return -1;
 			}
 			printf("host_glwire: rle skip empty readback\n");
+			fflush(stdout);
+		} else if (rle_wanted && rle_black && !rgb565_wanted && !in_place) {
+			snprintf(done, sizeof(done), "R %zu\n", frame_bytes);
+			if (!send_all(client->fd, done, strlen(done)) ||
+			    !send_all(client->fd, picture, frame_bytes)) {
+				free(records);
+				free(picture);
+				free(segments);
+				free(segments2);
+				return -1;
+			}
+			printf("host_glwire: rle black fallback sends BGRA full frame\n");
 			fflush(stdout);
 		} else if (rle_wanted && !rgb565_wanted && !in_place) {
 			size_t cap = frame_bytes + frame_bytes / 64 + 16;
@@ -4388,7 +4427,7 @@ serve_frame(struct client *client)
 					pixels565[at++] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
 				}
 			}
-			if (rle_wanted) {
+			if (rle_wanted && !rle_black) {
 				size_t pixels = (size_t)width * (size_t)height;
 				size_t cap = bytes565 + bytes565 / 64 + 16;
 				unsigned char *packed565 = malloc(cap);
