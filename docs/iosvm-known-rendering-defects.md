@@ -96,3 +96,47 @@ GLWIRE_SAVE_RECORDS=/tmp/r1
 - FBO/draw 都完整、只有 readback 越界 → 只加 readback 的附件尺寸校验。
 
 修复后判据固定为：**BR 非黑、dock 通栏 4 图标、Search 居中**，且 P0 内容判据不回退；**先不改代码、不起 boot**。
+
+## R1 ext27 追加：FBO/Viewport/Scissor 已排除，问题缩到 draw 几何/clear/readback（2026-11-13）
+
+ext27（`glframes=1 GLWIRE_FBO_LOG=1 GLWIRE_DRAW_LOG=1 GLWIRE_SAVE_RECORDS=/tmp/r1`）拿到：
+
+- `fbo attach ... kind 0x1702 name 1 ... 750x1624 internal 0x1908` → panel FBO 附件是**全幅**；
+- `draw#1/#2/#3 ... fbo 2 viewport 0,0 750x1624 scissor off 0,0 16x16 status 0x8cd5` →
+  viewport 全幅、scissor 关闭、FBO 完整；`0x8cd5` = `GL_FRAMEBUFFER_COMPLETE`；
+- frame1 记录 17393 B / 3 draws / 6 triangles / **0 clears**。
+
+因此前面最可疑的两条被排除：**不是小 FBO、不是 scissor 375×812、不是 viewport 半幅**。
+**BR 纯绿 = 这块从未被任何 clear/draw 写过**（如果 3 个 draw 的顶点覆盖全屏，就不应绿）。
+
+### `row 3072` 的核对
+
+`upload texture ... 750x1624 ... row 3072`：3072 / 4 = **768 px**，比 750 多 **18 px padding**。
+`host_glwire.c` 的 `write_picture_rows()` 每行只写 `width*4 = 3000` 字节，`glReadPixels` 也按 750 读；
+`row 3072` 只是 IOSurface 的 stride，**不会让 BR（x>375）整块缺失**，最多解释右缘 18 px 的错位/花边。
+所以 stride 是**次要嫌疑**，先不要按它改。
+
+### 剩下的分支（需 records 定案）
+
+1. **3 个 draw 的顶点几何只覆盖 TL/TR/BL**（full viewport 但顶点 quad 只有 3/4，或投影矩阵把右下裁掉）→ 修 guest CA/GL 的绘制几何；
+2. **draw 覆盖了 BR，但之后被 clear/覆盖**；frame1 0 clears 使其概率低，仍需看 `glClear` 与 draw 的顺序；
+3. **draw 写入 BR，但 FBO 2 的 readback 读的是另一张/未初始化 attachment**；附件已是全幅，需看 `glBindFramebuffer`/`glReadPixels` 目标；
+4. **upload 只覆盖 3/4**：`remote_surface` 的 `covered==bytes` 和 `write_picture_rows` 都是全幅，概率低。
+
+### 离线解析计划（records 到位后）
+
+- 解析 record header（version 2：12 字节），按 `spec.def` opcode 还原
+  `glViewport`/`glScissor`/`glClear`/`glClearColor`/`glBindFramebuffer`/
+  `glDrawArrays`/`glDrawElements` 的 payload；
+- 对 `glDrawArrays/Elements` 取 count/type，并结合 opcode 200 的顶点数组求 **x/y bbox**；
+- 检查 BR（x>375,y>812）是否落在任一 draw 的 bbox 内、是否在某个 clear 之后；
+- 若所有 draw bbox 都只到 375/812 → 改 guest 几何；若 bbox 覆盖 BR 但画面绿 → 改 readback/attachment 目标。
+
+### 最小修法（按解析结果二选一）
+
+- **几何缺 BR**：在 guest 的 CA/GL 侧修投影/quad，不碰 glwire 上传；
+- **readback 目标错**：在 `host_glwire.c` 读回前断言 attachment 尺寸/identity，或强制从完整 panel texture 读；
+- **stride**：若需要，host `glPixelStorei(GL_UNPACK_ROW_LENGTH, row/4)`，但这只修右缘 18 px，不修 BR。
+
+**当前状态：records 未挂载到本容器**（`/tmp/r1-*` 与 `logs/s22-ext/ext27/` 均不存在），已请 exp 复制到
+`/host/iosvm/logs/s22-ext/ext27/records/`；拿到后补最终判定。仍**不改代码、不 boot**。
