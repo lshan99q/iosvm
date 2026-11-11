@@ -511,3 +511,34 @@ printf("host_glwire: stages frame %llu req=%.1f seg=%.1f rec=%.1f replay=%.1f "
 **注意**：`panel upload` 是 **guest→host 的 records**，不是 host 的上传；host 的 `replay` 段已包含它。若要看 guest 侧 panel upload 本身，用 `hakios-remote: end of frame` + `flush ->` + `f N wait`（`eagl.c`），不要把它和 host `readPixels` 混在一起。
 
 不改代码、不 boot；打点按上面片段落到 `serve_frame()` 即可。
+
+## R1 ext37：511.83 s 在 host 的 `serve_frame` 之前，不是 replay/readback（2026-11-14）
+
+ext37（默认路径，hostargs=[] 真无 `NO_PANEL`）实测：
+
+```text
+frame2 -> frame3 interval 511.83 s
+frame3 took 37.9 ms
+```
+
+`host_glwire: frame N ... X ms` 的 `took` 从 **records 收完之后**开始，包含 replay、`glFinish`、
+`glReadPixels`、panel hash/in-place，**不含 request/segments/records 的 recv**，也不含 reply send。
+因此：
+
+- **37.9 ms 证明 replay/readPixels/panel 不是这次 511 s 的主因**；
+- **511.83 s 发生在 `serve_frame()` 开始收 request 之前，或 `recv` request/segments/records 期间**：
+  - guest 没有发下一帧（CA/GL 侧卡住或没有新帧）；
+  - 或 guest 发了 request，host 在 `recv` 等 segments/records（发送端阻塞/只发了一半）；
+- 这修正了“host panel/readback 极慢”的优先级：**host replay/readback 已排除**，重点转到 guest 帧间与 socket/recv。
+
+### 下一发最小观测
+
+1. 按 `serve_frame()` 加 `t_req/t_seg/t_rec/t_replay/t_read/t_panel/t_reply`：
+   - 若 `req` 大 → host 在等 guest 的 request；
+   - 若 `seg`/`rec` 大 → guest 发送阻塞/records 未齐；
+   - 若 `replay/read` 大 → 才回到 host。
+2. guest 侧同一时间 `ustacks`：看卡在 `glFinish`/`eglSwap`/`mach_msg`/`recv`；
+3. `GLWIRE_ACK_MS=30000` 只用于判断 guest 是否在等 host reply；若 host `reply` 只有几十 ms，ACK 不会触发；
+4. 保留 `hakios-remote: end of frame`、`flush ->`、`f N wait`，与 host `frame N` 时间对齐。
+
+**不要**再把 511 s 归因为 host `glReadPixels`：`took=37.9ms` 已经直接排除。
