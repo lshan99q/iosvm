@@ -46,10 +46,11 @@
 1. **`host_info` 完全正常（ext11/probe2）**：BASIC `kr=0 ncpu=1`、LOAD `kr=0`、
    `host_statistics64 kr=0`；「扩展卡在 host_info」**彻底排除**。
 2. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
-3. **当前唯一主症状**：扩展 `spawn → service state: running/INIT`，但**没有
-   `uncorking exec source upfront`**；日志差分显示 widget 走 **elide xpcproxy**
-   路径（无 `xpcproxy spawned`/无 exec），daemon 才有 xpcproxy+uncorking。
-   `docs/s22-ext-11-exec-diff.md`；CheckIn 自然为 0。
+3. **根因锁定：widget 走 elide-xpcproxy，exec 从未发生。** widget 有
+   `service will attempt to elide xpcproxy`×2、无 xpcproxy 子进程、无
+   `uncorking exec`（全 log widget uncorking=0）；daemon 才有 xpcproxy+uncorking。
+   CheckIn=0 是下游现象；`docs/s22-ext-11-exec-diff.md`。
+   - 下一步 ext12：采卡住 pid 的 ustacks，判「等 launchd uncork 消息」还是「exec 半路失败」。
 4. **exit 78 = `EX_CONFIG`**：ext9 的 `com.iosvm.reg` 缺 `/redwood/bin/reg_app`
    （build.sh 没编），**与扩展无关**，独立小修。
 5. **EXC_CORPSE_NOTIFY error 5 for pid 24**：pid 24 是 `configd`，不是扩展；
@@ -151,7 +152,7 @@
 1. 不再调 timeout（`ExtensionWatchdogTimeout` 已证无效）。
 2. 不再调 job（四类 job 对照已证无效）。
 3. 不再翻 watchdog 布尔（`ExtensionWatchdog=false` 让 boot 停住）。
-4. 不经 boot-arg 试；不绕过 libSystem；**不再把 host_info 当瓶颈**（ext11 已证 kr=0）。
+4. 不经 boot-arg 试；不绕过 libSystem；**不再拿 timeout/job/watchdog/host_info 当解释**。
 5. **不再用 ext3 单发栈作结论**（瞬时状态）。
 6. **不用 `ld64.lld` 链内核**（vmaddr=0 / unexpected layout）。
 7. 不碰宿主 GPU；不启动 virtio-gpu。

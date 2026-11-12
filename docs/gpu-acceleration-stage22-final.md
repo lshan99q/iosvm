@@ -35,16 +35,22 @@ probe2: before empty send (header only, no reply)
 - 崩点是一条**空 header、无 reply 的 `mach_msg`**：只有 `before`、没有 `after`。
   这是 probe 的边界 bug/已知异常，不是 host_info 阻塞。
 
-## 1.2 ext9: the actual current symptom is pre-exec
+## 1.2 ext9: widget takes the elide path and never execs
 
-- `GCWidgets[48]` (10:55:55) and `BatteriesWidget[49]` (10:55:57) spawn;
-  70 `INIT`-related lines; `service state: running`.
-- **没有 `uncorking exec source upfront`**（两个都没有）→ 仍卡在
-  **xpcproxy/launchd spawn 握手**，**exec 根本没发生**。
-- 因此 CheckIn 自然为 0；`Extension is hanging` 0（timeouts 已关）。
-- **日志差分证明 widget 走 elide 路径**：widget 有 `service will attempt to elide xpcproxy`
-  两次、无 `xpcproxy spawned with pid`、无 `uncorking exec`；正常 daemon（notifyd）
-  有 `xpcproxy spawned` + `uncorking exec`。见 `docs/s22-ext-11-exec-diff.md`。
+Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
+
+| step | daemon `notifyd` (pid 29) | widget `BatteriesWidget` (pid 49) |
+|---|---|---|
+| xpcproxy | **`xpcproxy spawned with pid 29`** | **无**（没有 xpcproxy 子进程） |
+| elide | 无 | **`service will attempt to elide xpcproxy` ×2** |
+| messages | 无 | `draining messages` ×2（含 `...apple-extension-service`） |
+| exec | **`uncorking exec source upfront`** | **无 `uncorking exec`** |
+| attach | `SOURCE_ATTACH` | `SPAWNED` → `running` → `INIT`，然后停 |
+
+- **widget 全 log 的 `uncorking exec` = 0**；daemon 的 uncorking 与
+  `xpcproxy spawned` 一一对应。
+- **结论：widget 扩展走 launchd 的 elide-xpcproxy 路径，它从未 exec**；
+  CheckIn 为 0 是这条路径的下游现象。
 - 内核 `hostport`/`host_info` 全程 0，与「没到 exec/extension 代码」一致。
 
 ## 1.3 ext8 and ext9 side observations
@@ -63,14 +69,18 @@ probe2: before empty send (header only, no reply)
 
 ## 2. Corrected conclusion
 
-1. **`host_info` is healthy**; the host_info-bottleneck theory is dead.
-2. **Current sole main symptom**: extension `spawn → running/INIT` but **no
-   `uncorking exec source upfront`** → the widget job takes the **elide-xpcproxy**
-   path (no xpcproxy spawn/exec), so exec never happens; CheckIn is 0.
-3. **ext3's host_info stack is transient** for that boot, not a universal cause.
-4. **exit 78 / corpse error 5 are not the extension blocker**:
-   exit 78 = missing `reg_app` helper; corpse pid 24 = configd bystander.
-5. **Not timeout/watchdog**: timeouts off in ext2/ext9; no hanging/kill.
+1. **根因锁定在 elide 路径：exec 从未发生。** widget 走
+   `service will attempt to elide xpcproxy`、无 xpcproxy 子进程、无
+   `uncorking exec`；CheckIn=0 是下游现象。
+2. **历史解释全部排除**：
+   - `host_info`（ext11/probe2：BASIC/LOAD/host_statistics64 全 kr=0）；
+   - `timeout`（ext2：全部关掉后仍 CheckIn 0）；
+   - `job 类型`（早前四类 job 对照无效）。
+3. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
+4. **exit 78 / corpse error 5 不是扩展阻塞**：exit 78 = `reg_app` 缺失
+   （EX_CONFIG，独立小修）；pid 24 = configd 旁证。
+5. **下一步**：ext12 采那个卡住 pid 的 ustacks，判它是
+   「等 launchd 的 uncork 消息」还是「exec 半路失败」。
 
 ## 3. Unresolved questions (handoff)
 
@@ -84,7 +94,15 @@ probe2: before empty send (header only, no reply)
 
 ## 4. Next experiments
 
-### 4.1 Exec-boundary instrumentation (next boot)
+### 4.1 ext12: sample the stuck pid
+
+- 对卡住的 widget pid（48/49）采 ustacks；判据：
+  - 栈在等 launchd 的 **uncork 消息**（MIG/receive）→ 握手的消息没到；
+  - 栈在 **exec 路径半路**（loader/dyld/exec_activate_image）→ exec 失败；
+  - 进程已消失 → 先看 exit/corpse。
+- 不预设结论；采到栈再定。
+
+### 4.2 Exec-boundary instrumentation (next boot)
 
 - `bsd/kern/kern_exec.c` at `exec_activate_image`/posix_spawn:
   `hakios: exec pid=%d comm=%s path=%s ret=%d`;
@@ -94,7 +112,7 @@ probe2: before empty send (header only, no reply)
 - Keep default-on hostport/host_info traces; do not rely on boot-arg at the end
   (`cmdline: 262 of 607` truncation).
 
-### 4.2 Static checks (no boot)
+### 4.3 Static checks (no boot)
 
 - extension job plist: `ProgramArguments`, `POSIXSpawnType`, `MachServices`,
   sandbox, `EnvironmentVariables`;
@@ -122,8 +140,8 @@ probe2: before empty send (header only, no reply)
 
 ## 7. Not doing
 
-- **不再把 `host_info` 当瓶颈**（ext11 已证 kr=0）；
+- **不再拿 timeout / job / watchdog / host_info 当解释**：已分别被 ext2/ext11/早前实验排除；
 - **不再用 ext3 单发栈作结论**（瞬时状态）；
-- 不再调 timeout/job/watchdog；不再猜 boot-arg（追踪默认开）；
+- 不再猜 boot-arg（追踪默认开）；
 - 不碰宿主 GPU；不启动 virtio-gpu；
 - 不写 P2/P3 已修：CheckIn 从未发生。
