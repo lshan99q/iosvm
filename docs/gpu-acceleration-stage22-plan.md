@@ -70,6 +70,9 @@
 | `hostinfo: OK ncpu=N mem=M` | host port/MIG 一般可用；阻塞是 **extension 特有**（或 extension 走的路径特有），不是 host_info 本身普遍坏 |
 | `hostinfo: BLOCKED after 5s` | host port/MIG **普遍阻塞**；extension 只是撞上同一个问题，不是 extension 特有 |
 | `hostinfo: KR=…` | 请求已到内核并返回错误码（不是卡住）；按错误码查（如 flavor/参数/权限），结论是“到达但回错”，不是 MIG 无回复 |
+| `hostport msg id=100` | 消息已到内核 → 问题在 **MIG 侧**（注册/分发/回复），不是用户态没发 |
+| 有 hostport 行、无 `id=100` | 请求到了内核，但不是 host_info → **extension 没查 host_info** |
+| 完全没有 hostport 行 | 消息没出用户态 → **阻塞在用户态 IPC** |
 
 **已有事实（用于解释 trace 0）**：
 
@@ -107,11 +110,34 @@
 
 ## 7. 基础设施收获（下次可直接用）
 
-- 内核构建管线已打通：**cctools ld64 + 删中间产物 + 布局/entry 自检 + payload 自动重生**。
-- **`ld64.lld` 不可用**：Ubuntu LLD 18 不实现 `-image_base`/`-segaddr`，链出
-  vmaddr=0，loader `unexpected kernel layout`；已记入不做。
-- 可用内核基线：15,789,552 B / md5 `4d9f32f5325a30d82e09cd8d2ac78e28`（13:12）。
-- 下次改内核可直接复用这套流程，不再从 boot-arg/链接器试错开始。
+### 7.1 一键内核重编
+
+`tools/kernel-rebuild.sh [marker...]`：
+
+- 自动删 `mach.development.bcm2837{,.unstripped}`；
+- 用 cctools ld64 链接（不是 `ld64.lld`）；
+- 校验 `__TEXT vmaddr=0xfffffff007004000`、`entry_va != 0`、marker 串；
+- 最后打印 `hakios-kernel` 的 md5，避免再手动算/拿错内核。
+
+### 7.2 新内核与两条追踪
+
+- 当前新内核：**md5 `759e0363196c31dd2ebb0cb01044aff1`**。
+- 含两个追踪：
+  1. `hakios: host_info`（`osfmk/kern/host.c`）；
+  2. **`hakios: hostport msg id=%d`**（`osfmk/kern/ipc_kobject.c`，
+     开关 `hakios_hostport_trace=1`）。
+- 用途：ext4/6 看请求有没有到内核 hostport；ext3 的 H2 栈可与此对照。
+
+### 7.3 编译坑：kprintf 头
+
+- 这棵 XNU 树**没有** `kern/printf.h`；`kprintf` 原型在
+  `pexpert/pexpert.h`（osfmk 侧）与 `bsd/sys/kauth.h`。
+- **不要再加 `#include <kern/printf.h>`**，否则编译直接失败。
+- 旧基线：15,789,552 B / md5 `4d9f32f5325a30d82e09cd8d2ac78e28`（13:12）；
+  新内核以 §7.2 的 `759e0363…` 为准。
+- **`ld64.lld` 不可用**：Ubuntu LLD 18 不实现 `-image_base`/`-segaddr`，
+  链出 vmaddr=0，loader `unexpected kernel layout`；已记入不做。
+- payload 自动重生仍必须保留，避免跑旧内核。
 
 ## 8. 不做
 
