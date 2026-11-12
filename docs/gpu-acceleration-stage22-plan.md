@@ -1,6 +1,7 @@
 # Stage 22 计划：extension check-in（壁纸 + 真 widget 的共同前置）
 
-> **状态：计划，未执行。** 只写目标、判据、预算和边界；不预写结论。
+> **状态：执行中（ext1–ext3 已跑，H2 确诊）。** 原 3 发预算已用完；因 H2 是
+> 源码级可修，追加 ext4/ext5 两发。只记录有证据的结论，不预写后续结论。
 > 背景：Stage 19 P2 壁纸未达成、P3 真 widget 不可行，共同阻塞是 extension
 > check-in；Stage 20 E1 判 C（不可判/不可行）。本阶段只查这一件事。
 
@@ -31,13 +32,51 @@
 - 被杀时间窗：**exec 后 5–13 s**（不同 extension 不同）。
 - 需要回答：**谁**在什么时刻、根据什么条件发起 kill；corpse 与 kill 的先后/因果关系。
 
-## 4. 预算与节奏（硬约束）
+## 4. 已执行结果（ext1–ext3）
 
-- **最多 3 发 boot**（不是 3 轮无限重试）。
+### ext1：无信息（未到 extension 阶段）
+
+- `launchd_disable_all_timeouts=1 launchd_log_serial=1` 进了 cmdline，boot 到
+  `end=acceptance ui=660s`、截图 320K、host 242 帧；但 guest 串口只落 2.3K
+  boot 头，extension 五个观测项全 0。
+- **结论：本发不能判 H1**；只证明 root/system 能到 UI、boot-arg 进了 cmdline。
+- 证据：`docs/s22-ext-01.md`、`logs/s22-ext/ext1/`。
+
+### ext2：H1 部分成立（watchdog 是门，CheckIn 仍 0）
+
+- `launchd_disable_all_timeouts=1`（去掉 serial）生效：
+  `Extension is hanging=0`、`CHECK_IN_TIMEOUT=0`、`killing extension=0`。
+- 但 `checked in as alive` 仍 **0**；6 个 widget 全部 `spawned` 后停在
+  `uncorking exec`。
+- **结论：H1 部分成立**——5 s launch watchdog 是杀进程的门；关掉后仍没有
+  CheckIn，剩 H2/H3。
+- 证据：`docs/s22-ext-02.md`、`logs/s22-ext/ext2/`。
+
+### ext3：H2 确诊，H3 排除
+
+- live `PodcastsWidget[45]`，680 s 起 90 次 ustacks，thread 0x223 每次 16 帧；
+  pid 在采样期间未死，`checked in as alive=0`。
+- 符号化后，后续 90 次全部：
+  `_mach_msg2_trap + 8` ← `_host_info + 228` ← `___pthread_init + 164`
+  ← `_libSystem_initializer + 132` ← dyld initializers。
+- 首个采样是 `_task_self_trap + 8` ← `___libkernel_init + 52` ←
+  `_libSystem_initializer + 72`。
+- **H2 确诊**：extension 活着但卡在 dyld/libSystem 初始化，**从未到 main/XPC/CheckIn**；
+  `mach_msg` 在 `pthread` 的 `host_info` 调用内部。
+- **H3 排除**：栈里没有 `xpc_main` / `bootstrap_check_in` / `xpc_connection` 帧；
+  不是 CheckIn 等待。
+- 修复目标是 `libsystem_pthread` 的 `pthread_init`/`host_info`（及内核
+  `host_info` trap），是**源码/重建修复**，不是 boot-arg。
+- 证据：`docs/gpu-acceleration-stage22-ext3-symbols.md`、`docs/s22-ext-03-symbolized.txt`、
+  `docs/s22-ext-03.md`、`logs/s22-ext/ext3/`。
+
+## 5. 预算与节奏（更新）
+
+- 原预算 **3 发已用完**（ext1/ext2/ext3）；因 H2 是源码级可修，**追加 ext4/ext5 两发**，共 5 发。
 - **每发必须先写结论，再跑下一发**；没有结论不发下一发。
-- 3 发仍不能判定 → 写 **「需更多信息」**，列出所需工具/权限，停止烧 boot。
+- ext4/ext5 仍不判定 → 写 **「需更多信息」**（见 §9），停止烧 boot。
 - 每发必须记录 **system md5 + lib md5**；不写视为不可比。
-- 起步 base 用 Stage 20 E1 control 的配置（见 `docs/gpu-acceleration-stage20-e1-control.md`）；改 base 必须显式说明。
+- base 仍用 Stage 20 E1 control 配置（`docs/gpu-acceleration-stage20-e1-control.md`）；改 base 显式说明。
 
 ### 每发结论的最小内容
 
@@ -47,43 +86,43 @@
 4. CheckIn 是否出现；extension 存活秒数；
 5. 支持/否定哪个假设，下一发怎么证伪。
 
-## 5. 判据（三条，按顺序）
+## 6. 判据（更新）
 
-1. **完整生命周期时间线**：spawn → INIT → corpse → kill，含**发起者**（launchd/xpcproxy/watchdog/其他）和时刻；不是只有“被杀了”。
-2. **排序假设 + 证伪方式**：至少给出排序后的假设列表，每条写“什么证据会支持/否定它”；不能只列现象。
-3. **成功判据（任一发）**：extension **活过 60 s** 且日志出现 **`checked in as alive`**。
+### 已拿到（ext1–ext3）
 
-> 注意：判据 1/2 是“查清”，判据 3 是“修通”。三条不必同一发完成；但 3 发预算内至少要拿到 1/2，否则按 §4 收口为「需更多信息」。
+1. **完整生命周期时间线**：spawn → INIT → corpse → kill，含**发起者**和时刻；
+   ext2/ext3 已给到 extension 停在 `uncorking exec`、pid 45 存活、无 CheckIn。
+2. **排序假设 + 证伪方式**：H1（watchdog）部分成立；H2（libSystem/pthread
+   host_info）确诊；H3（xpc/CheckIn 路径）排除。
 
-## 6. 发次结构（不预设结论）
+### ext4/ext5 的判据
 
-- **Boot 1（基线，不改变量）**：只采 lifecycle + 发起者 + CheckIn 缺失点；按结果给假设排序。
-- **Boot 2（第一假设，单变量）**：只改一个点（如 dyld/签名/entitlement/persona 或 launchd/XPC 路径之一；由 Boot 1 定），验证是否让 CheckIn 出现/存活变长。
-- **Boot 3（第二假设或确认）**：只改一个点；若前两发已指向明确根因，本发做确认；否则做第二假设证伪。
+- **ext4**：`host_info` **立即返回**——栈不再停在
+  `host_info + 228` / `pthread_init + 164` / `mach_msg2_trap`。
+- **ext5**：出现 **`checked in as alive`**，或 `Extension is hanging` 显著下降
+  （与 ext2 的 0 次对比时，以 CheckIn 出现为准；不再只比 hanging 计数）。
+- 最终成功判据（任一发）：extension **活过 60 s** 且 **`checked in as alive`**。
 
-- 三发都不动 timeout/job/watchdog（见 §7）。
-- 不以“多跑几次看看”代替假设；每发必须能回答一个具体问题。
+## 7. ext4/ext5 发次结构（不预设结论）
 
-## 7. 不做
+- **ext4（修 host_info，单变量）**：只改 `libsystem_pthread` 的
+  `pthread_init`/`host_info` 路径（host port 的 MIG 生成/返回值），验证
+  host_info 是否立即返回、栈是否离开该处。
+- **ext5（确认 CheckIn）**：在 ext4 有效的前提下，只改一个点（如 host port
+  MIG 返回/内核 host_info 语义），验证 `checked in as alive` 是否出现或
+  hanging 是否显著下降。
+- 两发都不动 timeout/job/watchdog（见 §8）；不以“多跑几次”代替假设。
+
+## 8. 不做
 
 1. **不再调 timeout**（`ExtensionWatchdogTimeout` 已证无效）。
 2. **不再调 job**（四类 job 对照已证无效）。
 3. **不再翻 watchdog 布尔**（`ExtensionWatchdog=false` 让 boot 停住）。
-4. **不碰宿主 GPU**（不装驱动、不 vfio/IOMMU/GRUB）。
-5. **不启动 virtio-gpu**（大工程，仅评估）。
-6. 不在 check-in 未解前重开 P2/P3 的视觉交付；不写「壁纸/真 widget 已可用」。
-
-## 8. 如果 3 发不判定：需要什么
-
-> 可复用的 grep 串/事件表见 `docs/s22-extension-checkin-observability.md`（草稿，未 boot）。
-
-按“缺什么写什么”列，不泛泛写“继续查”：
-
-- **launchd 侧**：verbose/serial 日志、job 的 `ProgramArguments`/`EnvironmentVariables`/`MachServices` 全量、spawn 失败返回码。
-- **xpcproxy/CheckIn 侧**：`xpcproxy` 的 exec/boostrap 日志、CheckIn 协议报文、`xpc_main` 调用栈。
-- **进程侧**：dyld 加载失败、codesign/entitlement/persona 校验、`taskgated` 日志、`EXC_CORPSE_NOTIFY` 的发送者与 reason。
-- **内核侧**：如需要，XNU 调度/异常路径 trace（需内核符号/调试权限）。
-- **工具/权限**：guest 内可用的 `launchctl`/`log`/`dtrace`（或等价）权限；宿主侧能读 guest 串口/panic log；必要时可改 launchd/extension 二进制的构建链。
+4. **不经 boot-arg 试**：H2 是源码级问题，不再用 boot-arg 绕过。
+5. **不绕过 libSystem 行为**：要修就修 `host_info` 本身，不用 shim/替换库绕过。
+6. **不碰宿主 GPU**（不装驱动、不 vfio/IOMMU/GRUB）。
+7. **不启动 virtio-gpu**（大工程，仅评估）。
+8. 不在 check-in 未解前重开 P2/P3 的视觉交付；不写「壁纸/真 widget 已可用」。
 
 ## 9. 结论（3 发预算用完，2026-11-12）
 
@@ -108,3 +147,17 @@
 2. **ext5**：验 CheckIn —— 判据：出现 `checked in as alive`（extension 活过 60 s），或 `Extension is hanging` 次数显著下降。
 
 每发归档 `logs/s22-ext/ext4|ext5/`，每发之间先写结论。**等 code 的内核补丁再起 boot，不空跑。**
+
+## 10. 如果 ext4/ext5 仍不判定：需要什么
+
+按“缺什么写什么”列，不泛泛写“继续查”：
+
+- **host port / MIG**：`host_info` 的 host port 定义、MIG 生成代码/返回值、
+  内核 `host_info` trap 的语义与超时行为。
+- **内核调试**：能读 guest 内核栈/符号、在 `host_info` trap 打断点或 trace；
+  需要内核符号/调试权限。
+- **libSystem 侧**：`pthread_init`/`host_info` 源码、返回值断言、调用者；
+  能重建 `libsystem_pthread` 并替换进 root。
+- **launchd/xpcproxy 侧**（仅作旁证）：spawn 返回码、job 环境、CheckIn 协议报文。
+- **工具/权限**：guest `launchctl`/`log`/`dtrace`（或等价）；宿主串口/panic log；
+  重建 libSystem 的构建链。
