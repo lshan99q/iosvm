@@ -1,6 +1,6 @@
 # Stage 19 + 20 最终移交
 
-> **现状指引（Stage 21 已收口）**：性能/视觉/壁纸结论见 `docs/gpu-acceleration-stage21-plan.md` 的「交付收尾包」；门禁用 `tools/glwire/harness/gate.sh`。
+> **现状指引（Stage 21 已收口）**：性能/视觉/壁纸结论见 `docs/gpu-acceleration-stage21-plan.md` 的「交付收尾包」；门禁用 `tools/glwire/harness/gate.sh`。下一阶段（extension check-in）见 `docs/gpu-acceleration-stage22-plan.md`。
 >
 > **状态：最终移交，2026-11-10 修订。** Stage 19 的 P0 **历史 3/3 通过**，但**当前不可稳定复现**：8bf5 同配方 12:52 **99.99%**、15:42 **89.56%**；6be 约 89.50%。交付基线 = 「历史证据 + 复现性未达标」。Stage 20 E1 收口 C（不可判/不可行）。P2/P3 保持关闭，P3 以 fallback5 占位交付；P1 冻结（Stage 21 判死，不再修复）。
 > 本页只做结论、证据索引、未解决项与「不做」清单；细节以 runbook/decisions/logs 为准。

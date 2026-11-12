@@ -178,7 +178,7 @@
 
 ### 下一阶段入口
 
-- **extension check-in**：需要 XNU/launchd 层改动；当前缺工具链/注入能力。若立项，见 stage 20 E1 C 与 D4。
+- **extension check-in**：需要 XNU/launchd 层改动；当前缺工具链/注入能力。若立项，见 stage 20 E1 C、D4，以及 stage 22 计划 `docs/gpu-acceleration-stage22-plan.md`。
 - **virtio-gpu**：大工程，**仅评估，不启动**；见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`。
 
 ### A. 三条命令复现
