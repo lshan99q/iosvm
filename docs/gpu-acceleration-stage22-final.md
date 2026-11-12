@@ -1,9 +1,9 @@
-# Stage 22 final: extensions never reach exec/CheckIn; host_info is healthy
+# Stage 22 final: extensions exec, then stall before CheckIn; host_info is healthy
 
 **Status: closed to the evidence boundary.**
-ext11/probe2 proves `host_info` is **completely normal**; ext9 shows the real current
-symptom: extensions go `spawn → running/INIT` but **never reach
-`uncorking exec source upfront`**, so exec/CheckIn never happens.
+ext14b's kernel exec trace proves the extensions **do exec**; they then stall in
+their own startup before `host_info`/CheckIn.  The earlier 「elide = never exec」
+reading was wrong.
 
 ## 1. Effective experiments
 
@@ -14,6 +14,7 @@ symptom: extensions go `spawn → running/INIT` but **never reach
 | **ext8** | kernel `1f8c489f…`, default hostport/host_info traces; system processes | hostport **35**（id 200×6 / 205×23 / 206×6）；host_info **15**，全部 ret=0 | `logs/s22-ext/ext8/` |
 | **ext9** | standard recipe; UI 660 s; timeouts off | GCWidgets[48]/BatteriesWidget[49] spawn, 70 INIT lines, `running`; **no `uncorking exec source upfront`**; hanging 0; CheckIn 0; hostport/host_info 0 | `logs/s22-ext/ext9/` |
 | **ext11** | probe2 before exec; kernel `1f8c489f…` | BASIC `kr=0 ncpu=1`; LOAD `kr=0`; `host_statistics64 kr=0`; crash at **empty-header `mach_msg`** (no reply) | `logs/s22-ext/ext11/` |
+| **ext14b** | kernel **`7a4dff5340ad26786e9dc70f26e69016`** with `hakios: exec pid=%d path=%s` | exec pid=45…53: Books/People/Weather/mobilenotes + AppStore/Passbook/FindMy/Sleep; all **no exit/crash**; CheckIn 0; host_info 0 | `logs/s22-ext/ext14b/` |
 
 (ext4 trace 0 is superseded; ext5 sampled the wrong name and is not counted.)
 
@@ -35,23 +36,28 @@ probe2: before empty send (header only, no reply)
 - 崩点是一条**空 header、无 reply 的 `mach_msg`**：只有 `before`、没有 `after`。
   这是 probe 的边界 bug/已知异常，不是 host_info 阻塞。
 
-## 1.2 ext9: widget takes the elide path and never execs
+## 1.2 ext14b: extensions DO exec; elide only skips xpcproxy
 
-Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
+Kernel `7a4dff5340ad26786e9dc70f26e69016` prints `hakios: exec pid=%d path=%s`;
+ext14b captured:
 
-| step | daemon `notifyd` (pid 29) | widget `BatteriesWidget` (pid 49) |
-|---|---|---|
-| xpcproxy | **`xpcproxy spawned with pid 29`** | **无**（没有 xpcproxy 子进程） |
-| elide | 无 | **`service will attempt to elide xpcproxy` ×2** |
-| messages | 无 | `draining messages` ×2（含 `...apple-extension-service`） |
-| exec | **`uncorking exec source upfront`** | **无 `uncorking exec`** |
-| attach | `SOURCE_ATTACH` | `SPAWNED` → `running` → `INIT`，然后停 |
+```
+exec pid=45 .../BooksWidgetExtension
+exec pid=47 .../PeopleWidget_iOSExtension
+exec pid=48 .../WeatherWidget
+exec pid=49 .../mobilenotes.WidgetExtension
+exec pid=50..53 AppStore/Passbook/FindMy/Sleep
+```
 
-- **widget 全 log 的 `uncorking exec` = 0**；daemon 的 uncorking 与
-  `xpcproxy spawned` 一一对应。
-- **结论：widget 扩展走 launchd 的 elide-xpcproxy 路径，它从未 exec**；
-  CheckIn 为 0 是这条路径的下游现象。
-- 内核 `hostport`/`host_info` 全程 0，与「没到 exec/extension 代码」一致。
+- launchd's `service will attempt to elide xpcproxy` **only skips the xpcproxy
+  helper**; launchd still directly executes the appex.
+- The missing `uncorking exec source upfront` in ext9/ext11 is just because the
+  elide path does not print that line — **not evidence that exec did not happen**.
+- The earlier 「widget never execs」 conclusion is **withdrawn**.
+- After exec: **no exit/crash** for these pids (still alive), `checked in as alive` = 0,
+  and whole-log `hakios: host_info` = 0.
+- Therefore the stall is **after exec, before host_info / the extension's own
+  startup**.
 
 ## 1.3 ext8 and ext9 side observations
 
@@ -69,18 +75,17 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 
 ## 2. Corrected conclusion
 
-1. **当前根因 = elide 路径：exec 从未发生（待 ext14 坐实/推翻）。** widget 走
-   `service will attempt to elide xpcproxy`、无 xpcproxy 子进程、无
-   `uncorking exec`；CheckIn=0 是下游现象。ext14 用内核 exec 记录做最终判定。
-2. **历史解释全部排除**：
-   - `host_info`（ext11/probe2：BASIC/LOAD/host_statistics64 全 kr=0）；
-   - `timeout`（ext2：全部关掉后仍 CheckIn 0）；
-   - `job 类型`（早前四类 job 对照无效）。
-3. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
-4. **exit 78 / corpse error 5 不是扩展阻塞**：exit 78 = `reg_app` 缺失
-   （EX_CONFIG，独立小修）；pid 24 = configd 旁证。
-5. **下一步**：ext14 用内核 `hakios: exec pid=%d path=%s` 记录，判 widget 的
-   pid 到底有没有 exec；有记录 → 推翻“从未 exec”，无记录 → 坐实。
+1. **Extensions do exec** (ext14b): pids 45–53, real appex paths.  The elide path
+   only bypasses xpcproxy.
+2. **After exec they stall before host_info/CheckIn**: no exit/crash, CheckIn 0,
+   whole-log `host_info` 0.  The blocker is in the extension's own startup after
+   exec, before the libSystem/host_info point ext3 once caught.
+3. **Historical explanations all excluded**: host_info (ext11 all kr=0), timeout
+   (ext2), job type (earlier), and 「elide = no exec」 (ext14b).
+4. **exit 78 / corpse error 5 are not the blocker**: exit 78 = missing `reg_app`
+   helper; pid 24 = configd bystander.
+5. **Note**: ext3's host_info stack was a transient state of that boot, not the
+   universal path.
 
 ## 3. Unresolved questions (handoff)
 
@@ -94,21 +99,18 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 
 ## 4. Next experiments
 
-### 4.1 ext12/ext13: sampling misses; switch to kernel exec trace
+### 4.1 ext12/ext13 misses and ext15 true-name sampling
 
 - **ext12**：`ustacks=GCWidgets` **0 命中**（303 条 no-process）；GCWidgets 不是
-  p_comm；真实 widget 是 `TVWidgetExtension [47]`、`RemindersWidgetExtension [48]`。
-- **ext13**：`ustacks=launchd` **0 命中**（303 条 no-process）；实际启动的是
-  `/sbin/launchd.darwin`，p_comm 很可能是 **`launchd.darwin`**，不是 `launchd`。
-- **方法教训**：不要用日志短名做 p_comm 采样目标；`ustacks` 按 p_comm 匹配，
-  名字错就是 0 命中。采样前先用 `service spawned with pid` 旁的真实名字核对。
-- **新手段（ext14）**：内核在 `bsd/kern/kern_exec.c` 的
-  `exec_activate_image()` 前打印 **`hakios: exec pid=%d path=%s`**，**默认开**，
-  不依赖会被截断的 boot-arg。
-  - 新内核 md5 **`9e3a2c807ab30c77a8a97023f94d2d28`**。
-  - ext14：标准配方 **1100 s**，只看串口。
-  - **判据**：widget 的 pid 是否有 exec 记录 → 有 = 推翻「elided 子进程从未
-    exec」；无 = 坐实。等结果，不预写。
+  p_comm。
+- **ext13**：`ustacks=launchd` **0 命中**；实际是 `/sbin/launchd.darwin`。
+- **原因**：exec 之前 p_comm 是 launchd(proxyless)/`launchd`；**exec 之后 p_comm
+  就是真名**（`BooksWidgetExtension`、`PeopleWidget_iOSExtension`、`WeatherWidget`、
+  `mobilenotes.WidgetExtension` 等）。
+- **ext15**：用 ext14b 的真名采样（BooksWidgetExtension 等），不再用日志短名。
+- **方法教训**：采样前先用 exec trace 确认真实 p_comm；exec 前后名字不同。
+- 判据：栈在扩展自身启动（dyld/libobjc/UIKit/NSExtensionMain）还是
+  `pthread_init → host_info`；不再猜 launchd。
 
 ### 4.2 Exec-boundary instrumentation (next boot)
 
@@ -149,6 +151,7 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 ## 7. Not doing
 
 - **不再拿 timeout / job / watchdog / host_info 当解释**：已分别被 ext2/ext11/早前实验排除；
+- **不再用「elide = 不 exec」解释**：ext14b 已证 exec 发生；
 - **不再用 ext3 单发栈作结论**（瞬时状态）；
 - 不再猜 boot-arg（追踪默认开）；
 - 不碰宿主 GPU；不启动 virtio-gpu；

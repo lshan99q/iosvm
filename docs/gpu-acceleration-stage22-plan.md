@@ -1,6 +1,6 @@
 # Stage 22 计划：extension check-in（收口）
 
-> **状态：主收口（2026-11-12）；ext11 定论：host_info 正常，卡在 exec 前。**
+> **状态：主收口（2026-11-12）；ext14b 更正：扩展确实 exec，卡在 exec 后。**
 > ext1 工具无效 / ext2 H1 部分 / ext3 H2 瞬时 / ext4 trace 0 / ext5 工具错误；
 > ext8 host port 健康；ext9 spawn 后无 exec/CheckIn；ext11 probe2 host_info 全部 kr=0。
 > 目标（未达成）：搞清 extension exec 后 5–13 s 被杀的根因，让 CheckIn 能发出；
@@ -46,13 +46,12 @@
 1. **`host_info` 完全正常（ext11/probe2）**：BASIC `kr=0 ncpu=1`、LOAD `kr=0`、
    `host_statistics64 kr=0`；「扩展卡在 host_info」**彻底排除**。
 2. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
-3. **当前根因（待 ext14 坐实）= widget 走 elide-xpcproxy，exec 从未发生。**
-   widget 有 `service will attempt to elide xpcproxy`×2、无 xpcproxy 子进程、无
-   `uncorking exec`（全 log widget uncorking=0）；CheckIn=0 是下游现象。
-   - ext12：`ustacks=GCWidgets` 0 命中（GCWidgets 非 p_comm）；真实是 TVWidgetExtension[47]、RemindersWidgetExtension[48]。
-   - ext13：`ustacks=launchd` 0 命中；实际是 `/sbin/launchd.darwin`，p_comm 很可能是 `launchd.darwin`。
-   - 教训：不要用日志短名做 p_comm 采样目标。
-   - ext14：新内核 `9e3a2c807ab30c77a8a97023f94d2d28`，在 `exec_activate_image()` 前默认打印 `hakios: exec pid=%d path=%s`；标准配方 1100 s 只看串口，判 widget pid 有无 exec 记录。
+3. **ext14b 更正：扩展确实 exec，卡在 exec 之后、host_info 之前。**
+   - 内核 `7a4dff5340ad26786e9dc70f26e69016` 打印 `hakios: exec pid=%d path=%s`；
+     ext14b 看到 exec pid 45–53（Books/People/Weather/mobilenotes/AppStore/Passbook/FindMy/Sleep）。
+   - elide 只跳过 xpcproxy，仍直接 exec appex；缺 `uncorking exec` 只是日志差异。
+   - exec 后无 exit/crash（仍活着）、CheckIn 0、全 log host_info 0 → 卡在 extension 自身启动。
+   - ext12/13 采样 0 命中是 p_comm 名字错；exec 后 p_comm 就是真名；ext15 用真名采样。
 4. **exit 78 = `EX_CONFIG`**：ext9 的 `com.iosvm.reg` 缺 `/redwood/bin/reg_app`
    （build.sh 没编），**与扩展无关**，独立小修。
 5. **EXC_CORPSE_NOTIFY error 5 for pid 24**：pid 24 是 `configd`，不是扩展；
@@ -155,15 +154,16 @@
 2. 不再调 job（四类 job 对照已证无效）。
 3. 不再翻 watchdog 布尔（`ExtensionWatchdog=false` 让 boot 停住）。
 4. 不经 boot-arg 试；不绕过 libSystem；**不再拿 timeout/job/watchdog/host_info 当解释**。
-5. **不再用 ext3 单发栈作结论**（瞬时状态）。
-6. **不用 `ld64.lld` 链内核**（vmaddr=0 / unexpected layout）。
-7. 不碰宿主 GPU；不启动 virtio-gpu。
-8. 不在 check-in 未解前重开 P2/P3 的视觉交付；不写「壁纸/真 widget 已可用」。
+5. **不再用「elide = 不 exec」解释**：ext14b 已证 exec 发生。
+6. **不再用 ext3 单发栈作结论**（瞬时状态）。
+7. **不用 `ld64.lld` 链内核**（vmaddr=0 / unexpected layout）。
+8. 不碰宿主 GPU；不启动 virtio-gpu。
+9. 不在 check-in 未解前重开 P2/P3 的视觉交付；不写「壁纸/真 widget 已可用」。
 
 ## 9. 预算与收口
 
 - 主预算 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 瞬时、ext4 trace 0、ext5 工具错误。
-- **ext8**：host port/MIG + host_info 健康；**ext9**：扩展 spawn/INIT 但无 `uncorking exec`、CheckIn 0；**ext11**：probe2 host_info 全部 kr=0。
-- 下一阶段主战场 = **widget 的 elide-xpcproxy 路径/exec 前握手**；不再修 kernel host_info。
+- **ext8**：host port/MIG + host_info 健康；**ext9**：扩展 spawn/INIT、CheckIn 0；**ext11**：probe2 host_info 全部 kr=0；**ext14b**：扩展确实 exec，卡在 exec 后。
+- 下一阶段主战场 = **exec 后、host_info 前的 extension 自身启动**；不再修 kernel host_info、不再用 elide=不 exec。
 - 已知异常：空 header `mach_msg` 崩；不进本阶段任务。
 - 未达成成功判据：没有任何一发出现 `checked in as alive`（extension 活过 60 s）。
