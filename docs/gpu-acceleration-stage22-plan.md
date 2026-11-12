@@ -1,7 +1,8 @@
 # Stage 22 计划：extension check-in（收口）
 
-> **状态：收口（2026-11-12）。** 预算用尽：ext1 工具无效 / ext2 H1 部分 /
-> ext3 H2 确认 / ext4 trace 0 / ext5 工具错误。本阶段不再 boot，回守望。
+> **状态：主收口（2026-11-12），随后重开 ext6 子线（1 发）。** 主预算用尽：
+> ext1 工具无效 / ext2 H1 部分 / ext3 H2 确认 / ext4 trace 0 / ext5 工具错误；
+> ext6 只做 host_info 探针，跑完无论结果写结论再回守望。
 > 目标（未达成）：搞清 extension exec 后 5–13 s 被杀的根因，让 CheckIn 能发出；
 > 解锁壁纸（P2）与真 widget（P3）。**P2/P3 不因本阶段重开。**
 
@@ -50,6 +51,35 @@
    - 下一步假设：**host port/MIG 服务端未就绪**，调用方在等一个不会来的回复；
      不是 kernel `host_info` switch 内部阻塞。
 
+## 5.1 ext6（重开子线）：host_info 探针
+
+> **预算：1 发 boot**；不需要 UI，只要 rc 执行到探针。跑完无论结果都写结论。
+
+**目的**：把「extension 特有阻塞」与「host port/MIG 普遍阻塞」分开。
+
+**工具**：repo `guest/hostinfo_probe.c` → 复制到 worktree `userland/src/hostinfo_probe.c`
+（照 `net_test.m` 模板：worker 线程 + 1 s send timeout + **5 s 总超时**；输出走
+**serial**）；编译到 `root/bin/`，镜像内是 `/redwood/bin/hostinfo_probe`，
+`rc.darwin` 加一行跑一次。**120 s 足够，不等 UI**；记录 system/lib/root md5。
+准备/注入步骤见 `docs/s22-ext-06-plan.md`、`docs/gpu-acceleration-stage22-hostinfo-probe.md`。
+
+**判据（三种输出对应三种结论）**：
+
+| 输出 | 结论 |
+|---|---|
+| `hostinfo: OK ncpu=N mem=M` | host port/MIG 一般可用；阻塞是 **extension 特有**（或 extension 走的路径特有），不是 host_info 本身普遍坏 |
+| `hostinfo: BLOCKED after 5s` | host port/MIG **普遍阻塞**；extension 只是撞上同一个问题，不是 extension 特有 |
+| `hostinfo: KR=…` | 请求已到内核并返回错误码（不是卡住）；按错误码查（如 flavor/参数/权限），结论是“到达但回错”，不是 MIG 无回复 |
+
+**已有事实（用于解释 trace 0）**：
+
+- H2：ext3 的 90 次采样指向 `pthread_init → host_info → mach_msg2`；H3 排除。
+- ext4：正确布局内核 + `hakios_host_info_trace=1`，但内核 `host_info` **trace 0**。
+- MIG server 确实存在：`osfmk/mach/Makefile:385` 生成 `mach_host_server.c`，
+  `host_info` 在其中。
+- 所以 trace 0 的原因只剩两种：**请求没到内核 host port**，或 **IPC 层卡住**；
+  ext6 就是判这两者。
+
 ## 6. 交接项（给下一阶段）
 
 ### 6.1 内核侧追踪点
@@ -95,6 +125,7 @@
 
 ## 9. 预算与收口
 
-- 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 确认、ext4 trace 0、ext5 工具错误。
-- **不再追加 boot**；本阶段回守望，等下一阶段按 §6 的追踪点/探针/构建能力接手。
+- 主预算 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 确认、ext4 trace 0、ext5 工具错误。
+- **ext6 子线单独 1 发**（host_info 探针）；跑完无论结果写结论，然后回守望。
+- 不再追加其他 boot；下一阶段按 §6 的追踪点/探针/构建能力接手。
 - 未达成成功判据：没有任何一发出现 `checked in as alive`（extension 活过 60 s）。
