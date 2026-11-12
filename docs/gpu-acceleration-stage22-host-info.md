@@ -78,13 +78,20 @@ It does **not** bypass libSystem and does **not** special-case extensions.
 
 Build:
 
+**内核只能在宿主编**：容器内缺 `bison`/`flex`/`m4` 与 `uuid/uuid.h`，不能直接
+`make kernel`。宿主命令：
+
 ```sh
-cd /host/iosvm-work/hakios-xnu-kernel
-make kernel
+cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel && \
+  LD64_LLD=/usr/lib/llvm-18/bin/ld64.lld make kernel -j8
 ```
 
-Current container blockers (after deleting the stale `BUILD/obj`; that removed the
-`/home/lshan/...` path errors):
+必须用 `/usr/lib/llvm-18/bin/ld64.lld`；GNU `ld.lld` 会报
+`unknown argument '-rename_section'`。产物 `hakios-kernel` 本次 15,902,536 B
+（12:52），`strings hakios-kernel | grep -c "hakios: host_info"` 应为 2；
+**`qemu/payload.bin` 必须重新生成**，否则跑的还是旧内核。
+
+Container blockers observed before switching to the host build:
 
 1. `bison: No such file or directory` for `SETUP/config/parser.c` (host build tool);
 2. `fatal error: 'uuid/uuid.h' file not found` in the host tools.

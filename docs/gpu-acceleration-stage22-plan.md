@@ -113,6 +113,23 @@
   hanging 是否显著下降。
 - 两发都不动 timeout/job/watchdog（见 §8）；不以“多跑几次”代替假设。
 
+### 7.1 构建前置（内核只能在宿主编）
+
+- **容器内没有内核工具链**：缺 `bison`/`flex`/`m4` 与 `uuid` 头（`uuid/uuid.h`）；内核必须在**宿主**编，容器里 `make kernel` 会停在 parser.c/uuid 头。
+- **宿主命令**（用 `ld64.lld`）：
+  ```sh
+  cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel && \
+    LD64_LLD=/usr/lib/llvm-18/bin/ld64.lld make kernel -j8
+  ```
+- **必须用 `/usr/lib/llvm-18/bin/ld64.lld`**：用 GNU 的 `ld.lld` 会报
+  `unknown argument '-rename_section'`。
+- 编完产物 `hakios-kernel`（本次 **15,902,536 B，12:52**）；自检：
+  ```sh
+  strings hakios-kernel | grep -c "hakios: host_info"
+  ```
+  应为 **2**。
+- **注意 `qemu/payload.bin` 需重新生成**，否则跑的还是旧内核（这次踩过）。
+
 ## 8. 不做
 
 1. **不再调 timeout**（`ExtensionWatchdogTimeout` 已证无效）。
