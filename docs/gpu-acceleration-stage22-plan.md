@@ -50,7 +50,9 @@
    `service will attempt to elide xpcproxy`×2、无 xpcproxy 子进程、无
    `uncorking exec`（全 log widget uncorking=0）；daemon 才有 xpcproxy+uncorking。
    CheckIn=0 是下游现象；`docs/s22-ext-11-exec-diff.md`。
-   - 下一步 ext12：采卡住 pid 的 ustacks，判「等 launchd uncork 消息」还是「exec 半路失败」。
+   - ext12：`ustacks=GCWidgets` 0 命中（303 no-process）；真实是 TVWidgetExtension[47]、RemindersWidgetExtension[48]；elided child 的 `p_comm=launchd`。
+- ext13：采 `launchd` + TVWidgetExtension + RemindersWidgetExtension，优先按 pid；判「等 uncork 消息」还是「exec 半路失败」。
+- 教训：采样前先用 `service spawned with pid` 旁的名字确认真实 p_comm。
 4. **exit 78 = `EX_CONFIG`**：ext9 的 `com.iosvm.reg` 缺 `/redwood/bin/reg_app`
    （build.sh 没编），**与扩展无关**，独立小修。
 5. **EXC_CORPSE_NOTIFY error 5 for pid 24**：pid 24 是 `configd`，不是扩展；

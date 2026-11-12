@@ -94,13 +94,19 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 
 ## 4. Next experiments
 
-### 4.1 ext12: sample the stuck pid
+### 4.1 ext12: sampling missed; ext13 targets
 
-- 对卡住的 widget pid（48/49）采 ustacks；判据：
-  - 栈在等 launchd 的 **uncork 消息**（MIG/receive）→ 握手的消息没到；
-  - 栈在 **exec 路径半路**（loader/dyld/exec_activate_image）→ exec 失败；
-  - 进程已消失 → 先看 exit/corpse。
-- 不预设结论；采到栈再定。
+- ext12：`ustacks=GCWidgets` **0 命中**（303 条 `no process called GCWidgets`）；
+  真实 widget 是 **`TVWidgetExtension [47]`、`RemindersWidgetExtension [48]`**。
+- code 判断：elided 子进程未 exec 时 **`p_comm=launchd`**，不是 widget 名。
+- ext13 采样对象：
+  1. `launchd`（elided child 的 p_comm）；
+  2. `TVWidgetExtension`；
+  3. `RemindersWidgetExtension`；
+  优先按 **pid**（47/48）采，避免再被 p_comm 名字坑。
+- **方法教训**：采样前先确认实际进程名；日志里 `service spawned with pid` 旁边的
+  名字才是真的；`ustacks` 按 `p_comm` 匹配，用错名字就是 0 命中。
+- 判据仍是：栈在等 launchd 的 **uncork 消息**，还是在 **exec 半路**。
 
 ### 4.2 Exec-boundary instrumentation (next boot)
 
