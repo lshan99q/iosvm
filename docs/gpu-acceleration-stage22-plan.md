@@ -1,8 +1,8 @@
 # Stage 22 计划：extension check-in（收口）
 
-> **状态：主收口（2026-11-12）；ext8 补证：host port/MIG + host_info 正常。**
-> 主预算用尽：ext1 工具无效 / ext2 H1 部分 / ext3 H2 确认 / ext4 trace 0 /
-> ext5 工具错误；ext8 证明内核服务端健康，下一阶段查 extension 调用上下文。
+> **状态：主收口（2026-11-12）；ext9 修正：spawn 后不 CheckIn。**
+> ext1 工具无效 / ext2 H1 部分 / ext3 H2 瞬时 / ext4 trace 0 / ext5 工具错误；
+> ext8 证明 host port 健康；ext9 扩展 spawn 但 CheckIn 0、无 hang、host_info 0。
 > 目标（未达成）：搞清 extension exec 后 5–13 s 被杀的根因，让 CheckIn 能发出；
 > 解锁壁纸（P2）与真 widget（P3）。**P2/P3 不因本阶段重开。**
 
@@ -41,20 +41,18 @@
 证据：`docs/s22-ext-04.md`、`docs/s22-ext-04b.md`、`docs/s22-ext-05.md`、
 `docs/gpu-acceleration-stage22-ext4-ustacks.md`。
 
-## 5. 得到的结论（ext3 + ext8）
+## 5. 得到的结论（ext3 + ext8 + ext9）
 
-1. **H2：extension 卡在 libSystem 初始化的 `host_info`**
-   - ext3 的 90 次采样一致指向 `pthread_init → host_info → mach_msg2`；
-     不是 xpc/CheckIn 路径（H3 排除）。
-2. **host port / MIG / 内核 `host_info` 正常（ext8）**
-   - 内核 `1f8c489f2ca93043d53b20aa04739109`，追踪默认开；
-   - hostport **35 行**（id 200×6 / 205×23 / 206×6，覆盖 200–245）；
-   - `host_info` **15 行**（flavor 1、5，**全部 ret=0**）。
-3. **剩下的是 extension 调用上下文**
-   - 不是内核服务端坏；查 bootstrap 命名空间、端口代理、sandbox、entitlement
-     以及 extension 早期 initializer 是否用了坏端口/错 host port。
-   - ext4 的 trace 0 不再作为“请求没到内核”的证据：追踪默认开后 ext8 能看到
-     host_info；ext4 的 boot-arg 在末尾且 cmdline 被截断（`262 of 607`）。
+1. **ext3 的「卡在 host_info」是特定 boot 的瞬时状态**，不能当普遍根因。
+2. **ext9 主症状：spawn 后从不 CheckIn、也不报 hang。**
+   - GCWidgets[48]、BatteriesWidget[49] spawn 成功，70 行 INIT 迹象；
+   - `Extension is hanging` 0、`checked in as alive` 0；
+   - 内核 `hostport`/`host_info` 全程 0 → 扩展没走到 host_info。
+3. **host port / MIG / host_info 本身健康**（ext8：35 行 hostport、15 行 host_info
+   全部 ret=0；ext9 无流量不矛盾）。
+4. **未决**：exit 78 来源、CheckIn 前置、`EXC_CORPSE_NOTIFY error 5` 条件
+   （pid 24 不是扩展 48/49）。下一步查 extension 的 bootstrap/MachServices/
+   sandbox/entitlement，而不是继续修内核 host_info。
 
 ## 5.1 ext6（重开子线）：host_info 探针
 
@@ -79,10 +77,11 @@
 | 有 hostport 行、无 `id=100` | 请求到了内核，但不是 host_info → **extension 没查 host_info** |
 | 完全没有 hostport 行 | 消息没出用户态 → **阻塞在用户态 IPC** |
 
-**已有事实（ext8 已给出健康性补证）**：
+**已有事实（ext8 健康性 + ext9 主症状）**：
 
 - H2：ext3 的 90 次采样指向 `pthread_init → host_info → mach_msg2`；H3 排除。
 - ext8：hostport 35 行（id 200–245）、host_info 15 行全部 ret=0 → **内核服务端正常**；
+- ext9：扩展 spawn/INIT 但 hostport/host_info 0、CheckIn 0、hanging 0；
 - ext4 trace 0 归因于 boot-arg 截断/末尾参数，不再作为“请求没到内核”的证据；
 - 因此 ext6 探针现在只作**正向对照**（预期 `hostinfo: OK`），不是主判据；
   主战场是 extension 的 bootstrap 命名空间/端口代理/sandbox/entitlement。
@@ -149,14 +148,15 @@
 1. 不再调 timeout（`ExtensionWatchdogTimeout` 已证无效）。
 2. 不再调 job（四类 job 对照已证无效）。
 3. 不再翻 watchdog 布尔（`ExtensionWatchdog=false` 让 boot 停住）。
-4. 不经 boot-arg 试；不绕过 libSystem 行为（要修就修 `host_info` 本身）。
+4. 不经 boot-arg 试；不绕过 libSystem；**host_info 本身健康，不再修它**，查 extension 调用上下文。
 5. **不用 `ld64.lld` 链内核**（vmaddr=0 / unexpected layout）。
 6. 不碰宿主 GPU；不启动 virtio-gpu。
 7. 不在 check-in 未解前重开 P2/P3 的视觉交付；不写「壁纸/真 widget 已可用」。
 
 ## 9. 预算与收口
 
-- 主预算 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 确认、ext4 trace 0、ext5 工具错误。
-- **ext8 已补证**（host port/MIG + host_info 正常）；ext6 探针只作正向对照，非必须。
-- 不再追加其他 boot；下一阶段从 extension 调用上下文（bootstrap/端口代理/sandbox/entitlement）接手。
+- 主预算 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 瞬时、ext4 trace 0、ext5 工具错误。
+- **ext8**：host port/MIG + host_info 健康；**ext9**：扩展 spawn/INIT 但 CheckIn 0、无 hang、host_info 0。
+- ext9 探针未跑（`rc.vtop` 不执行 rc.jobs）；ext10 把探针挂进真实 RC 再跑一发。
+- 下一阶段主战场 = extension 调用上下文（bootstrap/MachServices/端口代理/sandbox/entitlement）；不再修 kernel host_info。
 - 未达成成功判据：没有任何一发出现 `checked in as alive`（extension 活过 60 s）。
