@@ -84,3 +84,27 @@
 - **进程侧**：dyld 加载失败、codesign/entitlement/persona 校验、`taskgated` 日志、`EXC_CORPSE_NOTIFY` 的发送者与 reason。
 - **内核侧**：如需要，XNU 调度/异常路径 trace（需内核符号/调试权限）。
 - **工具/权限**：guest 内可用的 `launchctl`/`log`/`dtrace`（或等价）权限；宿主侧能读 guest 串口/panic log；必要时可改 launchd/extension 二进制的构建链。
+
+## 9. 结论（3 发预算用完，2026-11-12）
+
+三发固定为一条结论链（**不再 boot，等 code 的内核修**）：
+
+| 发 | 设计 | 结果 | 计入结论 |
+|---|---|---|---|
+| **ext1** | `launchd_disable_all_timeouts=1` + `launchd_log_serial=1` | acceptance 660 s 早于首个 extension 666 s，且串口只剩 2.3K loader 头 | **否**：没走到 extension 阶段、串口丢失 → 设计问题，不计入 |
+| **ext2** | 去掉 `log_serial`；`MINFRAMES=999999`、`UI_GRACE=400` | 全部 timeout 关掉后 **5 s 杀消失**（`Extension is hanging` 0、`CHECK_IN_TIMEOUT` 0），6 个 widget 全部 spawn 无 hang；但 **`checked in as alive` 仍 0** | **是：H1 部分成立** —— timeout 不是唯一原因 |
+| **ext3** | ext2 + `ustacks=PodcastsWidget`（680 s 起 90 次） | 90 次采样全部 `_mach_msg2_trap → _host_info → ___pthread_init → _libSystem_initializer`；首采样 `_task_self_trap → libkernel_init → libSystem_initializer`；pid 45 全程活着 | **是：H2 确认、H3 排除** —— 卡在 libSystem 初始化，从未到 main/CheckIn；无 xpc_main/bootstrap_check_in 帧 |
+
+**最终判定**：
+
+- **H1 部分成立**：5 s launch watchdog 关掉后不再杀 extension，但 CheckIn 仍不发 → timeout 不是唯一原因。
+- **H2 确认**：extension 活着但卡在 `libSystem` 初始化（`pthread_init → host_info → mach_msg2_trap`），从未到 main/CheckIn。
+- **H3 排除**：没有 `xpc_main`/`bootstrap_check_in`/`xpc_connection` 帧；`mach_msg` 是 `host_info` 内部。
+- 根因指向 `libsystem_pthread` 的 `pthread_init`/`host_info`（及内核 host_info trap），属**源码/重建修复**，不是 boot-arg。
+
+**预算：3 发已用完。** 下一步 = 内核侧 `host_info` 修；修好后另给 **2 发（ext4/ext5）**：
+
+1. **ext4**：只验 `host_info` 是否立即返回 —— 判据：日志里 extension 进程不再停在同一栈（可复用 ustacks 采样）；
+2. **ext5**：验 CheckIn —— 判据：出现 `checked in as alive`（extension 活过 60 s），或 `Extension is hanging` 次数显著下降。
+
+每发归档 `logs/s22-ext/ext4|ext5/`，每发之间先写结论。**等 code 的内核补丁再起 boot，不空跑。**
