@@ -115,20 +115,27 @@
 
 ### 7.1 构建前置（内核只能在宿主编）
 
-- **容器内没有内核工具链**：缺 `bison`/`flex`/`m4` 与 `uuid` 头（`uuid/uuid.h`）；内核必须在**宿主**编，容器里 `make kernel` 会停在 parser.c/uuid 头。
-- **宿主命令**（用 `ld64.lld`）：
+- **容器内没有内核工具链**：缺 `bison`/`flex`/`m4` 与 `uuid` 头（`uuid/uuid.h`）；内核必须在**宿主**编。
+- **`ld64.lld` 不能用来链内核**：Ubuntu LLD 18 对 `-image_base` 只给
+  `warning: Option '-image_base' is not yet implemented`，链出来 **vmaddr=0**，
+  loader 直接 `unexpected kernel layout`（ext4 第一次失败的真因）。
+- **正确链接器**（仓库自带 cctools）：
+  `/home/lshan/DSH-desktop/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld`，
+  用 `CCTOOLS_LD64=<该路径>` 传给 `make kernel`。
+- **必须先删中间产物再编**，否则 make 直接复制旧内核：
   ```sh
-  cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel && \
-    LD64_LLD=/usr/lib/llvm-18/bin/ld64.lld make kernel -j8
+  cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel
+  rm -f hakios-kernel \
+    xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837{,.unstripped}
+  CCTOOLS_LD64=/home/lshan/DSH-desktop/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld \
+    make kernel -j8
   ```
-- **必须用 `/usr/lib/llvm-18/bin/ld64.lld`**：用 GNU 的 `ld.lld` 会报
-  `unknown argument '-rename_section'`。
-- 编完产物 `hakios-kernel`（本次 **15,902,536 B，12:52**）；自检：
-  ```sh
-  strings hakios-kernel | grep -c "hakios: host_info"
-  ```
-  应为 **2**。
-- **注意 `qemu/payload.bin` 需重新生成**，否则跑的还是旧内核（这次踩过）。
+- **自检两条（缺一不可）**：
+  1. `segments[0] = 0xfffffff007004000`；
+  2. `entry_va != 0`。
+  并 `strings hakios-kernel | grep -c "hakios: host_info"` = **2**。
+- 本次可用内核：**15,789,552 B / md5 `4d9f32f5325a30d82e09cd8d2ac78e28`（13:12）**。
+- **`qemu/payload.bin` 需重新生成**，否则跑的还是旧内核（这次踩过）。
 
 ## 8. 不做
 

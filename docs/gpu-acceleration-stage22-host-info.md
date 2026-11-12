@@ -79,16 +79,21 @@ It does **not** bypass libSystem and does **not** special-case extensions.
 Build:
 
 **内核只能在宿主编**：容器内缺 `bison`/`flex`/`m4` 与 `uuid/uuid.h`，不能直接
-`make kernel`。宿主命令：
+`make kernel`。**`ld64.lld` 也不能用**：Ubuntu LLD 18 的 `-image_base` 只给
+`warning: Option '-image_base' is not yet implemented`，链出来 vmaddr=0，loader
+`unexpected kernel layout`（ext4 第一次失败的真因）。宿主命令用仓库自带 cctools：
 
 ```sh
-cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel && \
-  LD64_LLD=/usr/lib/llvm-18/bin/ld64.lld make kernel -j8
+cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel
+rm -f hakios-kernel \
+  xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837{,.unstripped}
+CCTOOLS_LD64=/home/lshan/DSH-desktop/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld \
+  make kernel -j8
 ```
 
-必须用 `/usr/lib/llvm-18/bin/ld64.lld`；GNU `ld.lld` 会报
-`unknown argument '-rename_section'`。产物 `hakios-kernel` 本次 15,902,536 B
-（12:52），`strings hakios-kernel | grep -c "hakios: host_info"` 应为 2；
+自检：`segments[0] = 0xfffffff007004000`、`entry_va != 0`，且
+`strings hakios-kernel | grep -c "hakios: host_info"` = 2。本次可用内核
+15,789,552 B / md5 `4d9f32f5325a30d82e09cd8d2ac78e28`（13:12）。
 **`qemu/payload.bin` 必须重新生成**，否则跑的还是旧内核。
 
 Container blockers observed before switching to the host build:
@@ -170,7 +175,7 @@ event, because the fault is below `host_info`, not in its switch.
 
 ## 7. ext4 loader failure: `ld64.lld` does not implement the kernel layout
 
-ext4 serial (new kernel, md5 `0847e956…`, 15,902,536 B):
+ext4 serial (the failed kernel, md5 `0847e956…`, 15,902,536 B):
 
 ```
 payload entry 'kernel' size f2a748
@@ -189,14 +194,14 @@ contain `-Wl,-image_base,0xfffffff007004000` and
 `-Wl,-segaddr,__PRELINK_TEXT,0xfffffff004004000`, but LLD ignores them.
 
 The worktree has the **cctools Apple ld64** at
-`/host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld`; the `ld64`
+`/home/lshan/DSH-desktop/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld`; the `ld64`
 wrapper prefers it unless `IOSVM_USE_LLD=1`, but it failed earlier only because
 `libBlocksRuntime.so`/`libdispatch.so` were not on the loader path.  With the library
 path set, the same `-image_base` links at the right address:
 
 ```sh
 LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib \
-  /host/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld \
+  /home/lshan/DSH-desktop/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld \
   -arch arm64 -platform_version ios 16.5 16.5 -pie -static -e __start \
   -image_base 0xfffffff007004000 -o /tmp/t /tmp/t.o
 # __TEXT vmaddr = 0xfffffff007004000
@@ -205,8 +210,11 @@ LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib \
 Build the kernel with cctools (not LLD):
 
 ```sh
-cd /host/iosvm-work/hakios-xnu-kernel
-LD_LIBRARY_PATH=/host/iosvm-work/toolchain/lib make kernel -j8
+cd /home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel
+rm -f hakios-kernel \
+  xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837{,.unstripped}
+CCTOOLS_LD64=/home/lshan/DSH-desktop/iosvm-work/toolchain/cctools/bin/aarch64-apple-darwin11-ld \
+  make kernel -j8
 ```
 
 Do **not** set `LD64_LLD`/`IOSVM_USE_LLD=1` for this kernel.  The host's
