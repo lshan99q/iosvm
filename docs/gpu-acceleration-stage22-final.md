@@ -69,9 +69,9 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 
 ## 2. Corrected conclusion
 
-1. **根因锁定在 elide 路径：exec 从未发生。** widget 走
+1. **当前根因 = elide 路径：exec 从未发生（待 ext14 坐实/推翻）。** widget 走
    `service will attempt to elide xpcproxy`、无 xpcproxy 子进程、无
-   `uncorking exec`；CheckIn=0 是下游现象。
+   `uncorking exec`；CheckIn=0 是下游现象。ext14 用内核 exec 记录做最终判定。
 2. **历史解释全部排除**：
    - `host_info`（ext11/probe2：BASIC/LOAD/host_statistics64 全 kr=0）；
    - `timeout`（ext2：全部关掉后仍 CheckIn 0）；
@@ -79,8 +79,8 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 3. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
 4. **exit 78 / corpse error 5 不是扩展阻塞**：exit 78 = `reg_app` 缺失
    （EX_CONFIG，独立小修）；pid 24 = configd 旁证。
-5. **下一步**：ext12 采那个卡住 pid 的 ustacks，判它是
-   「等 launchd 的 uncork 消息」还是「exec 半路失败」。
+5. **下一步**：ext14 用内核 `hakios: exec pid=%d path=%s` 记录，判 widget 的
+   pid 到底有没有 exec；有记录 → 推翻“从未 exec”，无记录 → 坐实。
 
 ## 3. Unresolved questions (handoff)
 
@@ -94,19 +94,21 @@ Same boot, two lifecycles side by side (`docs/s22-ext-11-exec-diff.md`):
 
 ## 4. Next experiments
 
-### 4.1 ext12: sampling missed; ext13 targets
+### 4.1 ext12/ext13: sampling misses; switch to kernel exec trace
 
-- ext12：`ustacks=GCWidgets` **0 命中**（303 条 `no process called GCWidgets`）；
-  真实 widget 是 **`TVWidgetExtension [47]`、`RemindersWidgetExtension [48]`**。
-- code 判断：elided 子进程未 exec 时 **`p_comm=launchd`**，不是 widget 名。
-- ext13 采样对象：
-  1. `launchd`（elided child 的 p_comm）；
-  2. `TVWidgetExtension`；
-  3. `RemindersWidgetExtension`；
-  优先按 **pid**（47/48）采，避免再被 p_comm 名字坑。
-- **方法教训**：采样前先确认实际进程名；日志里 `service spawned with pid` 旁边的
-  名字才是真的；`ustacks` 按 `p_comm` 匹配，用错名字就是 0 命中。
-- 判据仍是：栈在等 launchd 的 **uncork 消息**，还是在 **exec 半路**。
+- **ext12**：`ustacks=GCWidgets` **0 命中**（303 条 no-process）；GCWidgets 不是
+  p_comm；真实 widget 是 `TVWidgetExtension [47]`、`RemindersWidgetExtension [48]`。
+- **ext13**：`ustacks=launchd` **0 命中**（303 条 no-process）；实际启动的是
+  `/sbin/launchd.darwin`，p_comm 很可能是 **`launchd.darwin`**，不是 `launchd`。
+- **方法教训**：不要用日志短名做 p_comm 采样目标；`ustacks` 按 p_comm 匹配，
+  名字错就是 0 命中。采样前先用 `service spawned with pid` 旁的真实名字核对。
+- **新手段（ext14）**：内核在 `bsd/kern/kern_exec.c` 的
+  `exec_activate_image()` 前打印 **`hakios: exec pid=%d path=%s`**，**默认开**，
+  不依赖会被截断的 boot-arg。
+  - 新内核 md5 **`9e3a2c807ab30c77a8a97023f94d2d28`**。
+  - ext14：标准配方 **1100 s**，只看串口。
+  - **判据**：widget 的 pid 是否有 exec 记录 → 有 = 推翻「elided 子进程从未
+    exec」；无 = 坐实。等结果，不预写。
 
 ### 4.2 Exec-boundary instrumentation (next boot)
 

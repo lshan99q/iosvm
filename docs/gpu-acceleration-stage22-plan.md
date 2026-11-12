@@ -46,13 +46,13 @@
 1. **`host_info` 完全正常（ext11/probe2）**：BASIC `kr=0 ncpu=1`、LOAD `kr=0`、
    `host_statistics64 kr=0`；「扩展卡在 host_info」**彻底排除**。
 2. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
-3. **根因锁定：widget 走 elide-xpcproxy，exec 从未发生。** widget 有
-   `service will attempt to elide xpcproxy`×2、无 xpcproxy 子进程、无
-   `uncorking exec`（全 log widget uncorking=0）；daemon 才有 xpcproxy+uncorking。
-   CheckIn=0 是下游现象；`docs/s22-ext-11-exec-diff.md`。
-   - ext12：`ustacks=GCWidgets` 0 命中（303 no-process）；真实是 TVWidgetExtension[47]、RemindersWidgetExtension[48]；elided child 的 `p_comm=launchd`。
-- ext13：采 `launchd` + TVWidgetExtension + RemindersWidgetExtension，优先按 pid；判「等 uncork 消息」还是「exec 半路失败」。
-- 教训：采样前先用 `service spawned with pid` 旁的名字确认真实 p_comm。
+3. **当前根因（待 ext14 坐实）= widget 走 elide-xpcproxy，exec 从未发生。**
+   widget 有 `service will attempt to elide xpcproxy`×2、无 xpcproxy 子进程、无
+   `uncorking exec`（全 log widget uncorking=0）；CheckIn=0 是下游现象。
+   - ext12：`ustacks=GCWidgets` 0 命中（GCWidgets 非 p_comm）；真实是 TVWidgetExtension[47]、RemindersWidgetExtension[48]。
+   - ext13：`ustacks=launchd` 0 命中；实际是 `/sbin/launchd.darwin`，p_comm 很可能是 `launchd.darwin`。
+   - 教训：不要用日志短名做 p_comm 采样目标。
+   - ext14：新内核 `9e3a2c807ab30c77a8a97023f94d2d28`，在 `exec_activate_image()` 前默认打印 `hakios: exec pid=%d path=%s`；标准配方 1100 s 只看串口，判 widget pid 有无 exec 记录。
 4. **exit 78 = `EX_CONFIG`**：ext9 的 `com.iosvm.reg` 缺 `/redwood/bin/reg_app`
    （build.sh 没编），**与扩展无关**，独立小修。
 5. **EXC_CORPSE_NOTIFY error 5 for pid 24**：pid 24 是 `configd`，不是扩展；
