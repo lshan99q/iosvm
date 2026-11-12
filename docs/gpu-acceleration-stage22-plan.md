@@ -1,8 +1,8 @@
 # Stage 22 计划：extension check-in（收口）
 
-> **状态：主收口（2026-11-12），随后重开 ext6 子线（1 发）。** 主预算用尽：
-> ext1 工具无效 / ext2 H1 部分 / ext3 H2 确认 / ext4 trace 0 / ext5 工具错误；
-> ext6 只做 host_info 探针，跑完无论结果写结论再回守望。
+> **状态：主收口（2026-11-12）；ext8 补证：host port/MIG + host_info 正常。**
+> 主预算用尽：ext1 工具无效 / ext2 H1 部分 / ext3 H2 确认 / ext4 trace 0 /
+> ext5 工具错误；ext8 证明内核服务端健康，下一阶段查 extension 调用上下文。
 > 目标（未达成）：搞清 extension exec 后 5–13 s 被杀的根因，让 CheckIn 能发出；
 > 解锁壁纸（P2）与真 widget（P3）。**P2/P3 不因本阶段重开。**
 
@@ -41,15 +41,20 @@
 证据：`docs/s22-ext-04.md`、`docs/s22-ext-04b.md`、`docs/s22-ext-05.md`、
 `docs/gpu-acceleration-stage22-ext4-ustacks.md`。
 
-## 5. 得到的两条结论
+## 5. 得到的结论（ext3 + ext8）
 
 1. **H2：extension 卡在 libSystem 初始化的 `host_info`**
    - ext3 的 90 次采样一致指向 `pthread_init → host_info → mach_msg2`；
      不是 xpc/CheckIn 路径（H3 排除）。
-2. **请求未到达内核 `host_info()`（ext4 trace 0）**
-   - 新内核布局/入口正确、trace 开在 cmdline 里，但 `hakios: host_info` 0 次；
-   - 下一步假设：**host port/MIG 服务端未就绪**，调用方在等一个不会来的回复；
-     不是 kernel `host_info` switch 内部阻塞。
+2. **host port / MIG / 内核 `host_info` 正常（ext8）**
+   - 内核 `1f8c489f2ca93043d53b20aa04739109`，追踪默认开；
+   - hostport **35 行**（id 200×6 / 205×23 / 206×6，覆盖 200–245）；
+   - `host_info` **15 行**（flavor 1、5，**全部 ret=0**）。
+3. **剩下的是 extension 调用上下文**
+   - 不是内核服务端坏；查 bootstrap 命名空间、端口代理、sandbox、entitlement
+     以及 extension 早期 initializer 是否用了坏端口/错 host port。
+   - ext4 的 trace 0 不再作为“请求没到内核”的证据：追踪默认开后 ext8 能看到
+     host_info；ext4 的 boot-arg 在末尾且 cmdline 被截断（`262 of 607`）。
 
 ## 5.1 ext6（重开子线）：host_info 探针
 
@@ -74,14 +79,13 @@
 | 有 hostport 行、无 `id=100` | 请求到了内核，但不是 host_info → **extension 没查 host_info** |
 | 完全没有 hostport 行 | 消息没出用户态 → **阻塞在用户态 IPC** |
 
-**已有事实（用于解释 trace 0）**：
+**已有事实（ext8 已给出健康性补证）**：
 
 - H2：ext3 的 90 次采样指向 `pthread_init → host_info → mach_msg2`；H3 排除。
-- ext4：正确布局内核 + `hakios_host_info_trace=1`，但内核 `host_info` **trace 0**。
-- MIG server 确实存在：`osfmk/mach/Makefile:385` 生成 `mach_host_server.c`，
-  `host_info` 在其中。
-- 所以 trace 0 的原因只剩两种：**请求没到内核 host port**，或 **IPC 层卡住**；
-  ext6 就是判这两者。
+- ext8：hostport 35 行（id 200–245）、host_info 15 行全部 ret=0 → **内核服务端正常**；
+- ext4 trace 0 归因于 boot-arg 截断/末尾参数，不再作为“请求没到内核”的证据；
+- 因此 ext6 探针现在只作**正向对照**（预期 `hostinfo: OK`），不是主判据；
+  主战场是 extension 的 bootstrap 命名空间/端口代理/sandbox/entitlement。
 
 ## 6. 交接项（给下一阶段）
 
@@ -121,7 +125,8 @@
 
 ### 7.2 新内核与两条追踪
 
-- 当前新内核：**md5 `759e0363196c31dd2ebb0cb01044aff1`**。
+- ext8 内核：**md5 `1f8c489f2ca93043d53b20aa04739109`**（追踪默认开）；
+  早前 `759e0363196c31dd2ebb0cb01044aff1` 为同系列带追踪内核。
 - 含两个追踪：
   1. `hakios: host_info`（`osfmk/kern/host.c`）；
   2. **`hakios: hostport msg id=%d`**（`osfmk/kern/ipc_kobject.c`，
@@ -152,6 +157,6 @@
 ## 9. 预算与收口
 
 - 主预算 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 确认、ext4 trace 0、ext5 工具错误。
-- **ext6 子线单独 1 发**（host_info 探针）；跑完无论结果写结论，然后回守望。
-- 不再追加其他 boot；下一阶段按 §6 的追踪点/探针/构建能力接手。
+- **ext8 已补证**（host port/MIG + host_info 正常）；ext6 探针只作正向对照，非必须。
+- 不再追加其他 boot；下一阶段从 extension 调用上下文（bootstrap/端口代理/sandbox/entitlement）接手。
 - 未达成成功判据：没有任何一发出现 `checked in as alive`（extension 活过 60 s）。
