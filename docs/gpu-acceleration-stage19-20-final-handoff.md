@@ -104,3 +104,6 @@ cell2/3 在 TCG 单核 + softpipe 下 guest 送帧停摆（cell2 ≈0.044 fps、
 **可作为历史交付证据**：P3 有明确标注的非真 widget 占位；P4 有 `0x502=0` 与唯一可用 cell1 fps。
 
 **不能作为「完整桌面/壁纸/真 widget/性能」的交付基线**：P2 未达成、P3 真路径不可行、P1 有可见点带、P4 仅 cell1 可用；这些边界已在 closure/decisions 与本页写清。
+## 6. 下一阶段若立项，第一件事
+
+**在 kernel 的 `mach_msg2`/`ipc_kobject_server_internal()`/`ipc_host_init()` 上打点，确认 `host_info`（`msgh_id=200`）是否到达 MIG server、host port 是否注册、`find_mig_hash_entry()` 是否返回空——先证明 MIG 回复为何没发出，再决定是否需要最小 guest 探针。**
