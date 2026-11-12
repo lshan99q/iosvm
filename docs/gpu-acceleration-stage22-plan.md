@@ -47,8 +47,9 @@
    `host_statistics64 kr=0`；「扩展卡在 host_info」**彻底排除**。
 2. **ext3 的 host_info 栈是那个 boot 的瞬时状态**，不能当普遍根因。
 3. **当前唯一主症状**：扩展 `spawn → service state: running/INIT`，但**没有
-   `uncorking exec source upfront`** → 卡在 xpcproxy/launchd spawn 握手，
-   **exec 都没发生**，CheckIn 自然为 0。
+   `uncorking exec source upfront`**；日志差分显示 widget 走 **elide xpcproxy**
+   路径（无 `xpcproxy spawned`/无 exec），daemon 才有 xpcproxy+uncorking。
+   `docs/s22-ext-11-exec-diff.md`；CheckIn 自然为 0。
 4. **exit 78 = `EX_CONFIG`**：ext9 的 `com.iosvm.reg` 缺 `/redwood/bin/reg_app`
    （build.sh 没编），**与扩展无关**，独立小修。
 5. **EXC_CORPSE_NOTIFY error 5 for pid 24**：pid 24 是 `configd`，不是扩展；
@@ -160,6 +161,6 @@
 
 - 主预算 5 发已用完：ext1 工具无效、ext2 H1 部分、ext3 H2 瞬时、ext4 trace 0、ext5 工具错误。
 - **ext8**：host port/MIG + host_info 健康；**ext9**：扩展 spawn/INIT 但无 `uncorking exec`、CheckIn 0；**ext11**：probe2 host_info 全部 kr=0。
-- 下一阶段主战场 = **xpcproxy/launchd spawn 握手（exec 前）**；不再修 kernel host_info。
+- 下一阶段主战场 = **widget 的 elide-xpcproxy 路径/exec 前握手**；不再修 kernel host_info。
 - 已知异常：空 header `mach_msg` 崩；不进本阶段任务。
 - 未达成成功判据：没有任何一发出现 `checked in as alive`（extension 活过 60 s）。

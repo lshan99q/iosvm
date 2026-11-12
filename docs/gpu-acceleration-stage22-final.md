@@ -42,6 +42,9 @@ probe2: before empty send (header only, no reply)
 - **没有 `uncorking exec source upfront`**（两个都没有）→ 仍卡在
   **xpcproxy/launchd spawn 握手**，**exec 根本没发生**。
 - 因此 CheckIn 自然为 0；`Extension is hanging` 0（timeouts 已关）。
+- **日志差分证明 widget 走 elide 路径**：widget 有 `service will attempt to elide xpcproxy`
+  两次、无 `xpcproxy spawned with pid`、无 `uncorking exec`；正常 daemon（notifyd）
+  有 `xpcproxy spawned` + `uncorking exec`。见 `docs/s22-ext-11-exec-diff.md`。
 - 内核 `hostport`/`host_info` 全程 0，与「没到 exec/extension 代码」一致。
 
 ## 1.3 ext8 and ext9 side observations
@@ -62,8 +65,8 @@ probe2: before empty send (header only, no reply)
 
 1. **`host_info` is healthy**; the host_info-bottleneck theory is dead.
 2. **Current sole main symptom**: extension `spawn → running/INIT` but **no
-   `uncorking exec source upfront`** → stuck in xpcproxy/launchd spawn handshake,
-   **exec never happens**, CheckIn is 0.
+   `uncorking exec source upfront`** → the widget job takes the **elide-xpcproxy**
+   path (no xpcproxy spawn/exec), so exec never happens; CheckIn is 0.
 3. **ext3's host_info stack is transient** for that boot, not a universal cause.
 4. **exit 78 / corpse error 5 are not the extension blocker**:
    exit 78 = missing `reg_app` helper; corpse pid 24 = configd bystander.
@@ -71,8 +74,9 @@ probe2: before empty send (header only, no reply)
 
 ## 3. Unresolved questions (handoff)
 
-1. **xpcproxy/launchd spawn handshake**: why does it stop before
-   `uncorking exec source upfront` for extension jobs?  Which check returns?
+1. **Elide path**: why does the widget job take `service will attempt to elide xpcproxy`
+   while daemons exec?  Can the widget be forced to exec, or does CheckIn have to
+   be fixed under the elide path?
 2. **CheckIn prerequisites after exec**: bootstrap namespace, MachServices
    endpoint, signature/entitlement/sandbox, persona; none reached yet.
 3. **reg_app build omission**: independent fix (compile + copy + sign); does not
