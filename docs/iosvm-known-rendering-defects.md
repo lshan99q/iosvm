@@ -23,6 +23,16 @@
 
 待验证的假设：**帧的合成/上载按 2×2 分块，右下块被跳过**（循环边界 off-by-one、或脏区列表只到 3/4、或最后一块的拷贝条件写错）。这是本次修复的第一靶点。
 
+## R1 的 ext27 诊断（2026-11-13，排除附件尺寸）
+
+- **panel FBO 附件 = 750×1624 全幅**（不是小附件）；
+- **draw viewport = 0,0 750x1624**，**scissor 关闭**；
+- `GLWIRE_SAVE_RECORDS` 存了 **3 帧 records**（`/tmp/r1-*.records`），待 code 离线分析；
+- 另记：texture 上传 `row 3072`（768 px 填充，比 750 多 18 px），**stride 疑点待核**。
+
+**结论：R1 仍是「待修复」；「附件尺寸不足」这一假设已排除。** 下一步看 records
+（3 帧）和 768 vs 750 的 stride/边界，确认右下象限是在合成、上载还是读取时丢的。
+
 ## R1 的初步定位（原始记录，保留）
 
 - **CPU 渲染路径是完整的**（主人提供的图：dock 通栏、Search 居中、图标 4 列铺满）。
@@ -44,6 +54,8 @@
 
 ## R1 代码走查（2026-11-13，只读；追加，不改渲染逻辑）
 
+> **ext27 实测更新**：panel FBO 附件 = **750×1624 全幅**，draw viewport = **0,0 750x1624**、scissor **关闭**；因此下面 #1「附件小于全幅」的假设**已排除**，保留为代码风险记录。待查：3 帧 records（`/tmp/r1-*.records`）与 texture `row 3072`（768 vs 750）的 stride。
+
 针对「2×2 分块、右下块被跳过」的假设，逐处检查了 glwire 的合成/上载路径，**没有找到 2×2 或四块循环**：
 
 - `host_glwire.c` 的 dirty upload 是 **64×64 固定 tile**，`tiles[1024]`；750×1624 最多 12×26=**312** 块，循环是 `ty < height`/`tx < width`，没有 `<3`/`<=3`；
@@ -55,7 +67,7 @@
 
 ### 最可能的三处（按优先级）
 
-1. **panel FBO 的附件小于 750×1624，readback 却按整帧读。**  
+1. **（ext27 已排除）panel FBO 的附件小于 750×1624，readback 却按整帧读。**
    `host_glwire.c:4028` 的 `frame_readback_ok` 只检查 `viewport[2] > 0 && viewport[3] > 0`，**不检查附件实际尺寸**；`host_glwire.c:4137` 仍 `glReadPixels(0,0,width,height)`。越界区域是 undefined，正好可能表现为 BR 绿/黑。ext25 host log 已见
    `read-back framebuffer 6 ... viewport 0,0 750x200`、`reading from 2/3 instead, viewport 0,0 750x200 (panel)`，但没有附件尺寸；这是最符合「只缺 BR」的一处。
 2. **最后一个 `glScissor`/`glViewport` 是 375×812**，BR 不在 scissor 内；`glScissor` 是 `!local`，由 host 执行，但 guest 记录的值可能来自 CA 的 dirty rect，需要 `glframes=1` 的 box 证实。

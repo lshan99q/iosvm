@@ -16,6 +16,7 @@ ext14b proved the extensions **do exec**; ext24 now gives the first
 | **ext11** | probe2 before exec; kernel `1f8c489f…` | BASIC `kr=0 ncpu=1`; LOAD `kr=0`; `host_statistics64 kr=0`; crash at **empty-header `mach_msg`** (no reply) | `logs/s22-ext/ext11/` |
 | **ext14b** | kernel **`7a4dff5340ad26786e9dc70f26e69016`** with `hakios: exec pid=%d path=%s` | exec pid=45…53: Books/People/Weather/mobilenotes + AppStore/Passbook/FindMy/Sleep; all **no exit/crash**; CheckIn 0; host_info 0 | `logs/s22-ext/ext14b/` |
 | **ext24** | kernel `203c3df8…`; `launchd_disable_all_timeouts=1`; ~15 min | **`checked in as alive` 4 次**：Batteries spawn 06:56:01 → checkin **06:56:39（38 s）**；HomeWidget **+8 min**；**GradientPosterExtension +10 min**；Batteries 重复；hanging 0；widget 无 exit | `logs/s22-ext/ext24/`；`/tmp/ext24-last.png` |
+| **ext26** | 真长跑 2400 s（UI_GRACE=2400） | `checked in as alive` **34 次**（首条 **+15/16 min**；+34 min 到 33，最终 34）；`hanging 0`；结束时槽**仍无内容**，右下绿块 bbox 564,1220–1124,2432 | `logs/s22-ext/ext26/`；`/tmp/ext26-last.png` |
 
 (ext4 trace 0 is superseded; ext5 sampled the wrong name and is not counted.)
 
@@ -73,6 +74,16 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
   把它们杀了**。关掉 timeout 后能完成 CheckIn。
 - **壁纸扩展 check-in ≠ 壁纸已显示**；P2 仍需单独验证。
 
+## 1.2c ext26: 34 CheckIns, still no widget content
+
+- 长跑 2400 s：`checked in as alive` **34 次**；首条在 **+15/16 min**；
+  +34 min 到 **33**，最终 **34**；`Extension is hanging` **0**。
+- 分布不是前 10 分钟一批：08:58–09:03 只 3 个，09:09 起加速，09:14–09:17 一波 20+。
+- **CheckIn 已基本达成，但槽仍无内容**：结束截图是模糊桌面 + 右下绿块
+  （bbox x 564–1124, y 1220–2432），不是 widget 内容；绿块不是 widget 槽位置。
+- 因此下一步不是再证明「能否 check in」，而是 **check-in 之后的
+  Chrono→timeline→WidgetRenderer 链**（chronod persona type 6 等）。
+
 ## 1.3 ext8 and ext9 side observations
 
 - ext8: host port/MIG + host_info healthy for the system processes it observed
@@ -96,8 +107,9 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
    能走完。之前「dyld 错误路径 = 缺库」的推断**降级为慢启动**。
 3. **缓存检查 0 missing**，且没有 stat/mmap 卡死证据；不再把缺依赖/卡死当结论。
 4. **host_info 仍健康**（ext11/8）；不是 host_info 阻塞。
-5. **CheckIn 了不等于 widget 有内容**：ext24 截图仍是两个白槽；内容是否出现
-   要 ext25 长跑回答。
+5. **CheckIn 了不等于 widget 有内容**：ext24 两白槽；ext26 长跑 34 次 CheckIn
+   后槽仍无内容，右下绿块也不是 widget 槽。下一步是 check-in 后的
+   Chrono/timeline/WidgetRenderer 链，不是再看门禁。
 
 ## 3. Unresolved questions (handoff)
 
@@ -111,13 +123,12 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 
 ## 4. Next experiments
 
-### 4.1 ext25: long-run CheckIn census
+### 4.1 ext26 done; next = post-CheckIn content chain
 
-- 标准配方跑 **2400 s**；每 **2 min** 统计一次 `checked in as alive` 数。
-- 回答两件事：
-  1. 时间够时是否**所有** widget 都 check in；
-  2. check in 后 widget 是否**出内容**（不是白槽）。
-- 判据：check-in 计数曲线 + 截图/内容；不预设「全部会 check in」。
+- ext26 已跑 2400 s：34 次 CheckIn、hanging 0，但槽仍无内容。
+- 下一步不再做「check-in census」，改为查 check-in 之后的
+  Chrono→timeline→WidgetRenderer 链（含 chronod persona type 6）。
+- 判据：槽里出现真实 widget 内容（不是白槽/绿块），且 CheckIn 不回退。
 
 ### 4.2 ext12/ext13 misses and ext15 true-name sampling
 
