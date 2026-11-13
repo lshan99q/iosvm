@@ -1,9 +1,9 @@
-# Stage 22 final: extensions exec, then stall before CheckIn; host_info is healthy
+# Stage 22 final: extensions are slow, not stuck; the default watchdog kills them
 
 **Status: closed to the evidence boundary.**
-ext14b's kernel exec trace proves the extensions **do exec**; they then stall in
-their own startup before `host_info`/CheckIn.  The earlier 「elide = never exec」
-reading was wrong.
+ext14b proved the extensions **do exec**; ext24 now gives the first
+`extension checked in as alive` lines when timeouts are disabled.  The blocker is
+**startup latency vs the default watchdog**, not a dead dyld path.
 
 ## 1. Effective experiments
 
@@ -15,6 +15,7 @@ reading was wrong.
 | **ext9** | standard recipe; UI 660 s; timeouts off | GCWidgets[48]/BatteriesWidget[49] spawn, 70 INIT lines, `running`; **no `uncorking exec source upfront`**; hanging 0; CheckIn 0; hostport/host_info 0 | `logs/s22-ext/ext9/` |
 | **ext11** | probe2 before exec; kernel `1f8c489f…` | BASIC `kr=0 ncpu=1`; LOAD `kr=0`; `host_statistics64 kr=0`; crash at **empty-header `mach_msg`** (no reply) | `logs/s22-ext/ext11/` |
 | **ext14b** | kernel **`7a4dff5340ad26786e9dc70f26e69016`** with `hakios: exec pid=%d path=%s` | exec pid=45…53: Books/People/Weather/mobilenotes + AppStore/Passbook/FindMy/Sleep; all **no exit/crash**; CheckIn 0; host_info 0 | `logs/s22-ext/ext14b/` |
+| **ext24** | kernel `203c3df8…`; `launchd_disable_all_timeouts=1`; ~15 min | **`checked in as alive` 4 次**：Batteries spawn 06:56:01 → checkin **06:56:39（38 s）**；HomeWidget **+8 min**；**GradientPosterExtension +10 min**；Batteries 重复；hanging 0；widget 无 exit | `logs/s22-ext/ext24/`；`/tmp/ext24-last.png` |
 
 (ext4 trace 0 is superseded; ext5 sampled the wrong name and is not counted.)
 
@@ -59,6 +60,19 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 - Therefore the stall is **after exec, before host_info / the extension's own
   startup**.
 
+## 1.2b ext24: first CheckIn — slow, not dead
+
+- **BatteriesWidget**: spawn **06:56:01** → `extension checked in as alive`
+  **06:56:39** = **38 s**.
+- **HomeWidget**: +8 min; **GradientPosterExtension**: +10 min (壁纸扩展)；
+  Batteries 另有一条重复；合计 **4 次** `checked in as alive`。
+- `Extension is hanging` **0**；widget **无 exit**。
+- 截图 `/tmp/ext24-last.png`：桌面有 Weather/Calendar 两个白槽（check-in 了，
+  内容还没出）。
+- **结论**：扩展不是卡死在 dyld；是 **dyld/启动太慢，默认看门狗在 CheckIn 前
+  把它们杀了**。关掉 timeout 后能完成 CheckIn。
+- **壁纸扩展 check-in ≠ 壁纸已显示**；P2 仍需单独验证。
+
 ## 1.3 ext8 and ext9 side observations
 
 - ext8: host port/MIG + host_info healthy for the system processes it observed
@@ -75,17 +89,15 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 
 ## 2. Corrected conclusion
 
-1. **Extensions do exec** (ext14b): pids 45–53, real appex paths.  The elide path
-   only bypasses xpcproxy.
-2. **After exec they stall before host_info/CheckIn**: no exit/crash, CheckIn 0,
-   whole-log `host_info` 0.  The blocker is in the extension's own startup after
-   exec, before the libSystem/host_info point ext3 once caught.
-3. **Historical explanations all excluded**: host_info (ext11 all kr=0), timeout
-   (ext2), job type (earlier), and 「elide = no exec」 (ext14b).
-4. **exit 78 / corpse error 5 are not the blocker**: exit 78 = missing `reg_app`
-   helper; pid 24 = configd bystander.
-5. **Note**: ext3's host_info stack was a transient state of that boot, not the
-   universal path.
+1. **扩展不是「卡死在 dyld」，是「慢」**：ext24 在关掉 timeout 后看到 4 次
+   `checked in as alive`，Batteries 38 s，HomeWidget +8 min，
+   GradientPosterExtension +10 min。
+2. **默认看门狗是门**：默认 5–13 s 内没 CheckIn 就被杀；关掉 timeout 后慢启动
+   能走完。之前「dyld 错误路径 = 缺库」的推断**降级为慢启动**。
+3. **缓存检查 0 missing**，且没有 stat/mmap 卡死证据；不再把缺依赖/卡死当结论。
+4. **host_info 仍健康**（ext11/8）；不是 host_info 阻塞。
+5. **CheckIn 了不等于 widget 有内容**：ext24 截图仍是两个白槽；内容是否出现
+   要 ext25 长跑回答。
 
 ## 3. Unresolved questions (handoff)
 
@@ -99,7 +111,15 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 
 ## 4. Next experiments
 
-### 4.1 ext12/ext13 misses and ext15 true-name sampling
+### 4.1 ext25: long-run CheckIn census
+
+- 标准配方跑 **2400 s**；每 **2 min** 统计一次 `checked in as alive` 数。
+- 回答两件事：
+  1. 时间够时是否**所有** widget 都 check in；
+  2. check in 后 widget 是否**出内容**（不是白槽）。
+- 判据：check-in 计数曲线 + 截图/内容；不预设「全部会 check in」。
+
+### 4.2 ext12/ext13 misses and ext15 true-name sampling
 
 - **ext12**：`ustacks=GCWidgets` **0 命中**（303 条 no-process）；GCWidgets 不是
   p_comm。
@@ -112,7 +132,7 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 - 判据：栈在扩展自身启动（dyld/libobjc/UIKit/NSExtensionMain）还是
   `pthread_init → host_info`；不再猜 launchd。
 
-### 4.2 Exec-boundary instrumentation (next boot)
+### 4.3 Exec-boundary instrumentation (next boot)
 
 - `bsd/kern/kern_exec.c` at `exec_activate_image`/posix_spawn:
   `hakios: exec pid=%d comm=%s path=%s ret=%d`;
@@ -122,7 +142,7 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 - Keep default-on hostport/host_info traces; do not rely on boot-arg at the end
   (`cmdline: 262 of 607` truncation).
 
-### 4.3 Static checks (no boot)
+### 4.4 Static checks (no boot)
 
 - extension job plist: `ProgramArguments`, `POSIXSpawnType`, `MachServices`,
   sandbox, `EnvironmentVariables`;
@@ -150,9 +170,11 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 
 ## 7. Not doing
 
-- **不再拿 timeout / job / watchdog / host_info 当解释**：已分别被 ext2/ext11/早前实验排除；
+- **不再把「dyld 缺依赖」当结论**：缓存检查 0 missing，ext24 证明是慢启动；
+- **不再用 stat/mmap 卡死解释**；
 - **不再用「elide = 不 exec」解释**：ext14b 已证 exec 发生；
-- **不再用 ext3 单发栈作结论**（瞬时状态）；
+- **不再拿 host_info 当瓶颈**（ext11 全部 kr=0）；
+- 不再用 ext3 单发栈作结论（瞬时状态）；
 - 不再猜 boot-arg（追踪默认开）；
 - 不碰宿主 GPU；不启动 virtio-gpu；
 - 不写 P2/P3 已修：CheckIn 从未发生。
