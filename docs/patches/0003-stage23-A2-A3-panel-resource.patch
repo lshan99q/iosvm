@@ -1,0 +1,552 @@
+From 0f04de9dd82ed757c6c5499770d6d5b06bafd97f Mon Sep 17 00:00:00 2001
+From: iosvm-code <iosvm-code@localhost>
+Date: Sat, 14 Nov 2026 17:50:15 +0000
+Subject: [PATCH] stage23 A2/A3: create resource and push the panel through
+ virtio-gpu
+
+A2 adds RESOURCE_CREATE_2D (0x0101), ATTACH_BACKING, SET_SCANOUT, TRANSFER_TO_HOST_2D and RESOURCE_FLUSH, with gpu_cmd() and a 4.8MB backing.  A3 (virtio_gpu=2) exposes /dev/hakios-gpu: eagl pushes the panel rows (stride-aware) into the backing, the driver transfers/flushes it.  A1/A2 remain the default virtio_gpu=1.
+---
+ drivers/gpu/hakios.virtio_gpu.c       | 400 +++++++++++++++++++++++++-
+ xnu/files/bsd/sys/hakios.virtio_gpu.h |  15 +-
+ 2 files changed, 407 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/hakios.virtio_gpu.c b/drivers/gpu/hakios.virtio_gpu.c
+index 52fbab0..7316836 100644
+--- a/drivers/gpu/hakios.virtio_gpu.c
++++ b/drivers/gpu/hakios.virtio_gpu.c
+@@ -13,7 +13,12 @@
+ #include <mach/vm_param.h>
+ #include <pexpert/pexpert.h>
+ #include <sys/hakios.virtio_gpu.h>
++#include <sys/conf.h>
++#include <sys/ioccom.h>
++#include <sys/proc.h>
+ #include <sys/systm.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
+ #include <vm/vm_kern.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -56,7 +61,22 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+ #define VIRTIO_GPU_F_CONTEXT_INIT 4
+ 
+ #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100
+-#define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x0101
++#define VIRTIO_GPU_CMD_RESOURCE_CREATE_2D 0x0101
++#define VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
++#define VIRTIO_GPU_CMD_SET_SCANOUT 0x0103
++#define VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D 0x0105
++#define VIRTIO_GPU_CMD_RESOURCE_FLUSH 0x0104
++#define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
++#define VIRTIO_GPU_RESOURCE_ID 1
++#define VIRTIO_GPU_BACKING_W 750
++#define VIRTIO_GPU_BACKING_H 1624
++#define VIRTIO_GPU_BACKING_BYTES ((uint32_t)VIRTIO_GPU_BACKING_W * VIRTIO_GPU_BACKING_H * 4)
++#define VIRTIO_GPU_CMD_PAGE (64 * 1024)
++/* Responses live at 0x11xx and commands at 0x01xx (virtio-gpu 5.7.6). 0x1101 is "display info", and the
++ * device has been answering that all along -- 0x0101 was the command range, and the answer was read as a
++ * failure. */
++#define VIRTIO_GPU_RESP_OK_NODATA         0x1100
++#define VIRTIO_GPU_RESP_OK_DISPLAY_INFO   0x1101
+ #define VIRTIO_GPU_MAX_SCANOUTS 16
+ 
+ #define QUEUE_SIZE              8
+@@ -107,6 +127,49 @@ struct virtio_gpu_resp_display_info {
+ 	struct virtio_gpu_display_one pmodes[VIRTIO_GPU_MAX_SCANOUTS];
+ };
+ 
++struct virtio_gpu_resource_create_2d {
++	struct virtio_gpu_ctrl_hdr hdr;
++	uint32_t resource_id;
++	uint32_t format;
++	uint32_t width;
++	uint32_t height;
++};
++
++struct virtio_gpu_mem_entry {
++	uint64_t addr;
++	uint32_t length;
++	uint32_t padding;
++};
++
++struct virtio_gpu_resource_attach_backing {
++	struct virtio_gpu_ctrl_hdr hdr;
++	uint32_t resource_id;
++	uint32_t nr_entries;
++	struct virtio_gpu_mem_entry entries[];
++};
++
++struct virtio_gpu_set_scanout {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_rect r;
++	uint32_t scanout_id;
++	uint32_t resource_id;
++};
++
++struct virtio_gpu_transfer_to_host_2d {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_rect r;
++	uint64_t offset;
++	uint32_t resource_id;
++	uint32_t padding;
++};
++
++struct virtio_gpu_resource_flush {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_rect r;
++	uint32_t resource_id;
++	uint32_t padding;
++};
++
+ /* one page: descriptor table, avail ring, used ring, request and response */
+ #define OFFSET_DESC             0x0000
+ #define OFFSET_AVAIL            0x0200
+@@ -116,6 +179,7 @@ struct virtio_gpu_resp_display_info {
+ 
+ struct gpu_device {
+ 	vm_offset_t             regs;
++	uint16_t                used_seen;
+ 	struct vq_desc *        desc;
+ 	struct vq_avail *       avail;
+ 	struct vq_used *        used;
+@@ -123,6 +187,13 @@ struct gpu_device {
+ 	uint32_t                queue_size;
+ };
+ 
++static struct gpu_device *gpu_dev;
++static vm_offset_t gpu_backing;
++static vm_offset_t gpu_cmd_page;
++static int gpu_mode;                    /* 1: A2 test pattern, 2: panel via /dev/hakios-gpu */
++static int gpu_major = -1;
++static bool gpu_present(void);
++
+ static inline uint32_t
+ reg_read(struct gpu_device *d, uint32_t reg)
+ {
+@@ -142,6 +213,175 @@ reg_write64(struct gpu_device *d, uint32_t reg, uint64_t value)
+ 	reg_write(d, reg + 4, (uint32_t)(value >> 32));
+ }
+ 
++/*
++ * One control command: publish a two-descriptor chain (request -> response), wait for used->idx to
++ * advance, and return true when the response is VIRTIO_GPU_RESP_OK_NODATA.  The queue is polled;
++ * no interrupt is used.
++ */
++static bool
++gpu_cmd(struct gpu_device *d, void *request, uint32_t request_len, void *response, uint32_t response_len)
++{
++	uint16_t index = d->avail->idx;
++	uint16_t slot = index % d->queue_size;
++	uint16_t before = d->used->idx;
++	int seen;
++
++	d->desc[0].addr = kvtophys((vm_offset_t)request);
++	d->desc[0].len = request_len;
++	d->desc[0].flags = DESC_F_NEXT;
++	d->desc[0].next = 1;
++	d->desc[1].addr = kvtophys((vm_offset_t)response);
++	d->desc[1].len = response_len;
++	d->desc[1].flags = DESC_F_WRITE;
++	d->desc[1].next = 0;
++	d->avail->ring[slot] = 0;
++	__builtin_arm_dmb(0xb);
++	d->avail->idx = index + 1;
++	__builtin_arm_dmb(0xb);
++	reg_write(d, VIRTIO_QUEUE_NOTIFY, 0);
++	for (seen = 0; seen < 2000; seen++) {
++		__builtin_arm_dmb(0x9);
++		if (d->used->idx != before) {
++			__builtin_arm_dmb(0x9);
++			break;
++		}
++		delay(5);
++	}
++	if (seen == 2000) {
++		printf("virtio-gpu: command %#x timed out, used idx %u\n",
++		    ((struct virtio_gpu_ctrl_hdr *)request)->type, d->used->idx);
++		return false;
++	}
++	printf("virtio-gpu: command %#x -> response %#x (used id=%u len=%u)\n",
++	    ((struct virtio_gpu_ctrl_hdr *)request)->type,
++	    ((struct virtio_gpu_ctrl_hdr *)response)->type,
++	    d->used->ring[before % d->queue_size].id,
++	    d->used->ring[before % d->queue_size].len);
++	return ((struct virtio_gpu_ctrl_hdr *)response)->type == VIRTIO_GPU_RESP_OK_NODATA;
++}
++
++/*
++ * Stage 23 A2: create a 750x1624 B8G8R8A8 resource, attach a guest backing, put it on scanout 0,
++ * transfer it to the host and flush.  A solid test colour is written first; the command responses
++ * are the A2 criterion (the ramfb console still owns the visible display).
++ */
++static bool
++gpu_a2(struct gpu_device *d, int slot)
++{
++	vm_offset_t cmd_page = 0, backing = 0;
++	struct virtio_gpu_ctrl_hdr *response;
++	struct virtio_gpu_resource_create_2d *create;
++	struct virtio_gpu_resource_attach_backing *attach;
++	struct virtio_gpu_set_scanout *scanout;
++	struct virtio_gpu_transfer_to_host_2d *transfer;
++	struct virtio_gpu_resource_flush *flush;
++	uint32_t entries = (VIRTIO_GPU_BACKING_BYTES + PAGE_SIZE - 1) / PAGE_SIZE;
++	uint32_t *pixels;
++	uint32_t request_len;
++
++	if (kmem_alloc(kernel_map, &cmd_page, VIRTIO_GPU_CMD_PAGE,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("virtio-gpu: A2: no command page\n");
++		return false;
++	}
++	if (kmem_alloc(kernel_map, &backing, VIRTIO_GPU_BACKING_BYTES,
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("virtio-gpu: A2: no backing\n");
++		return false;
++	}
++	pixels = (uint32_t *)backing;
++	for (uint32_t i = 0; i < VIRTIO_GPU_BACKING_BYTES / 4 && gpu_mode == 1; i++) {
++		uint32_t x = i % VIRTIO_GPU_BACKING_W;
++		uint32_t y = i / VIRTIO_GPU_BACKING_W;
++
++		pixels[i] = 0xFF000000u | ((x & 0xFF) << 16) | ((y & 0xFF) << 8) | 0x30;
++	}
++	response = (struct virtio_gpu_ctrl_hdr *)(cmd_page + 0x8000);
++
++	create = (struct virtio_gpu_resource_create_2d *)cmd_page;
++	memset(create, 0, sizeof(*create));
++	create->hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
++	create->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	create->format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
++	create->width = VIRTIO_GPU_BACKING_W;
++	create->height = VIRTIO_GPU_BACKING_H;
++	if (!gpu_cmd(d, create, sizeof(*create), response, sizeof(*response))) {
++		printf("virtio-gpu: A2: RESOURCE_CREATE_2D failed\n");
++		return false;
++	}
++
++	attach = (struct virtio_gpu_resource_attach_backing *)cmd_page;
++	memset(attach, 0, sizeof(*attach));
++	attach->hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
++	attach->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	attach->nr_entries = entries;
++	for (uint32_t i = 0; i < entries; i++) {
++		uint32_t left = VIRTIO_GPU_BACKING_BYTES - i * PAGE_SIZE;
++
++		attach->entries[i].addr = kvtophys(backing + (vm_offset_t)i * PAGE_SIZE);
++		attach->entries[i].length = left < PAGE_SIZE ? left : PAGE_SIZE;
++	}
++	request_len = sizeof(*attach) + entries * sizeof(struct virtio_gpu_mem_entry);
++	if (!gpu_cmd(d, attach, request_len, response, sizeof(*response))) {
++		printf("virtio-gpu: A2: RESOURCE_ATTACH_BACKING failed (%u entries)\n", entries);
++		return false;
++	}
++
++	scanout = (struct virtio_gpu_set_scanout *)cmd_page;
++	memset(scanout, 0, sizeof(*scanout));
++	scanout->hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
++	scanout->r.x = 0;
++	scanout->r.y = 0;
++	scanout->r.width = VIRTIO_GPU_BACKING_W;
++	scanout->r.height = VIRTIO_GPU_BACKING_H;
++	scanout->scanout_id = 0;
++	scanout->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	if (!gpu_cmd(d, scanout, sizeof(*scanout), response, sizeof(*response))) {
++		printf("virtio-gpu: A2: SET_SCANOUT failed\n");
++		return false;
++	}
++
++	transfer = (struct virtio_gpu_transfer_to_host_2d *)cmd_page;
++	memset(transfer, 0, sizeof(*transfer));
++	transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
++	transfer->r.x = 0;
++	transfer->r.y = 0;
++	transfer->r.width = VIRTIO_GPU_BACKING_W;
++	transfer->r.height = VIRTIO_GPU_BACKING_H;
++	transfer->offset = 0;
++	transfer->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	if (!gpu_cmd(d, transfer, sizeof(*transfer), response, sizeof(*response))) {
++		printf("virtio-gpu: A2: TRANSFER_TO_HOST_2D failed\n");
++		return false;
++	}
++
++	flush = (struct virtio_gpu_resource_flush *)cmd_page;
++	memset(flush, 0, sizeof(*flush));
++	flush->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
++	flush->r.x = 0;
++	flush->r.y = 0;
++	flush->r.width = VIRTIO_GPU_BACKING_W;
++	flush->r.height = VIRTIO_GPU_BACKING_H;
++	flush->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	if (!gpu_cmd(d, flush, sizeof(*flush), response, sizeof(*response))) {
++		printf("virtio-gpu: A2: RESOURCE_FLUSH failed\n");
++		return false;
++	}
++
++	gpu_dev = d;
++	gpu_backing = backing;
++	gpu_cmd_page = cmd_page;
++	printf("virtio-gpu: A2: resource %u %ux%u, %u entries, scanout 0%s\n",
++	    VIRTIO_GPU_RESOURCE_ID, VIRTIO_GPU_BACKING_W, VIRTIO_GPU_BACKING_H, entries,
++	    gpu_mode == 2 ? ", panel push enabled" : ", test pattern");
++	if (gpu_mode == 2) {
++		return true;            /* the first /dev/hakios-gpu push does TRANSFER/FLUSH */
++	}
++	printf("virtio-gpu: A2: test backing phys %#llx\n", (unsigned long long)kvtophys(backing));
++	(void)slot;
++	return true;
++}
++
+ static bool
+ gpu_fail(struct gpu_device *d, vm_offset_t page, int slot, const char *why)
+ {
+@@ -175,6 +415,14 @@ gpu_attach(struct gpu_device *d, int slot)
+ 	response = (struct virtio_gpu_resp_display_info *)(page + OFFSET_RESPONSE);
+ 
+ 	reg_write(d, VIRTIO_STATUS, 0);
++	/*
++	 * A device reset is complete when a read of Status returns 0. The firmware that ran before the kernel
++	 * used this device for its own console and left the control queue enabled; a queue that is ready
++	 * ignores QueueNum and the three address registers, so the reset has to be waited for, not assumed.
++	 */
++	for (seen = 0; seen < 1000 && reg_read(d, VIRTIO_STATUS) != 0; seen++) {
++		delay(1);
++	}
+ 	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE);
+ 	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+ 
+@@ -193,7 +441,12 @@ gpu_attach(struct gpu_device *d, int slot)
+ 		return gpu_fail(d, page, slot, "features refused");
+ 	}
+ 
++	printf("virtio-gpu: slot %d: after reset: status=%#x sel=%u num=%u ready=%u\n",
++	    slot, reg_read(d, VIRTIO_STATUS), reg_read(d, VIRTIO_QUEUE_SEL),
++	    reg_read(d, VIRTIO_QUEUE_NUM), reg_read(d, VIRTIO_QUEUE_READY));
+ 	reg_write(d, VIRTIO_QUEUE_SEL, 0);
++	/* Only a queue that is not ready accepts QueueNum and the address registers (virtio 2.6.1). */
++	reg_write(d, VIRTIO_QUEUE_READY, 0);
+ 	qmax = reg_read(d, VIRTIO_QUEUE_NUM_MAX);
+ 	if (qmax < 2) {
+ 		return gpu_fail(d, page, slot, "control queue too small");
+@@ -213,11 +466,9 @@ gpu_attach(struct gpu_device *d, int slot)
+ 	desc[1].len = sizeof(*response);
+ 	desc[1].flags = DESC_F_WRITE;
+ 	desc[1].next = 0;
+-	d->avail->flags = AVAIL_F_NO_INTERRUPT;
+-	d->avail->ring[0] = 0;
+-	d->avail->idx = 1;
+-
+ 	reg_write(d, VIRTIO_QUEUE_NUM, d->queue_size);
++	printf("virtio-gpu: slot %d: wrote num=%u, read back %u, ready=%u\n",
++	    slot, d->queue_size, reg_read(d, VIRTIO_QUEUE_NUM), reg_read(d, VIRTIO_QUEUE_READY));
+ 	reg_write64(d, VIRTIO_QUEUE_DESC, phys + OFFSET_DESC);
+ 	reg_write64(d, VIRTIO_QUEUE_DRIVER, phys + OFFSET_AVAIL);
+ 	reg_write64(d, VIRTIO_QUEUE_DEVICE, phys + OFFSET_USED);
+@@ -226,9 +477,26 @@ gpu_attach(struct gpu_device *d, int slot)
+ 	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK |
+ 	    STATUS_DRIVER_OK);
+ 
++	printf("virtio-gpu: slot %d: after queue setup: status=%#x sel=%u num=%u ready=%u desc=%#x:%#x drv=%#x:%#x dev=%#x:%#x\n",
++	    slot, reg_read(d, VIRTIO_STATUS), reg_read(d, VIRTIO_QUEUE_SEL), reg_read(d, VIRTIO_QUEUE_NUM),
++	    reg_read(d, VIRTIO_QUEUE_READY),
++	    reg_read(d, VIRTIO_QUEUE_DESC + 4), reg_read(d, VIRTIO_QUEUE_DESC),
++	    reg_read(d, VIRTIO_QUEUE_DRIVER + 4), reg_read(d, VIRTIO_QUEUE_DRIVER),
++	    reg_read(d, VIRTIO_QUEUE_DEVICE + 4), reg_read(d, VIRTIO_QUEUE_DEVICE));
++	/*
++	 * Everything the device reads has to be in place before the descriptor is published: a queue that
++	 * becomes ready with something already in its avail ring is served at once, and a request filled in
++	 * afterwards would be answered to a buffer that is then cleared (which is how an answer of zeros was
++	 * read back from a device that had answered properly).
++	 */
+ 	memset(request, 0, sizeof(*request));
+ 	request->type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+ 	memset(response, 0, sizeof(*response));
++	__builtin_arm_dmb(0xb);                 /* ISH: request and response before the ring entry */
++	d->avail->flags = AVAIL_F_NO_INTERRUPT;
++	d->avail->ring[0] = 0;
++	__builtin_arm_dmb(0xb);                 /* ISH: the entry before the index that publishes it */
++	d->avail->idx = 1;
+ 	__builtin_arm_dmb(0xb);
+ 	reg_write(d, VIRTIO_QUEUE_NOTIFY, 0);
+ 
+@@ -254,6 +522,37 @@ gpu_attach(struct gpu_device *d, int slot)
+ 	    (d->feat_lo >> VIRTIO_GPU_F_RESOURCE_BLOB) & 1,
+ 	    (d->feat_lo >> VIRTIO_GPU_F_CONTEXT_INIT) & 1,
+ 	    (d->feat_hi >> 0) & 1);
++	printf("virtio-gpu: slot %d: phys=%#llx desc0 %#llx/%u/%#x/%u desc1 %#llx/%u/%#x/%u sizeof(resp)=%u\n",
++	    slot, (unsigned long long)phys, (unsigned long long)desc[0].addr, desc[0].len, desc[0].flags, desc[0].next,
++	    (unsigned long long)desc[1].addr, desc[1].len, desc[1].flags, desc[1].next,
++	    (unsigned)sizeof(*response));
++	printf("virtio-gpu: slot %d: after poll: request %08x %08x %08x, page[0x400..0x410]=%08x %08x %08x %08x, page[0x500..0x510]=%08x %08x %08x %08x\n",
++	    slot, ((const uint32_t *)request)[0], ((const uint32_t *)request)[1], ((const uint32_t *)request)[2],
++	    ((const uint32_t *)(page + OFFSET_REQUEST))[0], ((const uint32_t *)(page + OFFSET_REQUEST))[1],
++	    ((const uint32_t *)(page + OFFSET_REQUEST))[2], ((const uint32_t *)(page + OFFSET_REQUEST))[3],
++	    ((const uint32_t *)(page + OFFSET_RESPONSE))[0], ((const uint32_t *)(page + OFFSET_RESPONSE))[1],
++	    ((const uint32_t *)(page + OFFSET_RESPONSE))[2], ((const uint32_t *)(page + OFFSET_RESPONSE))[3]);
++	{
++		/* Where did the device put its answer? Anything nonzero in the page outside the request and the
++		 * rings says the write landed somewhere other than the buffer we handed it. */
++		const uint32_t *words = (const uint32_t *)page;
++		unsigned nz = 0;
++		int first = -1;
++		/* Only the answer matters: the request is known to be there, and the rings are the device's own. */
++		for (uint32_t i = OFFSET_RESPONSE / 4; i < PAGE_SIZE / 4; i++) {
++			if (words[i] != 0) {
++				nz++;
++				if (first < 0) {
++					first = (int)(i * 4);
++				}
++			}
++		}
++		printf("virtio-gpu: slot %d: response area nonzero words=%u, first at %#x\n", slot, nz, first);
++	}
++	printf("virtio-gpu: slot %d: used flags=%u idx=%u id=%u len=%u; response %08x %08x %08x %08x\n",
++	    slot, d->used->flags, d->used->idx, d->used->ring[0].id, d->used->ring[0].len,
++	    ((const uint32_t *)response)[0], ((const uint32_t *)response)[1],
++	    ((const uint32_t *)response)[2], ((const uint32_t *)response)[3]);
+ 	if (response->hdr.type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO) {
+ 		printf("virtio-gpu: slot %d: GET_DISPLAY_INFO response %#x\n",
+ 		    slot, response->hdr.type);
+@@ -275,9 +574,90 @@ gpu_attach(struct gpu_device *d, int slot)
+ 			printf("virtio-gpu: no enabled display\n");
+ 		}
+ 	}
++	if (response->hdr.type == VIRTIO_GPU_RESP_OK_DISPLAY_INFO) {
++		if (!gpu_a2(d, slot)) {
++			printf("virtio-gpu: A2 failed; A1 discovery remains OK\n");
++		}
++	}
+ 	return true;
+ }
+ 
++static bool
++gpu_present(void)
++{
++	struct virtio_gpu_transfer_to_host_2d *transfer;
++	struct virtio_gpu_resource_flush *flush;
++	struct virtio_gpu_ctrl_hdr *response;
++
++	if (gpu_dev == NULL || gpu_cmd_page == 0 || gpu_backing == 0) {
++		return false;
++	}
++	response = (struct virtio_gpu_ctrl_hdr *)(gpu_cmd_page + 0x8000);
++	transfer = (struct virtio_gpu_transfer_to_host_2d *)gpu_cmd_page;
++	memset(transfer, 0, sizeof(*transfer));
++	transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
++	transfer->r.width = VIRTIO_GPU_BACKING_W;
++	transfer->r.height = VIRTIO_GPU_BACKING_H;
++	transfer->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	if (!gpu_cmd(gpu_dev, transfer, sizeof(*transfer), response, sizeof(*response))) {
++		return false;
++	}
++	flush = (struct virtio_gpu_resource_flush *)gpu_cmd_page;
++	memset(flush, 0, sizeof(*flush));
++	flush->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
++	flush->r.width = VIRTIO_GPU_BACKING_W;
++	flush->r.height = VIRTIO_GPU_BACKING_H;
++	flush->resource_id = VIRTIO_GPU_RESOURCE_ID;
++	if (!gpu_cmd(gpu_dev, flush, sizeof(*flush), response, sizeof(*response))) {
++		return false;
++	}
++	return true;
++}
++
++static int
++gpu_open(__unused dev_t dev, __unused int flags, __unused int fmt, __unused struct proc *p)
++{
++	return gpu_dev != NULL && gpu_mode == 2 ? 0 : ENXIO;
++}
++
++static int
++gpu_close(__unused dev_t dev, __unused int flags, __unused int fmt, __unused struct proc *p)
++{
++	return 0;
++}
++
++static int
++gpu_ioctl(__unused dev_t dev, u_long cmd, caddr_t data,
++    __unused int flags, __unused struct proc *p)
++{
++	struct hakios_gpu_push *push = (struct hakios_gpu_push *)data;
++	uint8_t *base;
++	size_t row = (size_t)VIRTIO_GPU_BACKING_W * 4;
++
++	if (cmd != HAKIOS_GPU_PUSH || gpu_mode != 2 || gpu_backing == 0) {
++		return EINVAL;
++	}
++	if (push->width != VIRTIO_GPU_BACKING_W || push->height != VIRTIO_GPU_BACKING_H ||
++	    push->stride < row || push->pixels == 0) {
++		return EINVAL;
++	}
++	base = (uint8_t *)gpu_backing;
++	for (uint32_t y = 0; y < push->height; y++) {
++		if (copyin((user_addr_t)(push->pixels + (uint64_t)y * push->stride),
++		    base + (size_t)y * row, row) != 0) {
++			return EFAULT;
++		}
++	}
++	return gpu_present() ? 0 : EIO;
++}
++
++static struct cdevsw gpu_cdevsw = {
++	.d_open = gpu_open,
++	.d_close = gpu_close,
++	.d_ioctl = gpu_ioctl,
++	.d_type = 0,
++};
++
+ void
+ hakios_virtio_gpu_init(void)
+ {
+@@ -288,6 +668,7 @@ hakios_virtio_gpu_init(void)
+ 	if (!PE_parse_boot_argn("virtio_gpu", &enabled, sizeof(enabled)) || !enabled) {
+ 		return;
+ 	}
++	gpu_mode = enabled > 1 ? 2 : 1;
+ 	bus = ml_io_map(VIRTIO_BUS, VIRTIO_SLOTS * VIRTIO_SLOT_SIZE);
+ 	for (int slot = 0; slot < VIRTIO_SLOTS; slot++) {
+ 		memset(&d, 0, sizeof(d));
+@@ -302,6 +683,15 @@ hakios_virtio_gpu_init(void)
+ 		}
+ 		if (gpu_attach(&d, slot)) {
+ 			printf("virtio-gpu: device in slot %d\n", slot);
++			if (gpu_mode == 2 && gpu_major < 0) {
++				gpu_major = cdevsw_add(-1, &gpu_cdevsw);
++				if (gpu_major < 0 || devfs_make_node(makedev(gpu_major, 0),
++				    DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-gpu") == NULL) {
++					printf("virtio-gpu: cannot create /dev/hakios-gpu\n");
++				} else {
++					printf("virtio-gpu: /dev/hakios-gpu ready (panel push)\n");
++				}
++			}
+ 			return;
+ 		}
+ 	}
+diff --git a/xnu/files/bsd/sys/hakios.virtio_gpu.h b/xnu/files/bsd/sys/hakios.virtio_gpu.h
+index e35a808..4e78cf2 100644
+--- a/xnu/files/bsd/sys/hakios.virtio_gpu.h
++++ b/xnu/files/bsd/sys/hakios.virtio_gpu.h
+@@ -1,9 +1,18 @@
+ #ifndef _SYS_HAKIOS_VIRTIO_GPU_H_
+ #define _SYS_HAKIOS_VIRTIO_GPU_H_
+ 
+-#ifdef KERNEL
+-/* Boot-arg virtio_gpu=1: QEMU's virtio-gpu (device id 16), discovery and control queue only. */
++#include <sys/ioccom.h>
++
++/* A3: the panel is copied row by row into the resource backing, then transferred and flushed. */
++struct hakios_gpu_push {
++	uint64_t pixels;        /* user address of the first pixel */
++	uint32_t stride;        /* bytes from one row to the next */
++	uint32_t width;
++	uint32_t height;
++};
++
++#define HAKIOS_GPU_PUSH _IOW('g', 1, struct hakios_gpu_push)
++
+ void hakios_virtio_gpu_init(void);
+-#endif
+ 
+ #endif /* _SYS_HAKIOS_VIRTIO_GPU_H_ */
+-- 
+2.51.0
+

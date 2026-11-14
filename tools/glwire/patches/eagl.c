@@ -73,6 +73,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <sys/ioctl.h>
+#include <sys/ioccom.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "hakios.gl.h"
@@ -435,6 +438,38 @@ static int blit_targets = 1;
  */
 static int wait_for_frames = 1;
 static int picture_from_host = 1;     /* boot-arg glwire_nopicture=1: the host draws, its picture is not used (frame_end()) */
+
+/* A3: virtio_gpu=2 copies the panel surface into the virtio-gpu resource and flushes it. */
+struct eagl_gpu_push {
+	uint64_t pixels;
+	uint32_t stride;
+	uint32_t width;
+	uint32_t height;
+};
+#define EAGL_GPU_PUSH _IOW('g', 1, struct eagl_gpu_push)
+static int gpu_fd = -1;
+static int gpu_on;
+
+static void
+eagl_gpu_push(struct eagl *e)
+{
+	struct eagl_gpu_push p;
+
+	if (!gpu_on || e->images[0].surface == NULL) {
+		return;
+	}
+	p.pixels = (uint64_t)(uintptr_t)IOSurfaceGetBaseAddress(e->images[0].surface);
+	p.stride = (uint32_t)IOSurfaceGetBytesPerRow(e->images[0].surface);
+	p.width = (uint32_t)e->images[0].width;
+	p.height = (uint32_t)e->images[0].height;
+	if (ioctl(gpu_fd, EAGL_GPU_PUSH, &p) != 0) {
+		static int once;
+		if (!once) {
+			once = 1;
+			say("hakios-gpu: panel push failed: %s\n", strerror(errno));
+		}
+	}
+}
 /* boot-arg glwire_panel_remote=1 (P1): with the host drawing the frame, still send the panel.  The
  * guest's display surface is what CoreAnimation's software path has just painted into -- the glyph
  * spans, the Dock, the search box are not in the record stream -- so the panel is the only thing that
@@ -1270,6 +1305,19 @@ surface_say(struct eagl *e, const char *when, unsigned frame)
 static void
 frame_end(struct eagl *e, bool finished)
 {
+	if (gpu_fd < 0) {
+		char arguments[1024];
+		size_t size = sizeof(arguments);
+
+		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 &&
+		    strstr(arguments, "virtio_gpu=2") != NULL) {
+			gpu_fd = open("/dev/hakios-gpu", O_RDWR);
+			gpu_on = gpu_fd >= 0;
+			if (!gpu_on) {
+				say("hakios-gpu: virtio_gpu=2 but /dev/hakios-gpu: %s\n", strerror(errno));
+			}
+		}
+	}
 	static unsigned unfollowed;
 	uint64_t before, waited, after;
 	unsigned copied = 0, in_place = 0;
@@ -1443,6 +1491,7 @@ frame_end(struct eagl *e, bool finished)
 		if (second >= 0) {
 			IOSurfaceUnlock(e->images[second].surface, 0, NULL);
 		}
+		eagl_gpu_push(e);
 		say("hakios-remote: flush -> %d%s surface %u row %zu%s pid=%d\n", sent,
 		    direct ? " (rows into the surface)" : "",
 		    e->images[0].surface != NULL ? (unsigned)IOSurfaceGetID(e->images[0].surface) : 0,
