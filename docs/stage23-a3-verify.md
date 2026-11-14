@@ -45,3 +45,41 @@ MAXSECS（≥600），并同时记录 `frame_us`/`copying it out`。
 
 - `tools/glwire/harness/gpushot.py`：QMP `screendump` → PNG（`-display none` 下实测可用）；
 - 本目录：serial/host/drive、`scanout-black-750x1624.png`、`userland-build-blocked.log`。
+
+---
+
+# 补充（18:25）：用 code 的 GL root 跑，A3 push 仍未触发 —— 根因在 eagl 的调用位置
+
+用 `/host/iosvm-work/root-a3-gl.apfs`（md5 537998c4，GL=1 已确认，`/lib/libhakios.gl.dylib`
+里确有 `/dev/hakios-gpu` 和 `panel push failed` 字符串）跑 900 s：
+
+- `virtio-gpu: /dev/hakios-gpu ready (panel push)` ✅；
+- **每帧 `command 0x105/0x104` 没有出现**（各只有 A2 初始化 1 次）；
+- `hakios-gpu: panel push failed` = 0（ioctl 根本没被调用，不是失败）；
+- 串口大量 `hakios-remote: end of frame, on=0 images=28 first=750x1624 panel_up=1 pid=14`；
+- `hakios-gl: frame 420: ... 1 picture copied out`（GL 层正常出帧）；
+- `host_glwire` 0 帧；screendump 750x1624 全黑；`end=noui hostframes=0 guestframes=37 panic=0`。
+
+## 根因
+
+`userland/src/eagl.c`：
+
+```c
+1411: if (eagl_remote_is_on() && e->image_count > 0 && e->images[0].width > 0) {
+        ...
+1494:     eagl_gpu_push(e);        /* 只在 remote 开启时调用 */
+```
+
+`eagl_remote_is_on()` = `remote_enabled`，它只在 `/redwood/bin/glremote_on` 存在时置 1
+（`build.sh` 的 `GLREMOTE=1`）。code 的 `root-a3-gl.apfs` 里 **没有** `/bin/glremote_on`
+（ext37 的 `/tmp/root-w15.apfs` 有），所以 `on=0`，`eagl.c:1411` 整块跳过，
+`eagl_gpu_push()` 从不执行。
+
+## 要的修改
+
+1. **把 `eagl_gpu_push(e);` 移出 `if (eagl_remote_is_on() ...)` 块**（或在 `panel_up`
+   分支后无条件调用）—— 否则 `glwire_local=1`（产品路径，on=0）永远不会 push；
+2. 想先用 remote 路径验证：`build.sh` 加 `GLREMOTE=1` 产出带 `/bin/glremote_on` 的 root
+   （但那是 R1 路径）。
+
+Artifacts: `/host/iosvm/logs/s23-a3/glroot-no-glremote/`.
