@@ -191,3 +191,45 @@ GPU=(-nodefaults -device virtio-gpu-device)
 ```
 
 放在 `-device ramfb` 之前；这次不改共享脚本，先用额外 argv。
+
+## `-nodefaults` 与 ramfb 的 `vgabios-ramfb.bin`（2026-11-14）
+
+`-nodefaults` 会去掉 QEMU 默认 VGA 的 ROM 集，`-device ramfb` 随即要
+`vgabios-ramfb.bin`；Debian 的 `qemu-system-data/qemu-system-common/seabios/vgabios`
+**都不带这个文件**（只有 `qboot.rom`、`vgabios-virtio.bin` 等）。直接 `-vga none` 而不加
+`-nodefaults` 仍会命中默认 `efi-virtio.rom`，不是方案。
+
+### 临时方案（不改共享脚本）
+
+用 seabios 的 `vgabios-virtio.bin` 拷成 `qemu-roms/vgabios-ramfb.bin`，让 QEMU 用 `-L` 找：
+
+```bash
+cd /host/iosvm-work/hakios-xnu-kernel
+QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless \
+  qemu/run-darwin.sh 90 -L "$PWD/qemu-roms" -nodefaults
+```
+
+`qemu-roms/vgabios-ramfb.bin` 已放在共享路径（39,424 B，来自 `seabios` 的
+`vgabios-virtio.bin`）。QEMU 参数检查已通过（`-L ... -M virt -nodefaults -device
+virtio-gpu-device -device ramfb -display none -S` 不再报 romfile；只是停在 `-S`）。
+
+这是**临时替代**，不是官方 `vgabios-ramfb.bin`；若 UEFI 仍异常，需要从 QEMU 源码的
+`pc-bios/` 取真正的 `vgabios-ramfb.bin`，或安装带该 ROM 的包。
+
+### 另一条（A1 串口-only）
+
+A1 判据只看串口。若 loader 不依赖显示，可去掉 ramfb：
+
+```bash
+QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless \
+  qemu/run-darwin.sh 90 -nodefaults
+```
+
+但 `run-darwin.sh` 里 `-device ramfb` 是写死的，extra argv 不能移除它；要真正去掉 ramfb 得改
+脚本（需 owner 同意），所以先用上面的 `-L + 替代 ROM`。
+
+### 不要做的
+
+- 不要加 `-vga none` 而不加 `-nodefaults`：仍会报 `efi-virtio.rom`；
+- 不要把 `qboot.rom` 改名成 `vgabios-ramfb.bin`；
+- 不要在未确认前改共享 `run-darwin.sh` 的默认设备集。
