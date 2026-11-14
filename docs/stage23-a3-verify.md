@@ -383,3 +383,22 @@ md5 **351c21703233f71d29c6122772d680a0**，`RC=rc.vtop`、
 已给它补上与 boot-measure 相同的 `QEMU_ESP=1` 分支。
 
 证据：`/host/iosvm/logs/s23-a3/scroll-ab/`（a-*/b-*、a-partial-*）。
+
+## 最终 A/B（2026-11-14 23:50，root 351c2170，wire 通）
+
+滚动 124.6s：
+
+| | A：virtio_gpu=1 纯 TCP | B：virtio_gpu=2 + push |
+|---|---:|---:|
+| 滚动帧 | 224 | 230 |
+| fps | **1.80** | **1.85** |
+| 静止 fps | 1.30 | 1.56 |
+| host 帧 | 1170 | 1073 |
+| push | — | 584 次，7.3–8.3 ms/次（copyin 5–6ms） |
+
+**差 +2.8%，在噪声内**。结论：
+
+- wire 已通（`flush -> 2`，host MATCH 1170/1073），纯 TCP 与 GPU 通道同量级；
+- A3 push 只占帧 ~2–5%，**不是滚动瓶颈**；guest CA/Mesa 是；
+- **virtio-gpu 的 FPS 收益为零**，定位为 virgl/GPU 加速的铺路；
+- 两发均 `QEMU_ESP=1` + 默认设备集 + `-L qemu-roms` + 每次重置 vars.fd，无 UEFI Shell。
