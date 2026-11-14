@@ -45,9 +45,12 @@ ioctl(gpu_fd, EAGL_GPU_PUSH, &p);   // EAGL_GPU_PUSH = _IOW('g',1,...)
 ## 启动
 
 ```bash
-QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless \
-  qemu/run-darwin.sh 120 -L "$PWD/qemu-roms" virtio_gpu=2
+QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=2 QEMU_DISPLAY=egl-headless \
+  qemu/run-darwin.sh 120 -L "$PWD/qemu-roms"
 ```
+
+`QEMU_VIRTIO_GPU=2` 同时加 `-device virtio-gpu-device` 并把 guest cmdline 设为
+`virtio_gpu=2`；`=1` 仍是 A1/A2。不要再把 `virtio_gpu=2` 当 QEMU 参数传。
 
 期望串口：
 

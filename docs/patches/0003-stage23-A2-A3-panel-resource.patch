@@ -1,4 +1,4 @@
-From 0f04de9dd82ed757c6c5499770d6d5b06bafd97f Mon Sep 17 00:00:00 2001
+From 0d3c4ce4c2226cfb96e8ff37693af88f15bf42e5 Mon Sep 17 00:00:00 2001
 From: iosvm-code <iosvm-code@localhost>
 Date: Sat, 14 Nov 2026 17:50:15 +0000
 Subject: [PATCH] stage23 A2/A3: create resource and push the panel through
@@ -7,8 +7,9 @@ Subject: [PATCH] stage23 A2/A3: create resource and push the panel through
 A2 adds RESOURCE_CREATE_2D (0x0101), ATTACH_BACKING, SET_SCANOUT, TRANSFER_TO_HOST_2D and RESOURCE_FLUSH, with gpu_cmd() and a 4.8MB backing.  A3 (virtio_gpu=2) exposes /dev/hakios-gpu: eagl pushes the panel rows (stride-aware) into the backing, the driver transfers/flushes it.  A1/A2 remain the default virtio_gpu=1.
 ---
  drivers/gpu/hakios.virtio_gpu.c       | 400 +++++++++++++++++++++++++-
+ qemu/run-darwin.sh                    |   2 +-
  xnu/files/bsd/sys/hakios.virtio_gpu.h |  15 +-
- 2 files changed, 407 insertions(+), 8 deletions(-)
+ 3 files changed, 408 insertions(+), 9 deletions(-)
 
 diff --git a/drivers/gpu/hakios.virtio_gpu.c b/drivers/gpu/hakios.virtio_gpu.c
 index 52fbab0..7316836 100644
@@ -521,6 +522,19 @@ index 52fbab0..7316836 100644
  			return;
  		}
  	}
+diff --git a/qemu/run-darwin.sh b/qemu/run-darwin.sh
+index 01c883c..7befc7e 100755
+--- a/qemu/run-darwin.sh
++++ b/qemu/run-darwin.sh
+@@ -91,7 +91,7 @@ fi
+ GPU=()
+ if [ -n "$QEMU_VIRTIO_GPU" ] && [ "$QEMU_VIRTIO_GPU" != 0 ]; then
+ 	GPU=(-device virtio-gpu-device)
+-	CMDLINE="virtio_gpu=1 $CMDLINE"
++	CMDLINE="virtio_gpu=$QEMU_VIRTIO_GPU $CMDLINE"
+ fi
+ # VNC=1 gives the machine a VNC console on 127.0.0.1:5909 instead of no display at all, so that a
+ # VNC client can watch it -- and, the reason it is the primary display and not an extra one, so that
 diff --git a/xnu/files/bsd/sys/hakios.virtio_gpu.h b/xnu/files/bsd/sys/hakios.virtio_gpu.h
 index e35a808..4e78cf2 100644
 --- a/xnu/files/bsd/sys/hakios.virtio_gpu.h
