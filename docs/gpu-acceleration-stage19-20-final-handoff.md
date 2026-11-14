@@ -29,7 +29,7 @@
 | **P1** | **冻结/未修复（Stage 21 判死）** | 虚线真实来源 = native legacy `GL_ALPHA` teximage；三个 scrub 点未命中（mapping 0/cleared 0）；`glyph_last_row=1` 掉笔画、`label_dash_rows=53-62` crash、`61-62` 无效果；按预算冻结，不再修复。见 `docs/gpu-acceleration-stage21-p1-scrub.md`、`stage21-performance-current.md`。 |
 | **P2** | **关闭/未达成** | lookup 已修、PosterBoard running，但壁纸 window/PBUI 远程 VC 链在屏而 contents=0；根因与 P3 同源：extension check-in timeout；四路径走完，不再投入 |
 | **P3** | **真路径不可行 + fallback5 已交付** | surface 枚举 30 面无 widget 候选；allContexts 按进程；无零参 snapshot；extension exec 后 ~0.5s 死亡；guest-side 占位（24px 棋盘+白框+双黄对角线）PASS，明确非真 widget |
-| **P4** | **`0x502` 通过；仅 cell1 可用** | 四格/三格历史 `0x502` 全 0；cell1 120 帧/11.00s=10.91 fps（guest）唯一可用；cell2/3 远程路径不可用；cell4 NOT RUN 是判决；不写性能达标 |
+| **P4** | **`0x502` 通过；仅 cell1 可用** | 四格/三格历史 `0x502` 全 0；cell1 120 帧/11.00s=10.91 fps（guest，`NO_PANEL=1` 实验模式；产品完整画面稳态 2.0–3.3 fps）唯一可用；cell2/3 远程路径不可用；cell4 NOT RUN 是判决；不写性能达标 |
 
 ### Stage 20（E1）
 

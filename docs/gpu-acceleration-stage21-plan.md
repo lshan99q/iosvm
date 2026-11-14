@@ -89,9 +89,11 @@
 
 ### 2.2 当前判据：host 端到端 fps
 
-- **技术起步判据 = host 端到端 ≥3 fps**；**目标 5+**。
+- **产品路径（默认，完整画面）稳态 2.0–3.3 fps**；ext38 3480 帧/1700 s ≈ 2.05 fps；启动慢窗 f3 503 s/f4 70 s/f5 25 s（R4）。
+- **技术起步判据 = host 端到端 ≥3 fps**；**目标 5+**；产品路径目前**未稳定过 3**，不能称「加速可用」。
 - **「加速可用」仍只认 ≥5 fps（≥50% 纯本地 10.91）**；3–5 只能写「接近/起步」，不叫可用。
-- guest fps 只作诊断，不再单独作为通过判据；报告必须同时给 host fps、guest fps、上载字节/耗时。
+- **模式必须写清**：4.6–5.0 fps / 10.91 fps 是 `GLWIRE_NO_PANEL=1` 实验模式（host 回放、画面缺 dock/Search/右下），**不是产品性能**。
+- guest fps 只作诊断；报告必须同时给 host fps、guest fps、模式、上载字节/耗时。
 - **host 12 帧卡死（`sent 0 rows`）仍是必须先修的阻塞**；不修不判 5+。
 - **目标（待验证）**：脏区上载平均 **25–50% 面积 → 5–8 fps**；静止 UI 若能到 **<10% 面积 → 期望接近纯本地 10.9 fps**。当前证据：25% 面积只有 2.0–3.4 fps；dirty 静止 0.3–0.7% 是 4.6–5.0 fps——**都还没到目标**，先修 host 565 开关/12 帧卡死再验。
 
@@ -107,17 +109,18 @@
 - 判据：**host 端到端 ≥3 fps** 且 **标签可读**（内容判据不回退）。
 - 未跑；与 RLE 无关（RLE 已判死）。
 
-### 2.5 性能线本阶段收口（565-only）
+### 2.5 性能线本阶段收口（按模式）
 
-| 场景 | 565-only 数字 | 判定 |
-|---|---|---|
-| 滚动 | **~1.8 fps**（全帧 2.44 MB / 547 ms 中位 → 4.5 MB/s 天花板） | **<3，不叫可用** |
-| 静止/局部 dirty | **4.6–5.0 fps**（1–4 tiles / 0.3–0.7%） | 过 3 但未稳定到 5+；只写「接近」 |
-| 纯本地 cell1 | **10.91 fps** | 参照 |
-| 25% 面积 | 2.0–3.4 fps | <3，不叫可用 |
+| 模式 | 场景 | 画面 | 数字 | 判定 |
+|---|---|---|---|---|
+| **产品默认**（无 NO_PANEL） | 稳态 | 完整 | **2.0–3.3 fps**（平均 2.05） | **未稳定过 3，不叫可用** |
+| **产品默认** | 启动 R4 | 完整 | f3 503 s/f4 70 s/f5 25 s，f8 起 0.49 s | 可用性问题，另案 |
+| 实验 `NO_PANEL=1` | 静止/dirty | 缺 dock/Search 右半/右下 | 4.6–5.0 fps | 实验数字，不是产品 |
+| 实验 `NO_PANEL=1` | 滚动 | 缺 | ~1.8 fps | 实验数字，不是产品 |
+| 实验 `NO_PANEL=1` | 纯本地 cell1 | 非产品路径 | 10.91 fps | 仅实验对照 |
 
-- **RLE 判死（14 发，image1 `nonblack=0.00%`）**；性能线以 **565-only** 为准。详见 `docs/gpu-acceleration-stage21-performance-current.md`、`docs/gpu-acceleration-stage20-rle14.md`。
-- 未达 **≥3 fps 底线**的场景：滚动 ~1.8、25% 面积 2–3.4、全屏 ~1.2；这些场景**不得写「加速可用」**。
+- **RLE 判死（14 发，image1 `nonblack=0.00%`）**；565-only 数字只在实验模式自洽。
+- 产品路径未达 **≥3 fps 底线**；不准拿 4.6–5.0/10.91 当产品性能。
 - 本阶段不再追加 RLE/ack/socket 实验；`fbscale=1.5` 仅登记待验证，不启动。
 
 ### 2.6 稳定态长跑
@@ -137,7 +140,7 @@
 
 | 项 | 结论 | 证据 |
 |---|---|---|
-| **性能（565-only，已收口）** | 纯本地 **10.91 fps**；静止 **4.6–5.0 fps**；滚动 **~1.8 fps**；RLE **判死**（14 发，输入黑）；payload 链 = 4.9 MB 拷贝 → 逐像素 → wire 4.5 MB/s；dirty 只适用静止/局部 | `docs/gpu-acceleration-stage21-performance-current.md`、`logs/s20-dirty-idle/`、`logs/s20-rle14/`、`logs/s20-5653/` |
+| **性能（按模式）** | **产品默认（完整画面）稳态 2.0–3.3 fps**，平均 2.05；启动 R4 f3 503 s/f4 70 s/f5 25 s。**4.6–5.0 / 10.91 是 `NO_PANEL=1` 实验模式**，不是产品；RLE 判死；payload 链不变 | `docs/gpu-acceleration-stage21-performance-current.md`、`logs/s22-ext/ext38/`、`logs/s20-dirty-idle/`、`logs/s20-rle14/` |
 | **P1（冻结）** | 虚线真实来源 = **native legacy `GL_ALPHA` teximage**；三个 scrub 点都没打中；终局页见 `stage21-p1-copyscrub.md`；**未修复、冻结** | `docs/gpu-acceleration-stage21-p1-copyscrub.md`、`docs/gpu-acceleration-stage20-p1-labeldash.md`、`logs/s20-p1-copyscrub/`、`logs/s20-p1-labeldash/` |
 | **壁纸（不成立）** | PosterBoard 托管实时场景，SpringBoard 无位图；静态兜底替代不了；只剩 extension 路径（已封） | P2 收口、`docs/gpu-acceleration-stage19-closure.md`、runbook §4.15 系 |
 | **P0** | 历史证据 + **内容判据**（≥5 名称 / 截图 ≥300KB / 无 panic）；P0 不是「当前同帧可复现」 | `logs/s20-p0-repro/`、`logs/s20-p0-8bf5-recheck/`、`logs/s20-p0-matrix/`、decisions D9 |
@@ -213,7 +216,7 @@
 
 **能：**
 
-1. 纯本地 **10.91 fps** 可交互。
+1. 产品默认路径完整画面 **2.0–3.3 fps**（可交互但慢）；实验 `NO_PANEL=1` 的 10.91 fps **不是产品**。
 2. 标签可读（P0 内容判据 PASS）。
 3. 门禁一条命令判 PASS/FAIL（已验证 PASS shot=427K/names=18；FAIL 能精确指出 `screenshot ... < ...`）。
 
@@ -228,8 +231,9 @@
 1. **不再调 ack 超时**：已证非限流点；ack 实验因 lib `4a7cd6` boot 回归而未判定，不要拿它当结论。
 2. **不再调 socket buffer**：host/guest 单侧无效，候选 1 未建立。
 3. **不再追 P0 单配对 ≥95%**：adjacent-pair 无有效 ≥95，P0 已降级为内容判据。
-4. 不再用 host sampler/linear/clamp 修 P1；不再 scrub glyph last row。
-5. 不擅自改宿主 GPU 驱动/vfio；virtio-gpu 只评估不启动。
+4. **不拿 `NO_PANEL=1` 的实验数字当产品性能**（4.6–5.0/10.91 均属实验模式）。
+5. 不再用 host sampler/linear/clamp 修 P1；不再 scrub glyph last row。
+6. 不擅自改宿主 GPU 驱动/vfio；virtio-gpu 只评估不启动。
 
 ## 判定规则
 
