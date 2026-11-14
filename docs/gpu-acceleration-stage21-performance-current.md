@@ -56,3 +56,7 @@ host 源缓冲选择/覆盖（image0 黑、fallback 被 readback 覆盖），**R
   默认 565 路径恢复无条件 glReadPixels，逐字节等价；e2e default PASS。
 - host 收口版 `78c135e2…`（132,592 B）；guest lib 仍 `3a42016b…`；branch 1723b7f。
 - 后续若还优化，是 guest present/frame_end 写 surface，不是 payload codec。
+
+## 下一阶段
+
+- 后续性能工作见 **stage 23**：`docs/virtio-gpu-stage23-plan.md`（virtio-gpu 传输墙 + TCG 优化翻译墙）。

@@ -187,7 +187,7 @@ exec pid=50..53 AppStore/Passbook/FindMy/Sleep
 - **不再拿 host_info 当瓶颈**（ext11 全部 kr=0）；
 - 不再用 ext3 单发栈作结论（瞬时状态）；
 - 不再猜 boot-arg（追踪默认开）；
-- 不碰宿主 GPU；不启动 virtio-gpu；
+- 不碰宿主 GPU；本阶段不启动 virtio-gpu（stage 23 另行立项）；
 - 不写 P2/P3 已修：CheckIn 从未发生。
 
 ## 8. Tool/method: `ustacks` name vs pid
@@ -215,3 +215,8 @@ Consequence for ext3: `PodcastsWidget` was a valid sample because it is
 **14 characters** (fits `p_comm`) and the boot argument could carry its uppercase
 letters; the stack is valid, but this is **not a general extension-sampling
 method**.  Do not infer that arbitrary appex names can be sampled by name.
+
+## 8. Next performance work
+
+- 后续性能工作见 **stage 23**：`docs/virtio-gpu-stage23-plan.md`——**virtio-gpu（传输墙）+ TCG 优化（翻译墙）**。
+- 产品路径当前 2–3.3 fps；4.6–5.0/10.91 是 `NO_PANEL=1` 实验模式，不能当产品性能。

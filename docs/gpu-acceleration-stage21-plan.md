@@ -132,7 +132,7 @@
 
 1. **一条命令复现**：建齐四格镜像（cell3/cell4 可共用一份，按 §8.1）→ 跑四格 → 出表 → 与基线比对。
 2. **门禁脚本**：P0 内容判据 + `0x502` + 无 panic + 截图产物，一条命令出 PASS/FAIL（规范见「交付收尾包」；P1 冻结、壁纸无可行路径，不入门禁）。
-3. **移交更新**：stage 21 状态、已知限制、复现入口；**virtio-gpu 仅保留评估，不启动**（大工程，见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`）。
+3. **移交更新**：stage 21 状态、已知限制、复现入口；后续性能工作见 stage 23：**virtio-gpu（传输墙）+ TCG 优化（翻译墙）**，`docs/virtio-gpu-stage23-plan.md`。
 
 ## 交付收尾包（Stage 21 主交付）
 
@@ -182,7 +182,7 @@
 ### 下一阶段入口
 
 - **extension check-in**：需要 XNU/launchd 层改动；当前缺工具链/注入能力。若立项，见 stage 20 E1 C、D4，以及 stage 22 计划 `docs/gpu-acceleration-stage22-plan.md`。
-- **virtio-gpu**：大工程，**仅评估，不启动**；见 `docs/gpu-acceleration-gpu-passthrough-assessment.md`。
+- **后续性能工作**：见 **stage 23** `docs/virtio-gpu-stage23-plan.md`——virtio-gpu（传输墙）+ TCG 优化（翻译墙）；本阶段不启动，只交接。
 
 ### A. 三条命令复现
 
@@ -233,7 +233,7 @@
 3. **不再追 P0 单配对 ≥95%**：adjacent-pair 无有效 ≥95，P0 已降级为内容判据。
 4. **不拿 `NO_PANEL=1` 的实验数字当产品性能**（4.6–5.0/10.91 均属实验模式）。
 5. 不再用 host sampler/linear/clamp 修 P1；不再 scrub glyph last row。
-6. 不擅自改宿主 GPU 驱动/vfio；virtio-gpu 只评估不启动。
+6. 本阶段不擅自改宿主 GPU 驱动/vfio、不启动 virtio-gpu；stage 23 另行立项。
 
 ## 判定规则
 
