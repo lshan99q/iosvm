@@ -1,0 +1,42 @@
+From 0cb1de0044407cd9d672f4edc30a30a474bb70e2 Mon Sep 17 00:00:00 2001
+From: iosvm-code <iosvm-code@localhost>
+Date: Sat, 14 Nov 2026 13:29:25 +0000
+Subject: [PATCH] stage23 A1: set VIRTQ_DESC_F_NEXT on the request descriptor
+
+The controlq request used two descriptors but desc[0].flags was 0, so the device did not follow next=1 to the device-writable response descriptor; GET_DISPLAY_INFO completed but the response buffer stayed zero, printed as response 0.  Set DESC_F_NEXT, add ISHLD after reading used->idx before reading the response, and sync the mirror into xnu-src.
+---
+ drivers/gpu/hakios.virtio_gpu.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/hakios.virtio_gpu.c b/drivers/gpu/hakios.virtio_gpu.c
+index 66fce0d..52fbab0 100644
+--- a/drivers/gpu/hakios.virtio_gpu.c
++++ b/drivers/gpu/hakios.virtio_gpu.c
+@@ -60,6 +60,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+ #define VIRTIO_GPU_MAX_SCANOUTS 16
+ 
+ #define QUEUE_SIZE              8
++#define DESC_F_NEXT             1
+ #define DESC_F_WRITE            2
+ #define AVAIL_F_NO_INTERRUPT    1
+ 
+@@ -206,7 +207,7 @@ gpu_attach(struct gpu_device *d, int slot)
+ 	}
+ 	desc[0].addr = phys + OFFSET_REQUEST;
+ 	desc[0].len = sizeof(*request);
+-	desc[0].flags = 0;
++	desc[0].flags = DESC_F_NEXT;          /* request -> response: the device follows this */
+ 	desc[0].next = 1;
+ 	desc[1].addr = phys + OFFSET_RESPONSE;
+ 	desc[1].len = sizeof(*response);
+@@ -234,6 +235,7 @@ gpu_attach(struct gpu_device *d, int slot)
+ 	for (seen = 0; seen < 2000; seen++) {
+ 		__builtin_arm_dmb(0x9);         /* ISHLD: read used->idx before the entry */
+ 		if (*(volatile uint16_t *)&d->used->idx != 0) {
++			__builtin_arm_dmb(0x9); /* ISHLD: the response is published before used->idx */
+ 			break;
+ 		}
+ 		delay(5);
+-- 
+2.51.0
+

@@ -68,3 +68,52 @@
 - **内核仓**：只读，不 push、不改。
 - **不再有**“修一下 mig / 换头顺序 / 手工编库”的下一轮；这些都已试过，
   结论是环境边界，不是待办。
+
+## 已解决（2026-11-14 13:30，owner + code 验证）
+
+owner 修好了构建链，关键项：
+
+1. `xnu-deps/sdk/.../usr/local/lib/kernel/` 缺的两个库：
+   - `libpthread_kext.a` 用 `xnu-deps/build/pthread/*.o` 补出；
+   - `libfirehose_kernel.a` 用 `xnu-deps/build/firehose/firehose_buffer.o` 补出。
+2. `EXTERNAL_HEADERS/AvailabilityInternal.h` 第 23339–23341 行被截断，补回
+   `#define __API_AVAILABLE5/6/7(...)` 前缀。
+3. SDK `Kernel.framework/.../libkern/c++/OSMetaClass.h` 缺 `XNU_KERNEL_PRIVATE` 分支，
+   导致 PADDING=1 与 IOService.cpp 的 0 不一致；补同树分支 PADDING=0，解决
+   `_RESERVEDIOService0..47`。
+4. `xnu-deps/host/bin` 的 `libtool/strip/nm/ar/ranlib/otool/lipo` 死链改到
+   `toolchain/cctools/bin/aarch64-apple-darwin11-*`，并加 `libtool` 包装把 `-ca` 翻译成 `-static`。
+5. 构建必须在 `iosvm--iosvm-code` 容器、`source ./xnu-env.sh`、`BUILD_DSYM=0`，并显式传
+   `STRIP/NM/AR/RANLIB`；`DSYMUTIL=/bin/true` 可跳过 dSYM 的 `--minimize`（dSYM 步骤仍可能报
+   `mv` 失败，但 `mach.development.bcm2837.unstripped` 已完整，可直接作为 `hakios-kernel`）。
+
+**本机产出**：
+
+```text
+hakios-kernel md5 79b3ad1e7be8998d6bcfa07fe0cc5557
+__TEXT vmaddr 0xfffffff007004000
+entry         0xfffffff00745d4a8
+markers       "virtio-gpu: slot" x4, "hakios: exec pid=", "hakios: exit pid="
+```
+
+## A1 响应解析修复（2026-11-14）
+
+ext42 的 `GET_DISPLAY_INFO response 0` 不是 host 没回，而是 **controlq 双描述符没设
+`VIRTQ_DESC_F_NEXT`**：
+
+- `desc[0]`（request）`flags` 原本是 0，`next=1` 不会被设备跟随；
+- 设备只看到 request 描述符，responses 描述符从未写入，`used->idx` 仍前进；
+- 所以读到的是 KMA_ZERO 的 0。
+
+修法：
+
+```c
+#define DESC_F_NEXT 1
+desc[0].flags = DESC_F_NEXT;   /* request -> response */
+desc[1].flags = DESC_F_WRITE;
+```
+
+并在读到 `used->idx != 0` 后再加一次 `dmb(0x9)`，确保 response 在 idx 之前可见。
+补丁：`docs/patches/0002-stage23-A1-fix-response-descriptor.patch`。
+
+下一发判据：`virtio-gpu: display 0: 750x1624 enabled=1`。
