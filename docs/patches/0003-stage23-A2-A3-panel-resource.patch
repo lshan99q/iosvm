@@ -1,4 +1,4 @@
-From 0d3c4ce4c2226cfb96e8ff37693af88f15bf42e5 Mon Sep 17 00:00:00 2001
+From 4a7527f97ee49849ae31733fe163a8f49bd9a222 Mon Sep 17 00:00:00 2001
 From: iosvm-code <iosvm-code@localhost>
 Date: Sat, 14 Nov 2026 17:50:15 +0000
 Subject: [PATCH] stage23 A2/A3: create resource and push the panel through
@@ -6,13 +6,13 @@ Subject: [PATCH] stage23 A2/A3: create resource and push the panel through
 
 A2 adds RESOURCE_CREATE_2D (0x0101), ATTACH_BACKING, SET_SCANOUT, TRANSFER_TO_HOST_2D and RESOURCE_FLUSH, with gpu_cmd() and a 4.8MB backing.  A3 (virtio_gpu=2) exposes /dev/hakios-gpu: eagl pushes the panel rows (stride-aware) into the backing, the driver transfers/flushes it.  A1/A2 remain the default virtio_gpu=1.
 ---
- drivers/gpu/hakios.virtio_gpu.c       | 400 +++++++++++++++++++++++++-
+ drivers/gpu/hakios.virtio_gpu.c       | 402 +++++++++++++++++++++++++-
  qemu/run-darwin.sh                    |   2 +-
  xnu/files/bsd/sys/hakios.virtio_gpu.h |  15 +-
- 3 files changed, 408 insertions(+), 9 deletions(-)
+ 3 files changed, 409 insertions(+), 10 deletions(-)
 
 diff --git a/drivers/gpu/hakios.virtio_gpu.c b/drivers/gpu/hakios.virtio_gpu.c
-index 52fbab0..7316836 100644
+index 52fbab0..10a1c46 100644
 --- a/drivers/gpu/hakios.virtio_gpu.c
 +++ b/drivers/gpu/hakios.virtio_gpu.c
 @@ -13,7 +13,12 @@
@@ -407,7 +407,7 @@ index 52fbab0..7316836 100644
  	if (response->hdr.type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO) {
  		printf("virtio-gpu: slot %d: GET_DISPLAY_INFO response %#x\n",
  		    slot, response->hdr.type);
-@@ -275,9 +574,90 @@ gpu_attach(struct gpu_device *d, int slot)
+@@ -275,19 +574,101 @@ gpu_attach(struct gpu_device *d, int slot)
  			printf("virtio-gpu: no enabled display\n");
  		}
  	}
@@ -498,7 +498,11 @@ index 52fbab0..7316836 100644
  void
  hakios_virtio_gpu_init(void)
  {
-@@ -288,6 +668,7 @@ hakios_virtio_gpu_init(void)
+ 	uint32_t enabled = 0;
+ 	vm_offset_t bus;
+-	struct gpu_device d;
++	static struct gpu_device d;   /* gpu_dev outlives init: never point it at the stack */
+ 
  	if (!PE_parse_boot_argn("virtio_gpu", &enabled, sizeof(enabled)) || !enabled) {
  		return;
  	}
