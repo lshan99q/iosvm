@@ -1491,7 +1491,6 @@ frame_end(struct eagl *e, bool finished)
 		if (second >= 0) {
 			IOSurfaceUnlock(e->images[second].surface, 0, NULL);
 		}
-		eagl_gpu_push(e);
 		say("hakios-remote: flush -> %d%s surface %u row %zu%s pid=%d\n", sent,
 		    direct ? " (rows into the surface)" : "",
 		    e->images[0].surface != NULL ? (unsigned)IOSurfaceGetID(e->images[0].surface) : 0,
@@ -1539,6 +1538,11 @@ frame_end(struct eagl *e, bool finished)
 			}
 		}
 	}
+	/*
+	 * A3 must run for the local path too: with glwire_local (the product path) eagl_remote_is_on()
+	 * is 0, so a push inside the block above would never happen.
+	 */
+	eagl_gpu_push(e);
 	/* P1'''': right after the host's rows (or the hand copy) went into the display surface. */
 	if (e->frames < 3 || e->frames % 50 == 0) {
 		surface_say(e, "after", e->frames + 1);
