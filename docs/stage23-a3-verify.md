@@ -283,3 +283,20 @@ root `e52441b1cf7e957f8f6dac4c0dc5235b`（`/bin/glremote_on` + `/etc/glwire_loca
 
 真正 TCP-vs-GPU 的 A/B 等 wire 恢复；push 开/关 A/B 已有（455 vs 562 ms，push ~2%）。
 证据：`/host/iosvm/logs/s23-a3/ab2-a-wire-dead/`。
+
+## wire 诊断（root 7495007e / a5b742b9）
+
+`eagl_remote` 加 stderr 诊断后：
+
+```text
+hakios-remote: begin enabled=1 only=0 mask=0xffffffffffffffff vtop=1 local=1
+hakios-remote: install table=0x143e1c000 at=0 enabled=1 first=57
+hakios-remote: after install, on=1
+...
+hakios-remote: flush -> 0 (rows into the surface) surface 1 row 4608 pid=14
+```
+
+- **没有 `flush skip`**：说明 `w.at > 0`，recorder **有写入**，不是 slot 表装错；
+- `flush -> 0` 是 `eagl_remote_flush()` 后续在 `remote_frame == NULL` 或 connect/send 处返回 0；
+- 已加 `flush no frame at=...` 和 `flush connect <host>:<port> failed: ...` 两条一次性诊断；
+- root a5b742b95460ce205834dd670805f253 带这两条，重跑即可区分是 picture buffer 还是 host 连接。
