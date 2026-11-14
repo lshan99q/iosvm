@@ -85,9 +85,23 @@ virtio-gpu: slot 27: used flags=0 idx=1 id=0 len=24; response 00000000 ...
   **整个 4 KiB 响应区一个字节都没写** → A1 的 response 问题仍在（desc1 的写地址/NEXT 或 QEMU 走了 nodata 路径）；
 - 队列：`desc0 0x19179c400/24/0x1/1`（READ|NEXT）、`desc1 0x19179c500/408/0x2/0`（WRITE）。
 
+## 宿主侧看图（A2/A3 判据用）
+
+`-display none` 下 **QMP `screendump` 可用**（实测），不需要 `egl-headless`/VNC：
+
+```bash
+# QEMU 本来就带 -qmp tcp:127.0.0.1:$((4445 + 10*INSTANCE)),server,nowait
+python3 tools/glwire/harness/gpushot.py /tmp/gpuscanout.png --instance 1
+```
+
+- 工具：`tools/glwire/harness/gpushot.py`（QMP `screendump`；QEMU 10 直接写 PNG，老版本回退 PPM 转换）；
+- 固件 scanout 是 1280x800；guest `SET_SCANOUT` 之后 screendump 变成 **750x1624**（A2 生效的证据）；
+- 画面全黑是正常的（A3 前 backing 没被推过）；A3 之后应看到 dock/桌面。
+
 ## 注意
 - **不要** `-nodefaults`（改 UEFI 默认设备/启动顺序，不跑 startup.nsh）；
 - **不要** `-vga none`（PCI 编号变 `Pci(0x2,0x0)`，固件再保存一次坏 NVRAM）；
 - `-L "$PWD/qemu-roms"` 提供 `efi-virtio.rom` 与 `vgabios-ramfb.bin`（默认设备集才需要）；
 - boot 前确认无残留：`pgrep -af "qemu-syste[m]|host_glwir[e]"`；
+- **每次起机前重置 vars.fd**：`python3 -c 'open("qemu/vars.fd","wb").write(b"\xff"*(64*1024*1024))'`；
 - 若又掉 Shell：先查 `vars.fd` 是否被写脏（应全 0xFF）、`qemu/esp/EFI/hakios/payload.bin` 是否存在。
