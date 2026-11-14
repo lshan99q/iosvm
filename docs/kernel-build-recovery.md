@@ -64,3 +64,35 @@ make kernel -j16
    marker（`virtio-gpu: slot`、`hakios: exec pid=`）验收。
 
 A1 驱动源码与本地 commit `ae084ae`、补丁 `stage23-a1.patch` 未受影响；本次未 boot。
+
+## 第二轮（2026-11-14 08:50）：尝试手工编两个缺失库，仍未闭合
+
+按 lead 指令，在 libdispatch/libpthread 源码上手工编：
+
+```bash
+xnu-clang -c -O2 -D KERNEL=1 -D OS_FIREHOSE_SPI=1 -D XNU_KERNEL_PRIVATE \
+  -I $XNU_SRC/bsd -I $XNU_SRC/osfmk -I $XNU_SRC/libkern -I $XNU_SRC/EXTERNAL_HEADERS \
+  -I $XNU_SRC/BUILD/obj/EXPORT_HDRS/{osfmk,bsd,libkern} -I $XNU_SRC/bsd/sys \
+  -idirafter $XNU_DEPS/libdispatch \
+  -o /tmp/firehose_buffer.o $XNU_DEPS/libdispatch/src/firehose/firehose_buffer.c
+```
+
+结果：`libkern/os/atomic_private_impl.h` 报 `unknown type name 'memory_order'`，
+即使显式 `-include stdatomic.h` 也不消失。说明这棵 XNU 的 `os/atomic.h`、libdispatch 的
+`src/firehose` 与当前 SDK/clang 组合不是同一套（旧 BUILD 的预编译对象本来就不该重编）。
+**不能把 libfirehose/libpthread 当普通用户态库编**。
+
+同时最终链接还缺 `OSMetaClass::_RESERVEDOSMetaClass0`：`OSMetaClass.cpo` 里没有该符号，
+不是简单改链接顺序能解的，需恢复整套同 ABI 的 C++ 对象或全量重编。
+
+**结论：当前 BUILD/obj 已能编完所有 C/C++ 对象，但最终链接的两个 SDK 库和 C++ 符号不可在本容器
+由当前源凑齐；继续硬编会破坏预编译对象的 ABI。已恢复 `hakios-kernel` 为 git 的 `prebuilt/hakios-kernel`，
+未产出新内核，未 boot。**
+
+### 给下一位的最小下一步
+
+1. 从原始分发物/备份恢复 `BUILD/obj/EXPORT_HDRS` 和整套 `BUILD/obj/DEVELOPMENT_ARM64_BCM2837`
+   （尤其 `libkern/DEVELOPMENT/*.cpo`、`libdispatch` 的 `libfirehose_kernel.a`、`libpthread_kext.a`）；
+2. 或找一台有完整 Apple SDK + xcodebuild 的机器，按 `libdispatch.xcodeproj`/`libpthread.xcodeproj`
+   的 `Kernel`/`kext` target 编两个库，再装到 `$(SDKROOT)/usr/local/lib/kernel/`；
+3. 然后只跑 `tools/kernel-rebuild.sh` 的“删链接产物 + 重链”，不要重编对象。
