@@ -156,3 +156,26 @@ guest Mesa 路径本身慢**，A3 只增加一次 1125→750 缩放，未带来 
 1. 用默认 glwire host 路径 + A3（需要 GLREMOTE=1 的 root）对照；
 2. 查 `glwire_local` 下 3.2s 未归类耗时（handing 594ms + copying 49ms + before 134ms
    只占约 0.8s，剩余像 `glFinish/sync_frames`）。
+
+---
+
+# 结论（19:37）：A3 push 端到端通过，但比 glwire 慢 6–9 倍
+
+内核 `8d63362f6f0345d0c9abbef73b1a9df2`（gpu_device static 修复）+ root
+`9246d1c57f965d6d7a5adcc80268fa08`（GL=1，1125x2436→750x1624 最近邻），
+`QEMU_ESP=1 QEMU_VIRTIO_GPU=2 QEMU_DISPLAY=none`，900 s。
+
+| 判据 | 结果 |
+|---|---|
+| `/dev/hakios-gpu ready (panel push)` | ✅ |
+| `hakios-gpu: panel push failed` | ✅ 0 次 |
+| `0x105 / 0x104 -> 0x1100` | ✅ **各 1001 次**（每帧 push） |
+| `command timed out` / panic | ✅ 0 / 0（`end=qemu-exited panic=0`） |
+| 宿主侧画面 | ✅ 有真实内容：Apple 启动 logo → Weather widget 槽（黑底白卡），不再全黑 |
+| fps | ❌ `hakios-gl: frame` **1.6–2.3 s/帧**（约 0.4–0.6 fps），98 帧 |
+
+同 glwire_local 对照（ext39，无 push）：`frame_us` ≈ 245 ms/帧，稳态 2–3.3 fps。
+→ **A3 这条全帧 push 路径（guest Mesa + 4.8 MB copyin + TRANSFER/FLUSH）比 glwire 慢 6–9 倍**，
+链路通但不带来 fps 收益，与 code 的判断一致。
+
+截图：`logs/s23-a3/glroot-a3-ok/scanout-apple-logo.png`、`scanout-weather-widget.png`。
