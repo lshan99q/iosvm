@@ -41,13 +41,16 @@
 
 ### 23D. 异步双缓冲（主人 11-14 指定纳入后续计划）
 
-**为什么**：ext39 分阶段计时显示每帧 ~330 ms 中 **~290 ms 在 guest 侧**，而 `eagl_remote_flush`
-每帧**同步等 host reply**——guest 的合成本可与 host 的 replay/上屏重叠，现在被串行化。
+**为什么（ext39 census 修正）**：每帧 **245,169 us（~245 ms）** 的真实拆解是
+flush **617 us**、wait **5 us**、readback **59,658 us（~60 ms）**、attach **299 us**，
+剩下 **~184 ms 在 CA/SpringBoard 自己的渲染**（guest CPU/TCG）。
+**guest 并不在等 host（wait 5 us）**；23D 的真实收益是「把 60 ms 的 readback 与
+184 ms 的渲染重叠」，乐观省 ~60 ms/帧，**不是接近 2×**。
 
 | 子阶段 | 内容 | 判据 |
 |---|---|---|
 | D1 | 双缓冲：guest 合成第 N+1 帧时，host 还在 replay/上屏第 N 帧 | 帧间隔下降 ≥30%，画面无撕裂 |
-| D2 | reply 与下一帧解耦（不阻塞在 `recv` 等 picture；picture 晚一帧到达也可接受） | guest 侧等待时间显著下降（用 ext39 同款 stage 计时验证） |
+| D2 | reply 与下一帧解耦（不阻塞在 `recv` 等 picture；picture 晚一帧到达也可接受） | 注意 wait 仅 5 us：host reply 不是当前瓶颈；判据改为看 readback/render 重叠后**帧间隔**是否下降（ext39 同款 stage 计时） |
 | D3 | 流水线深度与 backpressure（避免队列无限增长） | 长跑 1200 s 稳定、无 OOM、无 panic |
 
 - 判据总口径：**默认路径**（完整画面）稳态 fps；分阶段计时里 guest 等待时间下降；
@@ -76,15 +79,31 @@
 - virgl 依赖客机 Mesa + 宿主 virglrenderer 版本匹配，风险最高；
 - MTTCG 对 aarch64 客机稳定，但 XNU 的多核启动在本项目未见验证，可能 panic。
 
-## 预期收益与顺序（基于 ext39 实测分阶段计时）
+## 预期收益与顺序（基于 ext39 每帧 census）
 
-| 组合 | 预计 fps | 关键依据 |
-|---|---|---|
-| 现状（默认路径） | 2–3.3 | ext37/ext38/ext39 |
-| + 23A（virtio-gpu，去双程搬运） | 3.5–4.5 | 省 panel 24–27 ms + 传输 |
-| + 23C（TCG 4 核/MTTCG/tb-size） | **5–8** | guest 侧 ~290 ms/帧 是主瓶颈 |
-| + 23D（异步双缓冲） | **8–12** | 合成与上屏重叠，接近 2× |
-| + 23B（virgl，GL 交 V100） | **10–15** | 去掉回读与同步等待 |
-| 24 fps | 仍不承诺 | 需 guest 每帧 ≤42 ms |
+### ext39 每帧成本（`hakios-gl: after 1600 frames`）
+
+| 项 | 实测 |
+|---|---|
+| frame_us | **245,169 us（~245 ms）** |
+| handing the commands on（flush） | **617 us** |
+| waiting for the picture（wait） | **5 us** |
+| copying it out（readback） | **59,658 us（~60 ms）** |
+| making textures of IOSurfaces（attach） | **299 us** |
+| 剩余（CA/SpringBoard 渲染，TCG） | **~184 ms** |
+
+- **读写/等待几乎为零**；60 ms 是 guest 的 copy-out，184 ms 是 CA/SpringBoard 自身渲染；
+- 所以 23D 不是「等 host 的 2×」，而是 **readback 与渲染重叠**。
+
+### 修正后的收益表
+
+| 组合 | 每帧 | 预计 fps | 关键依据 |
+|---|---|---|---|
+| 现状（默认路径） | **245 ms** | **~3–4** | ext39 census |
+| + 23A（virtio-gpu，去 readback） | **~185 ms** | **~5.4** | 省 ~60 ms readback |
+| + 23C（TCG 4 核，若 CA 并行减半） | **~150 ms** | **~6.6** | 184 ms 渲染是主项 |
+| + 23D（异步双缓冲/重叠） | **~92 ms** | **~8–10** | 乐观省 ~60 ms/帧，不是 2× |
+| + 23B（virgl，GL 交 V100） | — | **有限** | CA 工作仍在 guest |
+| 24 fps | 需 ≤42 ms | **不承诺** | guest 每帧 ≤42 ms 才可能 |
 
 执行顺序：**23A → 23C（并行）→ 23D → 23B**；23B 的门槛是 23A 稳定、且 23D 的流水线不拖累 virgl 的资源同步。
