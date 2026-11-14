@@ -359,3 +359,27 @@ hakios-remote: flush connect 10.0.2.2:9110 failed: Connection refused
 新 root：`/host/iosvm-work/root-a3-net.apfs`，
 md5 **351c21703233f71d29c6122772d680a0**，`RC=rc.vtop`、
 `GL=1 GLREMOTE=1 GLWIRE_LOCAL=1`。
+
+---
+
+# 滚动 A/B（23:49）：virtio-gpu push 对滚动 fps 无收益（A 1.80 vs B 1.85）
+
+同一 root `root-a3-net.apfs`（351c2170，`RC=rc.vtop` + `QEMU_NET=1` → wire 通，`flush -> 2`），
+两发 1200 s；UI 稳定后先取静止窗口，再发同一段 120 s 滚动（`touch.py swipe`，60 次）：
+
+| 指标 | A（virtio_gpu=1，纯 TCP） | B（virtio_gpu=2，+ push） |
+|---|---|---|
+| **滚动 fps** | **1.80**（224 帧/124.64 s） | **1.85**（230 帧/124.60 s） |
+| 静止（窗口前 ~60 帧） | 1.30 fps | 1.56 fps |
+| host 帧 | 1170（MATCH=1170） | 1073（MATCH=1073） |
+| push | — | 584 次，7.3–8.3 ms/次 |
+| end | qemu-exited panic=0 | qemu-exited panic=0 |
+
+- B 相对 A **+2.8%，在噪声内**；push 只占 ~8 ms（帧的 ~1.7%）；
+- → **通道不是滚动瓶颈，瓶颈在 guest（CA/Mesa）**；
+- 按 owner 判据：**virtio-gpu 在 FPS 维度收益为零** → 定位为「为 virgl/真 GPU 铺路」，停止 FPS 优化。
+
+期间 `drive-scroll.sh` 的接口检测在启动画面误触发（窗口开早、UI 未起），该发弃用；
+已给它补上与 boot-measure 相同的 `QEMU_ESP=1` 分支。
+
+证据：`/host/iosvm/logs/s23-a3/scroll-ab/`（a-*/b-*、a-partial-*）。

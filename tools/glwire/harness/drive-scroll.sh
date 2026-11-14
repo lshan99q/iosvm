@@ -155,7 +155,14 @@ if ps -eo comm= | grep -q '^host_glwire'; then
 fi
 [ "$ZERO_RAM" = 1 ] && rm -f "$IOSVM/qemu/ram.img"
 cd "$IOSVM" || exit 1
-QEMU_SMP=${QEMU_SMP:-4} QEMU_TB_MB=${QEMU_TB_MB:-1536} QEMU_RAM_GB=12 QEMU_NET=1 QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img \
+# QEMU_ESP=1 boots from the ESP tree (qemu/esp, payload included) instead of the old esp.img
+# that has no payload and lands the firmware in its built-in shell; same switch as boot-measure.sh.
+if [ "${QEMU_ESP:-0}" = 1 ]; then
+	ESP_ENV="QEMU_ESP=1"
+else
+	ESP_ENV="QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img"
+fi
+env QEMU_SMP=${QEMU_SMP:-4} QEMU_TB_MB=${QEMU_TB_MB:-1536} QEMU_RAM_GB=12 QEMU_NET=1 $ESP_ENV \
 	IMG=$IOSVM/userland/system.apfs ROOT=$ROOT CMDLINE="cpus=${QEMU_SMP:-4} fb_beat=0 fbscale=2 metal=1 ${XCMD:-}" \
 	timeout 7500 bash qemu/run-darwin.sh "$MAXSECS" ${QEMU_EXTRA:-} >> "$LOG" 2>&1 &
 qpid=$!
