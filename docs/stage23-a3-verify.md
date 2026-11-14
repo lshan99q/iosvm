@@ -123,3 +123,36 @@ init 时 A2 的 `gpu_cmd(&d, …)` 仍有效，所以五条命令都成功；之
 `struct gpu_device d;` → `static struct gpu_device d;`（或文件作用域 / kmem_alloc）。
 
 证据：`/host/iosvm/logs/s23-a3/glroot-a3-crash/`（panic.txt / serial.log / drive.log）。
+
+## 2026-11-14 19:20：code 容器首跑（glwire_local=1，700s）
+
+内核 **8d63362f6f0345d0c9abbef73b1a9df2**（`gpu_device` static 修复），
+root **9246d1c57f965d6d7a5adcc80268fa08**（GL=1，panel 1125x2436 最近邻缩到 750x1624）。
+启动：`QEMU_RAM_GB=6 QEMU_ESP=1 QEMU_VIRTIO_GPU=2 QEMU_DISPLAY=none
+CMDLINE="glwire_local=1 virtio_gpu=2" -L qemu-roms`，UEFI AAVMF 64MB + vars 64MB 0xFF。
+
+结果：
+
+- `virtio-gpu: /dev/hakios-gpu ready`：**出现**；
+- `hakios-gpu: panel push failed`：**0 次**；
+- `command 0x105/0x104`：各 **55** 次（A3 push 真正触发）；
+- A1/A2 五条仍全 0x1100，`display 0: 1280x800 enabled=1`；
+- eagl census（4 个有 surface 的帧）：
+
+| frame | frame_us | copying out |
+|---:|---:|---:|
+| 1 | 4,570,889 | 72,337 |
+| 2 | 3,911,209 | 28,908 |
+| 3 | 3,773,712 | 57,116 |
+| 4 | 3,983,590 | 48,956 |
+
+- 700s 内 `hakios-gl: frame` 到 50+，但大量是 "1 draw, none into an IOSurface"；
+  有效帧约 **0.08–0.25 fps**，**低于** ext39 默认路径的 245 ms/frame（~4 fps）。
+- 没有做 virtio_gpu=1 同参数对照；ext39 的 245ms 是 glwire host 路径，不是本轮的
+  glwire_local。
+
+**结论**：A3 内核/用户态 push 链路已通（尺寸、命令、0 失败），但 **glwire_local=1 的
+guest Mesa 路径本身慢**，A3 只增加一次 1125→750 缩放，未带来 fps 收益。下一步应：
+1. 用默认 glwire host 路径 + A3（需要 GLREMOTE=1 的 root）对照；
+2. 查 `glwire_local` 下 3.2s 未归类耗时（handing 594ms + copying 49ms + before 134ms
+   只占约 0.8s，剩余像 `glFinish/sync_frames`）。

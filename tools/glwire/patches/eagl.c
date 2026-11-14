@@ -453,6 +453,7 @@ static int gpu_on;
 static void
 eagl_gpu_push(struct eagl *e)
 {
+	static unsigned char scaled[750 * 1624 * 4];
 	struct eagl_gpu_push p;
 
 	if (!gpu_on || e->images[0].surface == NULL) {
@@ -462,6 +463,23 @@ eagl_gpu_push(struct eagl *e)
 	p.stride = (uint32_t)IOSurfaceGetBytesPerRow(e->images[0].surface);
 	p.width = (uint32_t)e->images[0].width;
 	p.height = (uint32_t)e->images[0].height;
+	/* The panel surface here is 1125x2436; the virtio-gpu scanout is 750x1624. */
+	if ((p.width != 750 || p.height != 1624) && p.width > 0 && p.height > 0 && p.stride >= p.width * 4) {
+		const uint32_t *src = (const uint32_t *)(uintptr_t)p.pixels;
+		uint32_t *dst = (uint32_t *)scaled;
+
+		for (uint32_t y = 0; y < 1624; y++) {
+			uint32_t sy = (uint32_t)((uint64_t)y * p.height / 1624);
+			for (uint32_t x = 0; x < 750; x++) {
+				uint32_t sx = (uint32_t)((uint64_t)x * p.width / 750);
+				dst[y * 750 + x] = src[(size_t)sy * (p.stride / 4) + sx];
+			}
+		}
+		p.pixels = (uint64_t)(uintptr_t)scaled;
+		p.stride = 750 * 4;
+		p.width = 750;
+		p.height = 1624;
+	}
 	if (ioctl(gpu_fd, EAGL_GPU_PUSH, &p) != 0) {
 		static int once;
 		if (!once) {
