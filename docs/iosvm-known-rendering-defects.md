@@ -561,3 +561,35 @@ ext37 用**默认路径**（`glwire_local=1`、**不带 `--no-panel` / `GLWIRE_N
   - 看画面必须用默认路径（不带 `NO_PANEL`）；
   - `tools/glwire/harness/gate.sh` 的默认 `HOST_ENV` 目前仍带 `GLWIRE_NO_PANEL=1`（第 96 行）——它是为了快，但**截图不代表产品画面**，需要标注或改默认。
 - **新开 R4（真实问题）**：默认路径**启动后前 ~10 分钟帧极慢**（f3 511 s），之后 2–6.9 fps；这是可用性上的真问题，另案。
+
+## R4：默认路径前几帧极慢（2026-11-14）
+
+R1 已结案为 `GLWIRE_NO_PANEL=1` 实验模式的伪影；默认路径（guest 合成 panel）画面完整。
+R4 是默认路径启动后的慢：f3 间隔 511 s、f4 84 s、f5 12 s、f6 4 s，之后 2–6.9 fps。
+`host_glwire: frame N ... took` 从 records 收完后开始，**不含 request/segments/records 的 recv**，所以
+f3 `took=37.9ms` 不能解释 511s。现已在 `serve_frame()` 加：
+
+```
+host_glwire: stages frame N req=... seg=... rec=... replay=... read=... panel=... reply=... total=... ms in_place=%d refs=%lu
+```
+
+- 前 10 帧、`total>1000ms`、或每 100 帧打印；
+- `req`：请求行到达前的等待；
+- `seg`：segments 接收；
+- `rec`：records 接收；
+- `replay`：dispatch + `glFinish`（含 guest panel upload 的 op201）；
+- `read`：`glReadPixels`；
+- `panel`：panel hash、in-place/`write_picture_rows`、shadow；
+- `reply`：`send_all(done)+send_all(picture)`。
+
+判据：
+- `req` 大 → guest 没发下一帧/CA 卡；
+- `seg`/`rec` 大 → guest 发送慢、内核 socket 背压、半帧；
+- `replay` 大 → host 端记录回放/guest panel upload 重；
+- `read` 大 → `glReadPixels`/GPU；
+- `panel` 大 → hash/行写/shadow；
+- `reply` 大 → guest 不收/网络背压；
+- 各段都小但总间隔大 → 段间主循环/poll。
+
+构建：`cd tools/glwire && make host_glwire`。
+下一发默认路径 1800 s，取前 8 帧的 stages 行即可定位。
