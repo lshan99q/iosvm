@@ -1,0 +1,470 @@
+From ae084ae0350906da0be1ad4dc75d543b64c5f98a Mon Sep 17 00:00:00 2001
+From: iosvm-code <iosvm-code@localhost>
+Date: Sat, 14 Nov 2026 06:43:07 +0000
+Subject: [PATCH] stage23 A1: virtio-gpu discovery, controlq, GET_DISPLAY_INFO
+
+Add drivers/gpu/hakios.virtio_gpu.c (device id 16, virtio-mmio slot scan, ACK/DRIVER/FEATURES_OK/DRIVER_OK, VIRTIO_F_VERSION_1 only, controlq 0 with desc/avail/used, one GET_DISPLAY_INFO request, parse display_info).  Wire it through drivers/gpu/conf, drivers/map, the input init hook and the stubs, with boot-arg virtio_gpu=1 (default off).  Add QEMU_VIRTIO_GPU=1 to qemu/run-darwin.sh, which adds -device virtio-gpu-device and cmdline virtio_gpu=1; default remains no GPU.  The driver object compiled as mach-o arm64 and exports _hakios_virtio_gpu_init.
+---
+ drivers/core/hakios.stubs.c           |   5 +
+ drivers/gpu/conf                      |   5 +
+ drivers/gpu/hakios.virtio_gpu.c       | 307 ++++++++++++++++++++++++++
+ drivers/input/hakios.input.c          |   2 +
+ drivers/map                           |   3 +
+ qemu/run-darwin.sh                    |  23 +-
+ xnu/files/bsd/sys/hakios.virtio_gpu.h |   9 +
+ 7 files changed, 352 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/gpu/hakios.virtio_gpu.c
+ create mode 100644 xnu/files/bsd/sys/hakios.virtio_gpu.h
+
+diff --git a/drivers/core/hakios.stubs.c b/drivers/core/hakios.stubs.c
+index ed5ca7f..21e68ef 100644
+--- a/drivers/core/hakios.stubs.c
++++ b/drivers/core/hakios.stubs.c
+@@ -21,6 +21,7 @@
+ #include <sys/hakios.input.h>
+ #include <sys/hakios.net.h>
+ #include <sys/hakios.virtio_blk.h>
++#include <sys/hakios.virtio_gpu.h>
+ 
+ /* the ends of a run (loader_return.c, the guards), which have no header of their own */
+ void hakios_adsp_stop(void);
+@@ -53,6 +54,10 @@ void hakios_ufs_quiesce(void) {}
+ void hakios_var_save_on_return(void) {}         /* no flash, so no data volume to save into it */
+ #endif
+ 
++#ifndef HAKIOS_VIRTIO_GPU
++void hakios_virtio_gpu_init(void) {}
++#endif
++
+ #ifndef HAKIOS_VIRTIO_BLK
+ void hakios_virtio_blk_init(void) {}
+ bool hakios_virtio_blk_dev(__unused dev_t dev) { return false; }
+diff --git a/drivers/gpu/conf b/drivers/gpu/conf
+index 931c63a..652bb56 100644
+--- a/drivers/gpu/conf
++++ b/drivers/gpu/conf
+@@ -2,6 +2,11 @@
+ # CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+ # tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+ 
++driver VIRTIO_GPU
++	file    bsd/dev/hakios.virtio_gpu.c
++	help    QEMU's virtio-gpu (device id 16) for the 2D display path (virtio_gpu=1, QEMU only). Stage 23 A1
++	help    discovers it and reads GET_DISPLAY_INFO; no 2D/3D resources yet
++
+ driver ADRENO
+ 	file    bsd/dev/hakios.adreno.c
+ 	file    iokit/Kernel/hakios.gpu.cpp iokitcpp
+diff --git a/drivers/gpu/hakios.virtio_gpu.c b/drivers/gpu/hakios.virtio_gpu.c
+new file mode 100644
+index 0000000..66fce0d
+--- /dev/null
++++ b/drivers/gpu/hakios.virtio_gpu.c
+@@ -0,0 +1,307 @@
++/*
++ * QEMU's virtio-gpu as a display device: device discovery, feature negotiation and the control
++ * queue (stage 23, A1).  Nothing is drawn yet: GET_DISPLAY_INFO says what the host would scan out,
++ * which is the first thing to see before RESOURCE_CREATE_2D/SET_SCANOUT.
++ *
++ * The transport is the same virtio-mmio one as hakios.virtio_input.c (32 slots at 0x0a000000,
++ * 0x200 bytes each, modern version 2).  The GPU device id is 16.  Only with boot-arg virtio_gpu=1;
++ * the bus address is QEMU's.  No interrupt is used: one control command is polled during init.
++ */
++#include <kern/clock.h>
++#include <libkern/libkern.h>
++#include <mach/mach_types.h>
++#include <mach/vm_param.h>
++#include <pexpert/pexpert.h>
++#include <sys/hakios.virtio_gpu.h>
++#include <sys/systm.h>
++#include <vm/vm_kern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
++
++#define VIRTIO_BUS              0x0a000000UL    /* QEMU virt: 32 transports of 0x200 bytes */
++#define VIRTIO_SLOTS            32
++#define VIRTIO_SLOT_SIZE        0x200
++
++#define VIRTIO_MAGIC            0x000           /* "virt" */
++#define VIRTIO_VERSION          0x004
++#define VIRTIO_DEVICE_ID        0x008
++#define VIRTIO_DEVICE_FEATURES  0x010
++#define VIRTIO_DEVICE_FEATURES_SEL 0x014
++#define VIRTIO_DRIVER_FEATURES  0x020
++#define VIRTIO_DRIVER_FEATURES_SEL 0x024
++#define VIRTIO_QUEUE_SEL        0x030
++#define VIRTIO_QUEUE_NUM_MAX    0x034
++#define VIRTIO_QUEUE_NUM        0x038
++#define VIRTIO_QUEUE_READY      0x044
++#define VIRTIO_QUEUE_NOTIFY     0x050
++#define VIRTIO_STATUS           0x070
++#define VIRTIO_QUEUE_DESC       0x080
++#define VIRTIO_QUEUE_DRIVER     0x090
++#define VIRTIO_QUEUE_DEVICE     0x0a0
++
++#define VIRTIO_ID_GPU           16
++#define STATUS_ACKNOWLEDGE      1
++#define STATUS_DRIVER           2
++#define STATUS_DRIVER_OK        4
++#define STATUS_FEATURES_OK      8
++#define STATUS_FAILED           0x80
++
++#define VIRTIO_F_VERSION_1      32              /* feature bit 32, driver features hi bit 0 */
++
++#define VIRTIO_GPU_F_VIRGL      0
++#define VIRTIO_GPU_F_EDID       1
++#define VIRTIO_GPU_F_RESOURCE_UUID 2
++#define VIRTIO_GPU_F_RESOURCE_BLOB 3
++#define VIRTIO_GPU_F_CONTEXT_INIT 4
++
++#define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100
++#define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x0101
++#define VIRTIO_GPU_MAX_SCANOUTS 16
++
++#define QUEUE_SIZE              8
++#define DESC_F_WRITE            2
++#define AVAIL_F_NO_INTERRUPT    1
++
++struct vq_desc {
++	uint64_t addr;
++	uint32_t len;
++	uint16_t flags;
++	uint16_t next;
++};
++struct vq_avail {
++	uint16_t flags;
++	uint16_t idx;
++	uint16_t ring[QUEUE_SIZE];
++};
++struct vq_used {
++	uint16_t flags;
++	uint16_t idx;
++	struct {
++		uint32_t id;
++		uint32_t len;
++	} ring[QUEUE_SIZE];
++};
++
++struct virtio_gpu_ctrl_hdr {
++	uint32_t type;
++	uint32_t flags;
++	uint64_t fence_id;
++	uint32_t ctx_id;
++	uint32_t padding;
++};
++
++struct virtio_gpu_rect {
++	uint32_t x, y, width, height;
++};
++
++struct virtio_gpu_display_one {
++	struct virtio_gpu_rect r;
++	uint32_t enabled;
++	uint32_t flags;
++};
++
++struct virtio_gpu_resp_display_info {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_display_one pmodes[VIRTIO_GPU_MAX_SCANOUTS];
++};
++
++/* one page: descriptor table, avail ring, used ring, request and response */
++#define OFFSET_DESC             0x0000
++#define OFFSET_AVAIL            0x0200
++#define OFFSET_USED             0x0300
++#define OFFSET_REQUEST          0x0400
++#define OFFSET_RESPONSE         0x0500
++
++struct gpu_device {
++	vm_offset_t             regs;
++	struct vq_desc *        desc;
++	struct vq_avail *       avail;
++	struct vq_used *        used;
++	uint32_t                feat_lo, feat_hi;
++	uint32_t                queue_size;
++};
++
++static inline uint32_t
++reg_read(struct gpu_device *d, uint32_t reg)
++{
++	return *(volatile uint32_t *)(d->regs + reg);
++}
++
++static inline void
++reg_write(struct gpu_device *d, uint32_t reg, uint32_t value)
++{
++	*(volatile uint32_t *)(d->regs + reg) = value;
++}
++
++static inline void
++reg_write64(struct gpu_device *d, uint32_t reg, uint64_t value)
++{
++	reg_write(d, reg, (uint32_t)value);
++	reg_write(d, reg + 4, (uint32_t)(value >> 32));
++}
++
++static bool
++gpu_fail(struct gpu_device *d, vm_offset_t page, int slot, const char *why)
++{
++	reg_write(d, VIRTIO_STATUS, STATUS_FAILED);
++	kmem_free(kernel_map, page, PAGE_SIZE);
++	printf("virtio-gpu: slot %d: %s\n", slot, why);
++	return false;
++}
++
++static bool
++gpu_attach(struct gpu_device *d, int slot)
++{
++	vm_offset_t page = 0;
++	struct virtio_gpu_ctrl_hdr *request;
++	struct virtio_gpu_resp_display_info *response;
++	struct vq_desc *desc;
++	uint64_t phys;
++	uint32_t qmax;
++	int seen;
++
++	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
++	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return false;
++	}
++	phys = kvtophys(page);
++	desc = (struct vq_desc *)(page + OFFSET_DESC);
++	d->desc = desc;
++	d->avail = (struct vq_avail *)(page + OFFSET_AVAIL);
++	d->used = (struct vq_used *)(page + OFFSET_USED);
++	request = (struct virtio_gpu_ctrl_hdr *)(page + OFFSET_REQUEST);
++	response = (struct virtio_gpu_resp_display_info *)(page + OFFSET_RESPONSE);
++
++	reg_write(d, VIRTIO_STATUS, 0);
++	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE);
++	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
++
++	reg_write(d, VIRTIO_DEVICE_FEATURES_SEL, 0);
++	d->feat_lo = reg_read(d, VIRTIO_DEVICE_FEATURES);
++	reg_write(d, VIRTIO_DEVICE_FEATURES_SEL, 1);
++	d->feat_hi = reg_read(d, VIRTIO_DEVICE_FEATURES);
++
++	/* no VIRGL, no EDID: A1 has only the control queue */
++	reg_write(d, VIRTIO_DRIVER_FEATURES_SEL, 0);
++	reg_write(d, VIRTIO_DRIVER_FEATURES, 0);
++	reg_write(d, VIRTIO_DRIVER_FEATURES_SEL, 1);
++	reg_write(d, VIRTIO_DRIVER_FEATURES, 1);        /* bit 32: VIRTIO_F_VERSION_1 */
++	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
++	if (!(reg_read(d, VIRTIO_STATUS) & STATUS_FEATURES_OK)) {
++		return gpu_fail(d, page, slot, "features refused");
++	}
++
++	reg_write(d, VIRTIO_QUEUE_SEL, 0);
++	qmax = reg_read(d, VIRTIO_QUEUE_NUM_MAX);
++	if (qmax < 2) {
++		return gpu_fail(d, page, slot, "control queue too small");
++	}
++	d->queue_size = qmax < QUEUE_SIZE ? qmax : QUEUE_SIZE;
++	for (uint32_t i = 0; i < d->queue_size; i++) {
++		desc[i].addr = 0;
++		desc[i].len = 0;
++		desc[i].flags = 0;
++		desc[i].next = 0;
++	}
++	desc[0].addr = phys + OFFSET_REQUEST;
++	desc[0].len = sizeof(*request);
++	desc[0].flags = 0;
++	desc[0].next = 1;
++	desc[1].addr = phys + OFFSET_RESPONSE;
++	desc[1].len = sizeof(*response);
++	desc[1].flags = DESC_F_WRITE;
++	desc[1].next = 0;
++	d->avail->flags = AVAIL_F_NO_INTERRUPT;
++	d->avail->ring[0] = 0;
++	d->avail->idx = 1;
++
++	reg_write(d, VIRTIO_QUEUE_NUM, d->queue_size);
++	reg_write64(d, VIRTIO_QUEUE_DESC, phys + OFFSET_DESC);
++	reg_write64(d, VIRTIO_QUEUE_DRIVER, phys + OFFSET_AVAIL);
++	reg_write64(d, VIRTIO_QUEUE_DEVICE, phys + OFFSET_USED);
++	__builtin_arm_dmb(0xb);                 /* ISH: the rings are visible before ready */
++	reg_write(d, VIRTIO_QUEUE_READY, 1);
++	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK |
++	    STATUS_DRIVER_OK);
++
++	memset(request, 0, sizeof(*request));
++	request->type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
++	memset(response, 0, sizeof(*response));
++	__builtin_arm_dmb(0xb);
++	reg_write(d, VIRTIO_QUEUE_NOTIFY, 0);
++
++	for (seen = 0; seen < 2000; seen++) {
++		__builtin_arm_dmb(0x9);         /* ISHLD: read used->idx before the entry */
++		if (*(volatile uint16_t *)&d->used->idx != 0) {
++			break;
++		}
++		delay(5);
++	}
++	if (seen == 2000) {
++		return gpu_fail(d, page, slot, "GET_DISPLAY_INFO timed out");
++	}
++
++	printf("virtio-gpu: slot %d id=%u transport=%u queue=%u max=%u features=%08x:%08x "
++	    "virgl=%u edid=%u uuid=%u blob=%u ctx_init=%u version1=%u\n",
++	    slot, VIRTIO_ID_GPU, reg_read(d, VIRTIO_VERSION), d->queue_size, qmax,
++	    d->feat_lo, d->feat_hi,
++	    (d->feat_lo >> VIRTIO_GPU_F_VIRGL) & 1,
++	    (d->feat_lo >> VIRTIO_GPU_F_EDID) & 1,
++	    (d->feat_lo >> VIRTIO_GPU_F_RESOURCE_UUID) & 1,
++	    (d->feat_lo >> VIRTIO_GPU_F_RESOURCE_BLOB) & 1,
++	    (d->feat_lo >> VIRTIO_GPU_F_CONTEXT_INIT) & 1,
++	    (d->feat_hi >> 0) & 1);
++	if (response->hdr.type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO) {
++		printf("virtio-gpu: slot %d: GET_DISPLAY_INFO response %#x\n",
++		    slot, response->hdr.type);
++		return gpu_fail(d, page, slot, "bad GET_DISPLAY_INFO response");
++	}
++	{
++		int enabled = 0;
++
++		for (int i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
++			if (response->pmodes[i].enabled != 0) {
++				enabled++;
++				printf("virtio-gpu: display %d: %ux%u enabled=%u\n", i,
++				    response->pmodes[i].r.width,
++				    response->pmodes[i].r.height,
++				    response->pmodes[i].enabled);
++			}
++		}
++		if (enabled == 0) {
++			printf("virtio-gpu: no enabled display\n");
++		}
++	}
++	return true;
++}
++
++void
++hakios_virtio_gpu_init(void)
++{
++	uint32_t enabled = 0;
++	vm_offset_t bus;
++	struct gpu_device d;
++
++	if (!PE_parse_boot_argn("virtio_gpu", &enabled, sizeof(enabled)) || !enabled) {
++		return;
++	}
++	bus = ml_io_map(VIRTIO_BUS, VIRTIO_SLOTS * VIRTIO_SLOT_SIZE);
++	for (int slot = 0; slot < VIRTIO_SLOTS; slot++) {
++		memset(&d, 0, sizeof(d));
++		d.regs = bus + (vm_offset_t)slot * VIRTIO_SLOT_SIZE;
++		if (reg_read(&d, VIRTIO_MAGIC) != 0x74726976 ||
++		    reg_read(&d, VIRTIO_DEVICE_ID) != VIRTIO_ID_GPU) {
++			continue;
++		}
++		if (reg_read(&d, VIRTIO_VERSION) != 2) {
++			printf("virtio-gpu: slot %d is a legacy transport; start QEMU with -global virtio-mmio.force-legacy=false\n", slot);
++			continue;
++		}
++		if (gpu_attach(&d, slot)) {
++			printf("virtio-gpu: device in slot %d\n", slot);
++			return;
++		}
++	}
++	printf("virtio-gpu: no device (id %u)\n", VIRTIO_ID_GPU);
++}
+diff --git a/drivers/input/hakios.input.c b/drivers/input/hakios.input.c
+index 8e5e556..db53923 100644
+--- a/drivers/input/hakios.input.c
++++ b/drivers/input/hakios.input.c
+@@ -10,6 +10,7 @@
+ #include <sys/errno.h>
+ #include <sys/proc.h>
+ #include <sys/hakios.input.h>
++#include <sys/hakios.virtio_gpu.h>
+ #include <sys/systm.h>
+ #include <sys/uio.h>
+ #include <pexpert/pexpert.h>
+@@ -227,6 +228,7 @@ hakios_input_init(void)
+ 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
+ 	hakios_cpufreq_init();
+ 	hakios_virtio_input_init();
++	hakios_virtio_gpu_init();
+ 	hakios_goodix_init();
+ 	hakios_buttons_init();
+ 	hakios_battery_init();
+diff --git a/drivers/map b/drivers/map
+index a291d3b..c9c211a 100644
+--- a/drivers/map
++++ b/drivers/map
+@@ -60,6 +60,8 @@ net      bsd/dev/hakios.virtio_net.c
+ 
+ core     bsd/dev/hakios.version.c
+ core     bsd/dev/hakios.platform.c
++core     bsd/dev/hakios.vtop.c
++core     bsd/sys/hakios.vtop.h
+ core     bsd/dev/hakios.stubs.c
+ core     iokit/Kernel/hakios.stubs.cpp
+ core    bsd/dev/hakios.socinfo.c
+@@ -67,3 +69,4 @@ power   bsd/dev/hakios.thermal.c
+ power   bsd/dev/hakios.pmic.c
+ power   bsd/dev/hakios.battguard.c
+ bluetooth bsd/dev/hakios.bt.c
++gpu      bsd/dev/hakios.virtio_gpu.c
+diff --git a/qemu/run-darwin.sh b/qemu/run-darwin.sh
+index 0ff94b2..01c883c 100755
+--- a/qemu/run-darwin.sh
++++ b/qemu/run-darwin.sh
+@@ -18,6 +18,8 @@
+ #                          (it hands out an address by DHCP, answers DNS and passes connections on to
+ #                          this machine's network; no privileges needed). The kernel makes en0 of it
+ #                          (boot-arg virtio_net=1, added here); see userland/src/net_test.m for the rest.
++#      QEMU_VIRTIO_GPU=1   add QEMU's virtio-gpu (stage 23 A1, guest boot-arg virtio_gpu=1).
++#                          Default: no such device, so existing runs are unchanged.
+ #      AUDIO=<where>       what plays the sound of Darwin: a QEMU audio back end (pipewire, pa, alsa, sdl: each
+ #                          needs its QEMU module, e.g. the package qemu-audio-pipewire) or FILE.wav to
+ #                          write it into a file instead. Default: nowhere (the guest plays all the same).
+@@ -85,11 +87,28 @@ if qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-sound-device"
+ 	SOUND+=(-device virtio-sound-device,audiodev=snd,streams=1)   # one stream: output, no microphone of the host
+ 	CMDLINE="virtio_sound=1 $CMDLINE"
+ fi
++# stage 23 A1: optional virtio-gpu, off unless asked for, so old runs keep their device set
++GPU=()
++if [ -n "$QEMU_VIRTIO_GPU" ] && [ "$QEMU_VIRTIO_GPU" != 0 ]; then
++	GPU=(-device virtio-gpu-device)
++	CMDLINE="virtio_gpu=1 $CMDLINE"
++fi
++# VNC=1 gives the machine a VNC console on 127.0.0.1:5909 instead of no display at all, so that a
++# VNC client can watch it -- and, the reason it is the primary display and not an extra one, so that
++# the client's pointer is the console's absolute pointer: a second console next to `-display none`
++# delivered its motion as EV_REL, which this guest's touch driver cannot use.
++if [ -n "${VNC:-}" ]; then
++	export QEMU_DISPLAY="vnc=127.0.0.1:${VNC_PORT:-9}"
++	VNCARG=()
++else
++	VNCARG=()
++fi
++
+ xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" \
+ 	--cmdline "loader_return_after=$SECS epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
+ QEMU_MEM=${RAM_GB}G exec qemu/run.sh $((SECS + 40)) \
+-	-object memory-backend-file,id=ram,size=$RAM_SIZE,mem-path="$PWD/qemu/ram.img",share=off \
++	-object memory-backend-file,id=ram,size=$RAM_SIZE,mem-path="$PWD/qemu/ram.img",share=${QEMU_RAM_SHARE:-on} \
+ 	-machine memory-backend=ram \
+-	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" \
++	-global virtio-mmio.force-legacy=false -device virtio-tablet-device,id=tablet -device virtio-keyboard-device,id=keys "${VNCARG[@]}" "${NET[@]}" "${SOUND[@]}" "${GPU[@]}" \
+ 	-device ramfb -monitor tcp:127.0.0.1:$((4444 + 10 * INSTANCE)),server,nowait \
+ 	-qmp tcp:127.0.0.1:$((4445 + 10 * INSTANCE)),server,nowait "$@"
+diff --git a/xnu/files/bsd/sys/hakios.virtio_gpu.h b/xnu/files/bsd/sys/hakios.virtio_gpu.h
+new file mode 100644
+index 0000000..e35a808
+--- /dev/null
++++ b/xnu/files/bsd/sys/hakios.virtio_gpu.h
+@@ -0,0 +1,9 @@
++#ifndef _SYS_HAKIOS_VIRTIO_GPU_H_
++#define _SYS_HAKIOS_VIRTIO_GPU_H_
++
++#ifdef KERNEL
++/* Boot-arg virtio_gpu=1: QEMU's virtio-gpu (device id 16), discovery and control queue only. */
++void hakios_virtio_gpu_init(void);
++#endif
++
++#endif /* _SYS_HAKIOS_VIRTIO_GPU_H_ */
+-- 
+2.51.0
+

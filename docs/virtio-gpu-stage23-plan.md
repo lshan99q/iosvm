@@ -107,3 +107,22 @@ flush **617 us**、wait **5 us**、readback **59,658 us（~60 ms）**、attach *
 | 24 fps | 需 ≤42 ms | **不承诺** | guest 每帧 ≤42 ms 才可能 |
 
 执行顺序：**23A → 23C（并行）→ 23D → 23B**；23B 的门槛是 23A 稳定、且 23D 的流水线不拖累 virgl 的资源同步。
+
+## 23C 结果：判死（2026-11-14）
+
+四种配置各跑 10 分钟、默认路径（完整画面），**全部 `hostframes=0`**：
+
+| 配置 | 结果 |
+|---|---|
+| `QEMU_SMP=4` | 0 帧，panic 0 |
+| `QEMU_SMP=2` | 0 帧，panic 0 |
+| SMP=4 + `-accel tcg,thread=multi`（MTTCG） | 0 帧，panic 0 |
+| SMP=1 + `tb-size=4096` | 0 帧，panic 0 |
+
+→ **多核 TCG 与 tb-size 在本客机上都产不出帧；SMP=1 + 默认 tb-size=1536 是唯一出帧配置（2–3.3 fps）**。
+按「同一方向失败 ≥3 次判死」规则，**23C 关闭**，不再在 QEMU/TCG 参数上找性能。
+
+性能主线改为：
+1. **23D 异步双缓冲 + 砍 readback**（guest userland，不依赖内核重建）；
+2. **23A virtio-gpu**（依赖内核构建链恢复，lead 在修）；
+3. 23B virgl（更后）。
