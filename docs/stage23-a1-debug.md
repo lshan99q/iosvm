@@ -102,3 +102,67 @@ QEMU_VIRTIO_GPU=1 VNC=1 VNC_PORT=9 qemu/run-darwin.sh 90
 `qemu/run.sh` 的 `-display ${QEMU_DISPLAY:-none}` 接受 `egl-headless`；`VNC=1` 时
 `run-darwin.sh` 自己设 `QEMU_DISPLAY=vnc=127.0.0.1:9`。二者都比 `none`/`ramfb` 更接近
 `virtio_gpu_require_pixman()` 的要求。
+
+## 非法命令 0xdeadbeef 仍 24B 全零：QEMU 源码结论（2026-11-14）
+
+### a. `virtio_gpu_ctrl_response()` 与 `virtqueue_pop()` 的 in_sg
+
+QEMU 的 `virtqueue_pop()` 按描述符顺序累计：
+
+```c
+if (desc.flags & VRING_DESC_F_WRITE) in_num++; else out_num++;
+```
+
+对「desc0 可读 24B、flags=NEXT、next=1；desc1 可写 408B、flags=WRITE、next=0」：
+
+- `out_num = 1`，`out_sg[0] = desc0`（24B）；
+- **`in_num = 1`，`in_sg[0] = desc1`（408B）**。
+
+`virtio_gpu_ctrl_response()` 写响应时走 `iov_from_buf(cmd->elem->in_sg, cmd->elem->in_num, 0, resp, resp_len)`，
+然后 `virtqueue_push(cmd->vq, cmd->elem, resp_len)`。非法命令 `0xdeadbeef` 的
+`virtio_gpu_handle_ctrl()` 会走 default：
+
+```c
+cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;  /* 0x1201 */
+...
+virtio_gpu_ctrl_response_nodata(g, cmd, cmd->error);  /* 24B */
+```
+
+这条路径**应该写 24B 的 0x1201 到 desc1**。实测 `used len=24` 但 desc1 全零，只有两种可能：
+
+1. **`in_num=0`**：`virtqueue_pop()` 没把 desc1 算成可写（NEXT/WRITE/flags 链没被采用）；
+2. **`in_num=1` 但 `in_sg[0].iov_len` 或 `iov_base` 为 0/NULL**：`address_space_map` 没建立，
+   `iov_from_buf` 实际写 0 字节，`virtqueue_push` 仍 push 24。
+
+**不是 `avail->ring[]` 写法**：`ring[0]=0` 是 head，`idx=1`；先写 `ring[]`、再写 `idx`、再
+`dmb`、再 notify 是正确顺序。`avail->flags=NO_INTERRUPT` 也不影响。若此处错，`virtqueue_pop()`
+会拿不到任何描述符，`used idx` 不会变 1。
+
+**结论：优先验证 `in_num`/`in_sg`，而不是继续改 avail 顺序。** 最小诊断：
+- notify 前后打 `request->type`；若 desc1 仍是 0，说明设备没把 response 写进 desc1；
+- 打 `used->ring[0].id/len` 与 `desc1.addr`，确认 id=0,len=24；
+- 用 **`RESOURCE_CREATE_2D (0x0102)`**（响应也只有 24B）区分：若 `resp.type=0x1101`，
+  说明 desc1 可写、request 解析正常；仍零就是 in_sg/地址；
+- QEMU trace：`-trace enable=virtio_queue_notify -trace enable=virtio_gpu_cmd_*`。
+  `virtio_queue_notify` 出现说明 queue 被 accept；`virtio_gpu_cmd_get_display_info` 出现说明
+  command 被解析；若 trace 有 response 事件但 guest 仍零，就是 iov/地址。
+
+### b. virtio-mmio QueueDesc/Driver/Device 高 32 位
+
+QEMU 8.2/10 的 `virtio_mmio_read()` 对 `QUEUE_DESC_LOW/HIGH`、`QUEUE_DRIVER_*`、
+`QUEUE_DEVICE_*` **不是可靠的 RW 回读**（写-only/读 0 的实现），所以
+**`desc=0:0` 读回 0 不能证明队列没被接受**。
+
+不用寄存器回读的验证：
+
+1. `QUEUE_READY`（0x044）读回 1，且 `QUEUE_NUM`（0x038）是 8，`QUEUE_SEL=0`；
+2. QEMU trace `virtio_queue_notify`（queue 0 被通知）；
+3. QEMU trace `virtio_gpu_cmd_get_display_info` / `virtio_gpu_cmd_res_create_2d`
+   （请求被 virtio-gpu 解析）；
+4. guest `used->idx` 从 0 变 1（设备已消费）；
+5. `info qtree`/`info virtio`（monitor）看队列地址/ready。
+
+**结论：队列已被接受（used idx=1 + trace cmd），问题在 response 的 in_sg 写入，不在高 32 位
+寄存器。**
+
+未改代码、未 boot；等待整页非零扫描结果。
