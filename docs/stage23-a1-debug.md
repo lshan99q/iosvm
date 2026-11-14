@@ -264,3 +264,30 @@ vgabios-ramfb.bin      39,424 B   (seabios vgabios-virtio.bin 的临时替代)
 ```
 
 不再报 romfile，只停在 `-S`。`-nodefaults` 那条只用于没有 ramfb 的串口-only 实验，A1 不要用。
+
+## `-vga none` 改 PCI 顺序；改回默认设备集 + 串口-only（2026-11-14）
+
+实测 `-vga none` 虽然消掉 `efi-virtio.rom`，但 UEFI 的 PCI 映射从 `Pci(0x1,0x0)` 变成
+`Pci(0x2,0x0)`，停在 UEFI Shell，`startup.nsh` 不自动跑——**不要再用 `-vga none` 做 A1**。
+
+正确路径：**保留默认设备集**，用 `-L qemu-roms` 提供默认 VGA 需要的 `efi-virtio.rom`，
+ramfb 用 `qemu-roms/vgabios-ramfb.bin`；A1 只看串口，所以 `-display none`：
+
+```bash
+cd /host/iosvm-work/hakios-xnu-kernel
+QEMU_RAM_GB=6 QEMU_INSTANCE=1 QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=none QEMU_RAM_SHARE=off \
+  qemu/run-darwin.sh 120 -L "$PWD/qemu-roms"
+```
+
+- 不加 `-nodefaults`、不加 `-vga none`；
+- `-L qemu-roms` 让默认 VGA 找到 `efi-virtio.rom`，ramfb 找到 `vgabios-ramfb.bin`；
+- `QEMU_DISPLAY=none` 不需要图形，UEFI/loader 仍走串口；A1 判据全在串口；
+- `QEMU_RAM_SHARE=off` 避免 `memory-backend-file,share=on` 的额外共享内存；
+- `RAM_GB=6` 先排除宿主/容器内存上限。
+
+`rc=137` 是 **SIGKILL**（不是 `timeout` 的 124）：先查容器 cgroup
+`/sys/fs/cgroup/memory.events`/`memory.max` 和 `dmesg`，再降 `RAM_GB=4/6` 与
+`QEMU_RAM_SHARE=off`。宿主 29G available 不代表容器 cgroup 没上限。
+
+若仍停在 UEFI Shell，先不要改 ramfb：在 Shell 里 `fs0:`/`dir` 确认 ESP 是否是 FS0；这只能
+说明 UEFI 启动项/设备顺序，和 A1 驱动无关。
