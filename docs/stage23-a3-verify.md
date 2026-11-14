@@ -329,3 +329,33 @@ net_test: tcp 10.0.2.2 port 18081: Network is unreachable (after 0.19 s)
 修好后即恢复 `flush -> 2 (rows into the surface)` + host 帧，才能做真 TCP-vs-GPU A/B。
 
 证据：`/host/iosvm/logs/s23-a3/diag-netcfg/`。
+
+## 网络根因（2026-11-14 22:20）
+
+wire 空不是 recorder：`install at=0`、57 个 recorder、`w.at>0`；卡在
+`flush connect 10.0.2.2:9110 failed: Network is unreachable`。
+
+两个缺失：
+
+1. root 的 `/etc/rc` 只有 `exec /sbin/launchd.darwin`（88B），没有 `netcfg`。用
+   **`RC=rc.vtop`** 构建，`/etc/rc` 776B，含
+   `/redwood/bin/netcfg en0 10.0.2.15 10.0.2.2 &`；
+2. `run-darwin.sh` 需要 **`QEMU_NET=1`** 才加
+   `-netdev user,id=net0 -device virtio-net-device,netdev=net0`；否则 `en0` 不存在，
+   `netcfg: SIOCAIFADDR: Device not configured`。
+
+修后串口：
+
+```text
+netcfg: en0 10.0.2.15, default route through 10.0.2.2
+net_test: tcp 10.0.2.2 port 9999: Connection refused
+hakios-remote: flush connect 10.0.2.2:9110 failed: Connection refused
+```
+
+即网络已通，只是 host_glwire 没监听。code 容器里 `host_glwire` 本地
+`127.0.0.1:9110` 可连（client 16 connected），但 guest 经 QEMU slirp 连
+`10.0.2.2:9110` 仍 refused；exp 的 host_glwire 路径（ext37 已通）应可直接用。
+
+新 root：`/host/iosvm-work/root-a3-net.apfs`，
+md5 **351c21703233f71d29c6122772d680a0**，`RC=rc.vtop`、
+`GL=1 GLREMOTE=1 GLWIRE_LOCAL=1`。
