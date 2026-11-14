@@ -205,3 +205,38 @@ copyin=4516..6195 us  transfer=1181..2306 us  flush=555..964 us  total=6624..846
 → remote-only 下 wire 为空、SpringBoard 不进画帧，是独立问题（不是 A3），需要 code 另查。
 
 证据：`/host/iosvm/logs/s23-a3/glremote-timing/`。
+
+---
+
+# 同根 A/B（21:22）：同一 root 只换传输，push 占 2%，UI 终于上屏
+
+**root**：`root-a3-glremote.apfs`（21eea74b，GL=1 + glremote_on + A3 push），两发同一 root、
+同一 `XCMD="glwire_local=1 …"`，各 900 s；A=`QEMU_VIRTIO_GPU=1`，B=`=2`。
+
+| 指标 | A（=1） | B（=2） |
+|---|---|---|
+| `hakios-gl: frame` 数 | 63 | 104 |
+| frame_us 中位（frame≥10） | **455 ms** | **562 ms** |
+| push 次数 / 失败 | 0 / — | 155 / 0 |
+| push 总耗时 | — | 中位 ~9 ms（6.6 / 9.0 / 26.2） |
+| hostframes | 0 | 0 |
+| end | qemu-exited | qemu-exited |
+
+- **push 占帧时间 ≈ 9/455 ≈ 2%（<5%）**，fps 同量级；
+- → **结论：传输不是瓶颈，guest CPU（Mesa/CA）是**（符合验收判据）。
+
+## 定性（最强证据）
+
+- **A 的 screendump = A2 测试图案**（彩色渐变）——`virtio_gpu=1` 下 GPU scanout 不承载 UI；
+- **B 的 screendump = 完整 SpringBoard 主屏**：dock 通栏 4 图标、Search 居中、15 个 App 图标、
+  状态栏 `rdar:45025538`；Weather/Calendar widget 槽仍白（已知），Clock 图标上有一小块黑（局部伪影）。
+- **A3 第一次让 virtio-gpu scanout 显示完整 UI。**
+
+## caveat
+
+这个 root 两发 wire 都是空的（`flush -> 0` ×290/264，hostframes 0）——新 eagl 没把 GL 调用
+记录进 wire（`w.at == 0`）；ext37 的 root（root-w15）正常（`flush -> 2 … pid=16`）。
+所以本 A/B 隔离的是「GPU push 开/关」，不是「TCP vs GPU」；真正 TCP-vs-GPU 需要
+「会发记录 + 有 A3 push」的 root，需 code 查新 eagl 的 wire 为何为空。
+
+产物：`/host/iosvm/logs/s23-a3/ab-a/`、`ab-b/`（含 `scanout-home-screen.png`）、`ab-report.md`。
