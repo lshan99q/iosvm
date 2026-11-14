@@ -93,6 +93,8 @@ BOOTSHOT=/tmp/$LABEL-shot.png
 BOOTGUEST=/tmp/$LABEL.log
 BOOTHOST=/tmp/$LABEL-host.log
 
+# GLWIRE_NO_PANEL=1 is an experimental mode; screenshots do NOT represent the product screen.
+# Remove it to see the real (guest panel) screen. Default behavior is unchanged.
 HOST_ENV=${HOST_ENV:-"GLWIRE_NO_PANEL=1 GLWIRE_NO_INPLACE=1 GLWIRE_POLL_MS=16"}
 export HOST_ENV
 { echo "gate: label=$LABEL"; echo "gate: root=$ROOT"; echo "gate: window=$WINDOW minshot=$MINSHOT";

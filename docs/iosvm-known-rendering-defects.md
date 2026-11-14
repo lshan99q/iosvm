@@ -542,3 +542,22 @@ frame3 took 37.9 ms
 4. 保留 `hakios-remote: end of frame`、`flush ->`、`f N wait`，与 host `frame N` 时间对齐。
 
 **不要**再把 511 s 归因为 host `glReadPixels`：`took=37.9ms` 已经直接排除。
+
+## R1 结案：**实验模式伪影，不是产品缺陷**（2026-11-14，ext37）
+
+ext37 用**默认路径**（`glwire_local=1`、**不带 `--no-panel` / `GLWIRE_NO_PANEL`**）跑 1800 s：
+
+- **R1 消失**：结束截图 dock **通栏 4 图标**（Phone/Safari/Messages/Music）、Search 居中、**右下不黑**；
+- `hostframes=3823, MATCH=3823, DIFF=0, panic=0`；
+- 帧时间线：前几帧极慢（f3 511.83 s、f4 84 s、f5 12 s、f6 4 s），之后稳定 **2–6.9 fps**。
+
+### 根因
+
+此前所有 R1 截图都跑在 `GLWIRE_NO_PANEL=1`（host 回放记录、不画 guest 上传的 panel）这个**实验模式**下；该模式只重建记录流里的内容，dock/Search 这类不在记录流里的东西自然缺失。**产品路径（guest 合成 panel）没有这个问题。**
+
+### 结论
+
+- **R1 关闭，不修代码**；修的是**验收/取证方式**：
+  - 看画面必须用默认路径（不带 `NO_PANEL`）；
+  - `tools/glwire/harness/gate.sh` 的默认 `HOST_ENV` 目前仍带 `GLWIRE_NO_PANEL=1`（第 96 行）——它是为了快，但**截图不代表产品画面**，需要标注或改默认。
+- **新开 R4（真实问题）**：默认路径**启动后前 ~10 分钟帧极慢**（f3 511 s），之后 2–6.9 fps；这是可用性上的真问题，另案。
