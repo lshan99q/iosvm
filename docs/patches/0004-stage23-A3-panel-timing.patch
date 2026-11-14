@@ -1,0 +1,99 @@
+From a392acadd26051dd942e1a742d7a8833ca43c7ef Mon Sep 17 00:00:00 2001
+From: iosvm-code <iosvm-code@localhost>
+Date: Sat, 14 Nov 2026 19:45:17 +0000
+Subject: [PATCH] stage23 A3: time copyin, transfer and flush
+
+Print gpu_ioctl row-copyin and gpu_present TRANSFER/FLUSH microseconds every 60 pushes, so the A3 overhead can be separated from the 1.6-2.3s guest frame.
+---
+ drivers/gpu/hakios.virtio_gpu.c | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/hakios.virtio_gpu.c b/drivers/gpu/hakios.virtio_gpu.c
+index 10a1c46..f7c8af9 100644
+--- a/drivers/gpu/hakios.virtio_gpu.c
++++ b/drivers/gpu/hakios.virtio_gpu.c
+@@ -192,8 +192,18 @@ static vm_offset_t gpu_backing;
+ static vm_offset_t gpu_cmd_page;
+ static int gpu_mode;                    /* 1: A2 test pattern, 2: panel via /dev/hakios-gpu */
+ static int gpu_major = -1;
++static uint64_t gpu_last_transfer_us, gpu_last_flush_us;
+ static bool gpu_present(void);
+ 
++static uint64_t
++gpu_now_us(void)
++{
++	uint64_t ns;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000;
++}
++
+ static inline uint32_t
+ reg_read(struct gpu_device *d, uint32_t reg)
+ {
+@@ -592,6 +602,8 @@ gpu_present(void)
+ 	if (gpu_dev == NULL || gpu_cmd_page == 0 || gpu_backing == 0) {
+ 		return false;
+ 	}
++	uint64_t t0 = gpu_now_us(), t1, t2;
++
+ 	response = (struct virtio_gpu_ctrl_hdr *)(gpu_cmd_page + 0x8000);
+ 	transfer = (struct virtio_gpu_transfer_to_host_2d *)gpu_cmd_page;
+ 	memset(transfer, 0, sizeof(*transfer));
+@@ -602,6 +614,7 @@ gpu_present(void)
+ 	if (!gpu_cmd(gpu_dev, transfer, sizeof(*transfer), response, sizeof(*response))) {
+ 		return false;
+ 	}
++	t1 = gpu_now_us();
+ 	flush = (struct virtio_gpu_resource_flush *)gpu_cmd_page;
+ 	memset(flush, 0, sizeof(*flush));
+ 	flush->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+@@ -611,6 +624,9 @@ gpu_present(void)
+ 	if (!gpu_cmd(gpu_dev, flush, sizeof(*flush), response, sizeof(*response))) {
+ 		return false;
+ 	}
++	t2 = gpu_now_us();
++	gpu_last_transfer_us = t1 - t0;
++	gpu_last_flush_us = t2 - t1;
+ 	return true;
+ }
+ 
+@@ -631,8 +647,10 @@ gpu_ioctl(__unused dev_t dev, u_long cmd, caddr_t data,
+     __unused int flags, __unused struct proc *p)
+ {
+ 	struct hakios_gpu_push *push = (struct hakios_gpu_push *)data;
++	static int seen;
+ 	uint8_t *base;
+ 	size_t row = (size_t)VIRTIO_GPU_BACKING_W * 4;
++	uint64_t t0, t1, t2;
+ 
+ 	if (cmd != HAKIOS_GPU_PUSH || gpu_mode != 2 || gpu_backing == 0) {
+ 		return EINVAL;
+@@ -642,13 +660,23 @@ gpu_ioctl(__unused dev_t dev, u_long cmd, caddr_t data,
+ 		return EINVAL;
+ 	}
+ 	base = (uint8_t *)gpu_backing;
++	t0 = gpu_now_us();
+ 	for (uint32_t y = 0; y < push->height; y++) {
+ 		if (copyin((user_addr_t)(push->pixels + (uint64_t)y * push->stride),
+ 		    base + (size_t)y * row, row) != 0) {
+ 			return EFAULT;
+ 		}
+ 	}
+-	return gpu_present() ? 0 : EIO;
++	t1 = gpu_now_us();
++	if (!gpu_present()) {
++		return EIO;
++	}
++	t2 = gpu_now_us();
++	if (++seen % 60 == 1) {
++		printf("hakios-gpu: push %d copyin=%llu us transfer=%llu us flush=%llu us (total %llu us)\n",
++		    seen, t1 - t0, gpu_last_transfer_us, gpu_last_flush_us, t2 - t0);
++	}
++	return 0;
+ }
+ 
+ static struct cdevsw gpu_cdevsw = {
+-- 
+2.51.0
+
