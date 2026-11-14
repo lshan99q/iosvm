@@ -240,3 +240,26 @@ copyin=4516..6195 us  transfer=1181..2306 us  flush=555..964 us  total=6624..846
 「会发记录 + 有 A3 push」的 root，需 code 查新 eagl 的 wire 为何为空。
 
 产物：`/host/iosvm/logs/s23-a3/ab-a/`、`ab-b/`（含 `scanout-home-screen.png`）、`ab-report.md`。
+
+## 2026-11-14 21:30：A/B 与 wire 空
+
+exp 用 root 21eea74b（GLREMOTE=1，无 glwire_local 文件）两次 `glwire_local=1`：
+
+- A（virtio_gpu=1）：63 帧，frame_us 中位 455 ms；
+- B（virtio_gpu=2）：104 帧，中位 562 ms，155 次 push 0 失败，push 中位 ~9 ms（占帧 ~2%）；
+- B 的 screendump 是完整 SpringBoard 主屏（dock 4 图标通栏、Search、15 图标、状态栏）。
+
+**wire 空的原因**：21eea74b 只有 `root/bin/glremote_on`，**没有 `root/etc/glwire_local`**。
+`glwire_local=1` 是 cmdline，不是 eagl 读的文件；eagl 读 `root/etc/glwire_local`。
+remote-only 下 guest 不做本地合成，backboardd 仍 end frame，但 recorder 没有本地 GL 调用可记，
+`wire.at == 0`，host 也没连接。
+
+新 root **e52441b1cf7e957f8f6dac4c0dc5235b** 同时有：
+
+```text
+root/bin/glremote_on
+root/etc/glwire_local
+```
+
+路径 `/host/iosvm-work/root-a3-glremote-local.apfs`。用它跑同一 A/B 才应有
+`flush -> 2 (rows into the surface)` 和 host 帧。
