@@ -71,3 +71,34 @@ features，和这个 bug 无关。
 4. 不要在未确认前改 `kmem_alloc_contig`/DMA 区间；input 驱动已证明 `kvtophys` 路径可用。
 
 未 boot，未改代码；补丁 0002 仍有效。
+
+## QEMU 10.0.13 的 `efi-virtio.rom`（2026-11-14）
+
+`efi-virtio.rom` 是 **PCI 显卡**（`virtio-gpu-pci`/`virtio-vga`）的 UEFI option ROM，不是
+virtio-mmio 的 `virtio-gpu-device`。实测：
+
+- `-device virtio-gpu-pci,romfile=` 可禁用 PCI ROM（property 存在）；
+- **`-device virtio-gpu-device` 没有 `romfile` 属性**，也不需要这个 ROM；它能正常实例化
+  （`-M virt -device virtio-gpu-device -display none -S -nodefaults` 不报 romfile）。
+
+A1 驱动扫描的是 **virtio-mmio**（`0x0a000000` 起的 32 slots，device id 16），所以：
+
+1. **必须用 `-device virtio-gpu-device`**，不要用 `virtio-gpu-pci`/`virtio-vga`；
+2. 若命令里出现 `efi-virtio.rom`，说明实际用的是 PCI 设备（或脚本被改成了 PCI）——切回
+   `virtio-gpu-device` 即可，不要去找 ROM 文件；
+3. 若确实必须 PCI（A1 不需要），可加 `,romfile=` 禁用（或装 `ipxe-qemu`/`qemu-efi` 提供
+   `efi-virtio.rom`），但那样 guest 驱动也看不到 virtio-mmio，A1 仍失败。
+
+### display 后端
+
+`ramfb` 不是 virtio-gpu 的 pixman 后端。验证 A1 用：
+
+```bash
+QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless qemu/run-darwin.sh 90
+# 或
+QEMU_VIRTIO_GPU=1 VNC=1 VNC_PORT=9 qemu/run-darwin.sh 90
+```
+
+`qemu/run.sh` 的 `-display ${QEMU_DISPLAY:-none}` 接受 `egl-headless`；`VNC=1` 时
+`run-darwin.sh` 自己设 `QEMU_DISPLAY=vnc=127.0.0.1:9`。二者都比 `none`/`ramfb` 更接近
+`virtio_gpu_require_pixman()` 的要求。
