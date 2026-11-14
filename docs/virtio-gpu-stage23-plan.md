@@ -12,8 +12,6 @@
 - virtio-gpu 修的是**传输墙**（像素走共享内存/GPU 资源，不再过 TCP，后期 virgl 可把 GL 渲染交给 V100）；
 - TCG 优化修的是**翻译开销**（多核 MTTCG、tb-size、CPU 模型），不换硬件。
 
-**24 fps 目标（立项依据）**：不换硬件下 **24 fps 不可达**——4.87 MB/帧 × 24 = **~117 MB/s**，当前通道只有 4.5 MB/s；要么把传输做到 ≥117 MB/s（virtio-gpu 共享内存），要么让客机渲染快于 24 fps（TCG 优化/virgl）。这是 stage 23 两条线并行的原因。
-
 ## 环境底牌（已确认）
 
 - QEMU **8.2.2**，支持 `virtio-gpu-device`、`virtio-gpu-gl-device`、`virtio-gpu-pci`、`virtio-gpu-gl-pci`；
@@ -34,11 +32,26 @@
 | A3 | 把 panel（750×1624 RGBA）写进 resource，替代 glwire 的像素传输 | 画面完整（dock 通栏）+ 稳态 fps 明显高于 2–3.3 |
 | A4（可选） | dirty 区域只传变化矩形 | 静止时 CPU/带宽显著下降 |
 
-### 23B. virgl（3D 交给 V100，后期）
+### 23B. virgl（3D 交给 V100，后续计划 — 主人 11-14 指定纳入）
 
 - 客机 Mesa 用 virgl 驱动，GL 命令进 virtio-gpu 的 3D 上下文，宿主 V100 执行；
-- 判据：客机 GL 场景的 fps 超过 TCG 天花板（>11 fps）。
-- 代价：XNU 侧要处理 virgl 上下文/资源同步，客机 Mesa 要移植；**几个月**。
+- 判据：客机 GL 场景的 fps 超过 TCG 天花板（>11 fps），且画面完整（不重复 R1 的实验模式陷阱）；
+- 代价：XNU 侧要处理 virgl 上下文/资源同步，客机 Mesa 要移植；**几个月**；
+- 依赖：23A 的 controlq/资源/扫描输出必须稳定。
+
+### 23D. 异步双缓冲（主人 11-14 指定纳入后续计划）
+
+**为什么**：ext39 分阶段计时显示每帧 ~330 ms 中 **~290 ms 在 guest 侧**，而 `eagl_remote_flush`
+每帧**同步等 host reply**——guest 的合成本可与 host 的 replay/上屏重叠，现在被串行化。
+
+| 子阶段 | 内容 | 判据 |
+|---|---|---|
+| D1 | 双缓冲：guest 合成第 N+1 帧时，host 还在 replay/上屏第 N 帧 | 帧间隔下降 ≥30%，画面无撕裂 |
+| D2 | reply 与下一帧解耦（不阻塞在 `recv` 等 picture；picture 晚一帧到达也可接受） | guest 侧等待时间显著下降（用 ext39 同款 stage 计时验证） |
+| D3 | 流水线深度与 backpressure（避免队列无限增长） | 长跑 1200 s 稳定、无 OOM、无 panic |
+
+- 判据总口径：**默认路径**（完整画面）稳态 fps；分阶段计时里 guest 等待时间下降；
+- 风险：撕裂/延迟增加；需要 frame pacing 与丢帧策略。
 
 ### 23C. TCG 优化（与 A 并行，不发驱动）
 
@@ -62,3 +75,16 @@
 - XNU 侧 virtio-gpu 驱动从零写，A1–A2 顺利也要若干天；
 - virgl 依赖客机 Mesa + 宿主 virglrenderer 版本匹配，风险最高；
 - MTTCG 对 aarch64 客机稳定，但 XNU 的多核启动在本项目未见验证，可能 panic。
+
+## 预期收益与顺序（基于 ext39 实测分阶段计时）
+
+| 组合 | 预计 fps | 关键依据 |
+|---|---|---|
+| 现状（默认路径） | 2–3.3 | ext37/ext38/ext39 |
+| + 23A（virtio-gpu，去双程搬运） | 3.5–4.5 | 省 panel 24–27 ms + 传输 |
+| + 23C（TCG 4 核/MTTCG/tb-size） | **5–8** | guest 侧 ~290 ms/帧 是主瓶颈 |
+| + 23D（异步双缓冲） | **8–12** | 合成与上屏重叠，接近 2× |
+| + 23B（virgl，GL 交 V100） | **10–15** | 去掉回读与同步等待 |
+| 24 fps | 仍不承诺 | 需 guest 每帧 ≤42 ms |
+
+执行顺序：**23A → 23C（并行）→ 23D → 23B**；23B 的门槛是 23A 稳定、且 23D 的流水线不拖累 virgl 的资源同步。
