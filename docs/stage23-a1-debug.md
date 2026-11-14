@@ -233,3 +233,34 @@ QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless \
 - 不要加 `-vga none` 而不加 `-nodefaults`：仍会报 `efi-virtio.rom`；
 - 不要把 `qboot.rom` 改名成 `vgabios-ramfb.bin`；
 - 不要在未确认前改共享 `run-darwin.sh` 的默认设备集。
+
+## 修正：不要 `-nodefaults`，用 `-L qemu-roms -vga none`（2026-11-14）
+
+`-nodefaults` 会改 UEFI 的默认设备/启动顺序：Shell 出现但不自动跑 `startup.nsh`。正确做法是
+**保留默认设备集**，只去掉默认 VGA：
+
+```bash
+cd /host/iosvm-work/hakios-xnu-kernel
+QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless \
+  qemu/run-darwin.sh 90 -L "$PWD/qemu-roms" -vga none
+# 或
+QEMU_RAM_GB=8 QEMU_VIRTIO_GPU=1 VNC=1 VNC_PORT=9 \
+  qemu/run-darwin.sh 90 -L "$PWD/qemu-roms" -vga none
+```
+
+`qemu-roms/` 现含：
+
+```text
+efi-virtio.rom        262,144 B   (来自 ipxe-qemu, 供默认/回退 VGA)
+vgabios-ramfb.bin      39,424 B   (seabios vgabios-virtio.bin 的临时替代)
+```
+
+`-vga none` 去掉默认 `virtio-vga`/`efi-virtio.rom` 冲突；`-device ramfb` 仍由
+`qemu-roms/vgabios-ramfb.bin` 提供 ROM；默认 `-drive if=virtio` 的 ESP 和 UEFI 启动顺序不变，
+所以 `startup.nsh` 应能自动跑。QEMU 参数检查：
+
+```text
+-L ... -M virt -vga none -device virtio-gpu-device -device ramfb -display none -S
+```
+
+不再报 romfile，只停在 `-S`。`-nodefaults` 那条只用于没有 ramfb 的串口-only 实验，A1 不要用。
