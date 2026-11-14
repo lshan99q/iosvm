@@ -83,3 +83,43 @@ MAXSECS（≥600），并同时记录 `frame_us`/`copying it out`。
    （但那是 R1 路径）。
 
 Artifacts: `/host/iosvm/logs/s23-a3/glroot-no-glremote/`.
+
+---
+
+# 补充（18:43）：push 改动生效，但首次 push 触发内核 panic —— gpu_dev 是悬垂栈指针
+
+用修复版 GL root（md5 `edadfc9b2c46371372ce44c6b2ab0b0d`）跑 900 s：
+
+- boot 正常：A2 五条命令 `0x1100`、`/dev/hakios-gpu ready (panel push)`；
+- 约 8 分钟后 **panic**：
+
+```text
+panic(cpu 0 caller 0xfffffff007af4e34): Kernel data abort.
+  at pc 0xfffffff0074f1fa4, lr 0xfffffff0074f1f74
+  x20: 0xfffffffb0d9a8000  x21: 0xfffffffa94ae3d18  far: 0xfffffffa94af66c0  esr: 0x96000047
+```
+
+- 符号化：`pc = _gpu_cmd+0xa8`（指令 `strh wzr, [x8, #4]`，即 `d->avail->ring[slot] = 0`），
+  `lr = _gpu_cmd+0x78`；
+- `end=crash … panic=2`。
+
+## 根因
+
+`drivers/gpu/hakios.virtio_gpu.c`：
+
+```c
+666: struct gpu_device d;              /* 栈上局部 */
+684: if (gpu_attach(&d, slot)) {
+371:     gpu_dev = d;                  /* 把栈地址存进全局 */
+695:     return;                       /* d 出作用域 → gpu_dev 悬垂 */
+```
+
+init 时 A2 的 `gpu_cmd(&d, …)` 仍有效，所以五条命令都成功；之后第一次
+`EAGL_GPU_PUSH` → `gpu_present()` → `gpu_cmd(gpu_dev, …)` 用的是已失效栈帧
+（x21=0xfffffffa94ae3d18 就是内核栈地址），`d->avail` 变成垃圾指针 → data abort。
+
+## 修法
+
+`struct gpu_device d;` → `static struct gpu_device d;`（或文件作用域 / kmem_alloc）。
+
+证据：`/host/iosvm/logs/s23-a3/glroot-a3-crash/`（panic.txt / serial.log / drive.log）。
