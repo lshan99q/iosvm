@@ -263,3 +263,23 @@ root/etc/glwire_local
 
 路径 `/host/iosvm-work/root-a3-glremote-local.apfs`。用它跑同一 A/B 才应有
 `flush -> 2 (rows into the surface)` 和 host 帧。
+
+---
+
+# 补充（21:40）：加了 /etc/glwire_local 的 root 仍然不发帧（wire 仍空）
+
+root `e52441b1cf7e957f8f6dac4c0dc5235b`（`/bin/glremote_on` + `/etc/glwire_local` 都有），
+`QEMU_VIRTIO_GPU=1`、cmdline 不带 glwire_local，900 s：
+
+- 串口确认 local：`the frame is drawn here as well (glwire_local)`、`after install, on=1`；
+- **101 个 `hakios-gl: frame`，但 `flush -> 0` ×1050、`flush -> 2` = 0**；
+- 无到 9110 的 TCP 连接，hostframes=0，`end=qemu-exited panic=0`。
+
+对照 ext37（root-w15，cmdline glwire_local=1，无 /etc 文件）：`flush -> 2 … pid=16`、host 3823 帧。
+
+→ 「缺 /etc/glwire_local」不是 wire 空的唯一原因；新 eagl 构建这侧丢了「记录→wire」。
+建议：flush 里区分 `w.at==0` 与 connect 失败（一次性打印）；对比两版 `eagl_gen.h`/`eagl_slots.txt`/spec；
+查 per-context wire。
+
+真正 TCP-vs-GPU 的 A/B 等 wire 恢复；push 开/关 A/B 已有（455 vs 562 ms，push ~2%）。
+证据：`/host/iosvm/logs/s23-a3/ab2-a-wire-dead/`。
