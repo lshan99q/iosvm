@@ -63,7 +63,16 @@ rm -f "$LOG" "$HLOG" "$SHOT" "/tmp/$LABEL-shot.png" "/tmp/$LABEL-final.png" "/tm
 : > "$LOG"; : > "$HLOG"
 cd "$IOSVM" || exit 1
 echo "===== $(date -Is) $LABEL root=$ROOT hostargs=[$HOSTARGS] minframes=$MINFRAMES minshot=$MINSHOT ui_grace=$UI_GRACE =====" >> "$LOG"
-QEMU_SMP=${QEMU_SMP:-4} QEMU_TB_MB=${QEMU_TB_MB:-1536} QEMU_RAM_GB=12 QEMU_NET=1 QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img \
+# QEMU_ESP=1 boots from the ESP tree itself (qemu/esp, which must hold the payload at
+# EFI/hakios/payload.bin): run.sh then drops the loader device and the loader reads the payload
+# from the volume it started from. It must not get QEMU_ESP_IMAGE as well -- that image is an old
+# volume without a payload, and the firmware falls back to its built-in shell when it is used.
+if [ "${QEMU_ESP:-0}" = 1 ]; then
+	ESP_ENV="QEMU_ESP=1"
+else
+	ESP_ENV="QEMU_ESP_IMAGE=$IOSVM/qemu/esp.img"
+fi
+env QEMU_SMP=${QEMU_SMP:-4} QEMU_TB_MB=${QEMU_TB_MB:-1536} QEMU_RAM_GB=12 QEMU_NET=1 $ESP_ENV \
 	IMG=$IOSVM/userland/system.apfs ROOT=$ROOT \
 	CMDLINE="cpus=${QEMU_SMP:-4} fb_beat=0 fbscale=2 metal=1 ${XCMD:-}" \
 	timeout 7500 bash qemu/run-darwin.sh "$MAXSECS" ${QEMU_EXTRA:-} >> "$LOG" 2>&1 &
