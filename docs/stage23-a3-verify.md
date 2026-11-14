@@ -179,3 +179,29 @@ guest Mesa 路径本身慢**，A3 只增加一次 1125→750 缩放，未带来 
 链路通但不带来 fps 收益，与 code 的判断一致。
 
 截图：`logs/s23-a3/glroot-a3-ok/scanout-apple-logo.png`、`scanout-weather-widget.png`。
+
+---
+
+# 补充（20:01）：gpu_ioctl 计时 —— A3 push 只花 ~7 ms，不是瓶颈
+
+内核 `af866234`（每 60 次 push 打计时）+ root `21eea74b`（GL=1 GLREMOTE=1），900 s：
+
+```text
+copyin=4516..6195 us  transfer=1181..2306 us  flush=555..964 us  total=6624..8467 us
+```
+
+- 2410 次 push，0 失败；
+- **每帧 push = 6.6–8.5 ms**（copyin 占大头 4.5–6.2 ms，transfer 1.2–2.3 ms，flush 0.6–0.9 ms）；
+- → **A3 不是慢的原因**；1.6–2.3 s/帧在 guest CA/Mesa/glFinish 一侧。
+
+## 同时发现：GLREMOTE（remote-only）本发没送出帧
+
+- `hakios-remote: end of frame, on=1 … pid=14`，但 **`flush -> 0` ×2407**（一条都没发）；
+- `host_glwire` 只有 listening，4 行，hostframes=0；
+- 结束帧只有 pid=14（backboardd），**SpringBoard(pid 8) 没有 frame_end**；
+- screendump 全黑（3622 B），`end=noui hostframes=0 panic=0`。
+
+对照 ext37（local）：`flush -> 2 … surface 1 row 3072 pid=16`，host 3823 帧。
+→ remote-only 下 wire 为空、SpringBoard 不进画帧，是独立问题（不是 A3），需要 code 另查。
+
+证据：`/host/iosvm/logs/s23-a3/glremote-timing/`。
