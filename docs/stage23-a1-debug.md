@@ -166,3 +166,28 @@ QEMU 8.2/10 的 `virtio_mmio_read()` 对 `QUEUE_DESC_LOW/HIGH`、`QUEUE_DRIVER_*
 寄存器。**
 
 未改代码、未 boot；等待整页非零扫描结果。
+
+## `-nodefaults` 与 efi-virtio.rom（2026-11-14）
+
+实测：`-M virt` 的默认设备集会在没有 `-nodefaults` 时给 `virtio-gpu-device` 带出
+`efi-virtio.rom`；加 `-nodefaults` 后设备正常。`qemu/run-darwin.sh` 把额外参数原样放到
+`qemu/run.sh ... "$@"` 的末尾，所以**不必改共享脚本**：
+
+```bash
+QEMU_VIRTIO_GPU=1 QEMU_DISPLAY=egl-headless \
+  qemu/run-darwin.sh 90 -nodefaults
+# 或 VNC
+QEMU_VIRTIO_GPU=1 VNC=1 VNC_PORT=9 \
+  qemu/run-darwin.sh 90 -nodefaults
+```
+
+`qemu/run.sh` 已显式给 `-serial stdio -monitor none`，`-nodefaults` 去掉的是默认 VGA/串口等
+设备，不会去掉显式传入的 `memory-backend-file`、`virtio-*`、`ramfb`、`-display`。
+
+若以后要持久化，只在 `QEMU_VIRTIO_GPU=1` 时加：
+
+```bash
+GPU=(-nodefaults -device virtio-gpu-device)
+```
+
+放在 `-device ramfb` 之前；这次不改共享脚本，先用额外 argv。
