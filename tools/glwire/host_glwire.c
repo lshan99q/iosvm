@@ -325,6 +325,15 @@ make_frame_buffer(struct client *client, int width, int height)
 	GLuint rb = 0;
 
 	if (client->framebuffer != 0) {
+		/*
+		 * A frame buffer that is recreated loses whatever its previous frames left in it; a
+		 * guest that then sends only a dirty rectangle leaves the rest of the panel black.
+		 * Say it, with the size that forced it, so a run can tell "recreated once" from
+		 * "recreated at every change of the drawable".
+		 */
+		printf("host_glwire: framebuffer recreated client=%d %dx%d (was %dx%d)\n",
+		    (int)client->fd, width, height, client->width, client->height);
+		fflush(stdout);
 		glDeleteFramebuffers(1, &client->framebuffer);
 		client->framebuffer = 0;
 	}
@@ -3692,6 +3701,7 @@ serve_frame(struct client *client)
 	int segment_count2 = 0, row_bytes2 = 0;
 	size_t records_bytes = 0, frame_bytes = 0;
 	double began, took;
+	double t0, t_req, t_seg, t_rec, t_replay, t_read, t_panel, t_reply;
 	unsigned char *records;
 	unsigned char *picture;
 	GLint saved_viewport[4] = { 0, 0, 0, 0 };
@@ -3706,6 +3716,7 @@ serve_frame(struct client *client)
 	uint64_t last_picture_hash = have_previous_picture ? previous_picture_hash : 0;
 	int panel_known = 0;
 
+	t0 = now_seconds();
 	while (at < (int)sizeof(line) - 1) {
 		char c;
 		ssize_t got = recv(client->fd, &c, 1, 0);
@@ -3725,6 +3736,7 @@ serve_frame(struct client *client)
 		fprintf(stderr, "host_glwire: bad request '%s'\n", line);
 		return -1;
 	}
+	t_req = now_seconds();
 	if (upload_565_env) {
 		rgb565_wanted = 1;
 	}
@@ -3767,6 +3779,7 @@ serve_frame(struct client *client)
 		free(segments2);
 		return -1;
 	}
+	t_seg = now_seconds();
 	records = malloc(records_bytes);
 	picture = malloc(frame_bytes);
 	if (records == NULL || picture == NULL) {
@@ -3785,6 +3798,7 @@ serve_frame(struct client *client)
 		return -1;
 	}
 	began = now_seconds();
+	t_rec = began;
 	{
 		/*
 		 * GLWIRE_SAVE_RECORDS=<prefix>: the first frames' record streams as they came, so a
@@ -3792,10 +3806,34 @@ serve_frame(struct client *client)
 		 * header is the request line's numbers, so a reader does not have to remember them.
 		 */
 		static int saved;
+		static double first_seen;
 		const char *prefix = getenv("GLWIRE_SAVE_RECORDS");
 		const char *at = getenv("GLWIRE_SAVE_AT");
+		const char *wh = getenv("GLWIRE_SAVE_WH");
+		const char *after = getenv("GLWIRE_SAVE_AFTER");
 		int wanted = at != NULL ? atoi(at) : 0;
 		int keep = at != NULL ? ((int)(frames_replayed + 1) == wanted) : (saved < 3);
+
+		/* GLWIRE_SAVE_WH=WxH and GLWIRE_SAVE_AFTER=SECONDS pick the frame by what it is
+		 * rather than by a frame number no two boots share: only a frame of that size, and
+		 * only after that much time has passed since the first one. A boot interleaves the
+		 * display's frames with small offscreen renders (96x96 and the like), so
+		 * GLWIRE_SAVE_AT often lands on one of those instead of the panel. */
+		if (first_seen == 0.0) {
+			first_seen = now_seconds();
+		}
+		if (prefix != NULL && saved == 0) {
+			if (wh != NULL) {
+				int w = 0, h = 0;
+
+				if (sscanf(wh, "%dx%d", &w, &h) == 2 && (w != width || h != height)) {
+					keep = 0;
+				}
+			}
+			if (after != NULL && now_seconds() - first_seen < atof(after)) {
+				keep = 0;
+			}
+		}
 
 		if (prefix != NULL && keep) {
 			char path[512];
@@ -3991,6 +4029,7 @@ serve_frame(struct client *client)
 		}
 	}
 	glFinish();
+	t_replay = now_seconds();
 	if (replay_used) {
 		/*
 		 * What the replay was made of: the opcodes and how many of each. A frame that draws
@@ -4136,6 +4175,7 @@ serve_frame(struct client *client)
 	if (!picture_from_fallback) {
 		glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, picture);
 	}
+	t_read = now_seconds();
 	/*
 	 * Stage seventeen, P0: the label composite is in the shadow.  Either it supplies the picture
 	 * (mode 1, the whole target as it stood right after the composite) or only the text's own
@@ -4305,7 +4345,9 @@ serve_frame(struct client *client)
 	have_previous_picture = 1;
 	names_attribs_release(&client->names);
 	wire_release();
-	took = now_seconds() - began;
+	t_panel = now_seconds();
+	t_reply = t_panel;
+	took = t_panel - began;
 	frames_replayed++;
 	if (frame_delay_ms > 0) {
 		/* (stage 15: the guest waits for this reply; a delay here is a knob on the frame period) */
@@ -4569,6 +4611,7 @@ serve_frame(struct client *client)
 		free(segments2);
 			return -1;
 		}
+		t_reply = now_seconds();
 		free(packed);
 		}
 
@@ -4596,6 +4639,23 @@ serve_frame(struct client *client)
 			    interval > 0 ? 1.0 / interval : 0.0, wire_image_refs,
 			    wire_image_ref_bytes,
 			    in_place ? (row_bytes > 0 ? " in-place rows" : " in-place") : "");
+		}
+	}
+	{
+		double total_ms = (t_reply - t0) * 1000.0;
+
+		if (frames_replayed <= 10 || total_ms > 1000.0 || frames_replayed % 100 == 0) {
+			printf("host_glwire: stages frame %llu req=%.1f seg=%.1f rec=%.1f replay=%.1f "
+			    "read=%.1f panel=%.1f reply=%.1f total=%.1f ms in_place=%d refs=%lu\n",
+			    frames_replayed,
+			    (t_req - t0) * 1000.0,
+			    (t_seg - t_req) * 1000.0,
+			    (t_rec - t_seg) * 1000.0,
+			    (t_replay - t_rec) * 1000.0,
+			    (t_read - t_replay) * 1000.0,
+			    (t_panel - t_read) * 1000.0,
+			    (t_reply - t_panel) * 1000.0,
+			    total_ms, in_place, wire_image_refs);
 		}
 	}
 	fflush(stdout);
