@@ -183,3 +183,28 @@ host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不�
 2. `glasync=1` 为什么没有让 `sent=2` 出现（分支条件？）；
 3. `glframes=1` 为什么在 remote-only 下仍不打 census 行；
 4. 140 ms 拆分：仅有 host 侧 39–42 ms（同步版）+ guest 端 140 ms，差值 ~100 ms 未分解。
+
+## async2 的 refs 隔离（05:56，root 54cd0709）
+
+同一 root 两发（remote-only + `glasync=1`）：
+
+| 配置 | refs | host rec | host replay | host total | fps |
+|---|---|---:|---:|---:|---:|
+| A：`glwire_static_patch=1`（host 带 STATIC_PATCH） | **79** | 183–327 ms | 235 ms | 465–605 ms | 1.7–1.9 |
+| B：`glwire_static_patch=0`（host 不带） | **79** | 172–327 ms | 234–235 ms | 452–606 ms | 1.2–1.2 |
+
+→ **refs=79 与 static patch 无关**：B 关掉补丁后 refs 仍是 79。
+对照老 root（604502da，同步版）refs=0、host 39–42 ms、fps ~7。
+
+## census 仍然不打（async2 + 强制 frame_lines 也不行）
+
+- 两发 A/B 都是 `hakios-gl: frame ...` **0 行**（只有 Mesa/上下文初始化行）；
+- 所以 140 ms 的拆分到这里仍拿不到。
+
+### 给 code 的结论
+
+1. **regression 在 async2 这份 eagl 构建里**（与 static patch 无关）：每帧带 79 个 image refs，
+   host rec 从 0.4–2.8 ms 涨到 172–327 ms，fps 从 7 掉到 1.2–1.9；
+2. census（`frame_lines`）在 remote-only 下仍不打印，需要继续查（是否 `frame_end` 的 census 分支在
+   remote-only 早退）；
+3. 下一步建议：先把 refs=79 修回 0（这是当前最大的开销），再谈 async 的 waiting 拆分与 D2 收益。
