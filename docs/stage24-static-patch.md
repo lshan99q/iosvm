@@ -332,3 +332,13 @@ host_glwire: offline static patch 660x547 from /tmp/patch.bgra
 
 这样 remote-only 的回放帧可以直接带完整 dock/Search/右下；fps 仍是当前 8.75，
 48ms 的 host reply 等待留给双缓冲 async。`--save`/`GLWIRE_DUMP` 的 early-return 另查。
+
+## dump/save 不写文件：父目录不存在
+
+`--save /tmp/hyb2/frames` 和 `GLWIRE_DUMP` 的父目录如果不存在，`fopen` 静默失败，host 不打印
+错误，所以看起来“一个文件都没写”。
+
+修法：host 增加 `ensure_dir()`/`ensure_parent()`，`write_pixels()` 写前 mkdir -p，
+`--save` 目录在 main 里先创建。host 重编即可，guest/root 不变。
+
+这样 remote-only 下可以直接看 host picture（in-place 写回内容），也是完整性最终出口。

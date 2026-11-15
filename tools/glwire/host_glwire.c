@@ -25,8 +25,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
+
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "wire.h"
@@ -127,11 +128,49 @@ map_ram(const char *path)
 
 static double now_seconds(void);
 
+/* mkdir -p for the dump/save paths: a missing parent used to make fopen fail silently. */
+static void
+ensure_dir(const char *path)
+{
+	char tmp[512];
+	size_t n = strlen(path);
+
+	if (n == 0 || n >= sizeof(tmp)) {
+		return;
+	}
+	memcpy(tmp, path, n + 1);
+	for (char *p = tmp + 1; *p != '\0'; p++) {
+		if (*p == '/') {
+			*p = '\0';
+			mkdir(tmp, 0777);
+			*p = '/';
+		}
+	}
+	mkdir(tmp, 0777);
+}
+
+static void
+ensure_parent(const char *path)
+{
+	char tmp[512];
+	char *slash;
+
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	slash = strrchr(tmp, '/');
+	if (slash != NULL && slash != tmp) {
+		*slash = '\0';
+		ensure_dir(tmp);
+	}
+}
+
 /* Pixels to a file, and a line saying so; nothing if the file cannot be made. */
 static int
 write_pixels(const char *path, const void *pixels, size_t bytes)
 {
-	FILE *file = fopen(path, "wb");
+	FILE *file;
+
+	ensure_parent(path);
+	file = fopen(path, "wb");
 
 	if (file == NULL) {
 		return 0;
@@ -4870,6 +4909,9 @@ main(int argc, char **argv)
 	    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE,
 	};
 
+	if (save_dir != NULL) {
+		ensure_dir(save_dir);
+	}
 	no_in_place = getenv("GLWIRE_NO_INPLACE") != NULL;
 	fbo_log = getenv("GLWIRE_FBO_LOG") != NULL;
 	{
