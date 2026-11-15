@@ -498,7 +498,7 @@ eagl_static_patch(struct eagl *e)
 	static int last = -1;
 	unsigned char *pixels;
 
-	if (!glwire_static_patch || e->frames < 30) {
+	if (!glwire_static_patch || e->frames < 2000) {
 		return;
 	}
 	if (last >= 0 && e->frames - last < 60) {
@@ -1372,7 +1372,7 @@ static void
 frame_end(struct eagl *e, bool finished)
 {
 	static int composed_once;
-	int allow_local = eagl_remote_no_local() && !composed_once && e->frames >= 30;
+	int allow_local = eagl_remote_no_local() && !composed_once && e->frames >= 2000;
 
 	if (allow_local) {
 		composed_once = 1;

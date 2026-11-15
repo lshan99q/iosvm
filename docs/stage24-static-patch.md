@@ -275,3 +275,18 @@ census 的 `waiting` 是 `glFinish` 等待（2µs），不是 host reply。`copy
 `waited` 之后到 `frame_end` 结束，包含 `eagl_remote_flush()` 的 send + **recv host reply**。
 所以 D2 仍有 ~35–48ms 可省；之前 async 的 79 refs 是同一个 surface 的 seed 竞争，
 双缓冲后才能安全启用。
+
+## hybrid 种子改 frame 2000
+
+frame 30 太早：UI 约 frame 2000+（13–14 分钟）才出现，frame 30 的 patch 仍是白块，hash 不变。
+改为：
+
+- `allow_local` 首次条件 `e->frames >= 2000`；
+- `eagl_static_patch()` 也从 frame 2000 起才开始取源；
+- 第一次本地合成后取完整 bbox patch，之后每 60 帧复取。
+
+root：`/host/iosvm-work/root-stage24-hybrid2.apfs`，
+md5 **4bd10564583df289ac964505a36d376c**。
+
+`GLWIRE_DUMP_AT` hybrid 下没生成文件，先不阻塞：remote-only 没有 panel upload，dump_once 的
+early-return 需要单独看；完整性仍可用 host picture 的其它 dump 路径。
