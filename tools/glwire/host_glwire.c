@@ -3723,8 +3723,35 @@ serve_frame(struct client *client)
 
 	t0 = now_seconds();
 	if (!static_patch_init) {
+		const char *file = getenv("GLWIRE_STATIC_PATCH_FILE");
+
 		static_patch_init = 1;
-		static_patch_on = getenv("GLWIRE_STATIC_PATCH") != NULL;
+		if (file != NULL) {
+			FILE *fp = fopen(file, "rb");
+			const int pw = 660, ph = 547;
+
+			if (fp != NULL) {
+				static_patch_pixels = malloc((size_t)pw * ph * 4);
+				if (static_patch_pixels != NULL &&
+				    fread(static_patch_pixels, 1, (size_t)pw * ph * 4, fp) == (size_t)pw * ph * 4) {
+					static_patch_x = 44;
+					static_patch_y = 142;
+					static_patch_w = pw;
+					static_patch_h = ph;
+					static_patch_have = 1;
+					static_patch_on = 1;
+					printf("host_glwire: offline static patch %dx%d from %s\n", pw, ph, file);
+					fflush(stdout);
+				} else {
+					free(static_patch_pixels);
+					static_patch_pixels = NULL;
+				}
+				fclose(fp);
+			}
+		}
+		if (!static_patch_have) {
+			static_patch_on = getenv("GLWIRE_STATIC_PATCH") != NULL;
+		}
 	}
 	for (;;) {
 		int sx, sy, sw, sh, sformat;

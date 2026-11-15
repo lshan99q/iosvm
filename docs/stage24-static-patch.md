@@ -304,3 +304,31 @@ root：`/host/iosvm-work/root-stage24-content.apfs`，
 md5 **3b79e1896a436a02ec1a2513c79e9e51**。
 
 这样 UI 一出现（frame 4000+）就会自动换掉白块 patch，不用再猜固定帧。
+
+## 离线补丁：host 直接加载 bbox BGRA
+
+remote-only 的 panel 永远全黑，guest 取源不可行。改为 host 侧离线资产：
+
+```bash
+# 从完整主屏 PNG 裁 bbox 并转 raw BGRA（Pillow）
+python3 - <<'PY'
+from PIL import Image
+im = Image.open('logs/stage24/bbox/home-complete.png').convert('RGBA')
+im = im.crop((44, 142, 44 + 660, 142 + 547))
+open('/tmp/patch.bgra', 'wb').write(im.tobytes('raw', 'BGRA'))
+PY
+
+GLWIRE_STATIC_PATCH_FILE=/tmp/patch.bgra NO_PANEL=1 ./host_glwire
+```
+
+host 在首个 `serve_frame` 加载：660×547×4 = 1,444,080 B，固定放在 (44,142)，
+每帧覆盖 picture；guest 不再需要 `glwire_static_patch=1`，也不再依赖 panel。
+
+host 启动日志：
+
+```text
+host_glwire: offline static patch 660x547 from /tmp/patch.bgra
+```
+
+这样 remote-only 的回放帧可以直接带完整 dock/Search/右下；fps 仍是当前 8.75，
+48ms 的 host reply 等待留给双缓冲 async。`--save`/`GLWIRE_DUMP` 的 early-return 另查。
