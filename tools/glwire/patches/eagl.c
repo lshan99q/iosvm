@@ -916,6 +916,12 @@ surface_to_texture(struct eagl *e, struct image *image)
 {
 	IOSurfaceRef surface = image->surface;
 	bool planar = IOSurfaceGetPlaneCount(surface) > 0;
+
+	/* Remote-only/NO_PANEL: the host never samples the 4.8MB panel texture; skip the glTexImage2D
+	 * and the wire upload, which is the 49ms copying-out. */
+	if (eagl_remote_no_local() && image->width >= 1000 && image->height >= 2000) {
+		return;
+	}
 	size_t row = planar ? IOSurfaceGetBytesPerRowOfPlane(surface, image->plane) : IOSurfaceGetBytesPerRow(surface);
 	unsigned pixel = bytes_a_pixel(image->format, image->type);
 	GLint row_length = 0, alignment = 4;
