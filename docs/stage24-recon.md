@@ -368,3 +368,32 @@ code 可以顺手确认 dump 的触发条件（是否因为 hybrid 下 panel 不
 1. 种子帧再往后（如 frame 4000），或改成内容判定（非黑像素比例 > 阈值）；
 2. 确认「每 60 帧复取补丁」的分支真的在执行（可在发送时打一行 `patch take frame N`）；
 3. 修 `--save` / `GLWIRE_DUMP` 在 remote-only 下不写文件的问题（完整性验证目前没有可用出口）。
+
+## content 门控（09:20，root 3b79e189）：**panel 永远全黑，patch 一次也取不到**
+
+code 加了内容门控：frame 2000 起每 60 帧统计 750×1624 的非黑采样点，<3000 就 skip。
+
+实测：**92 次检查、0 次 take**，从 frame 2000 一路到 **frame 7460** 全是：
+
+```text
+hakios-gpu: patch skip frame 2000 nonblack=0
+...
+hakios-gpu: patch skip frame 7460 nonblack=0
+```
+
+→ **在 remote-only 下 guest 的 panel 表面始终是全黑的**（`composition_off` + 不本地合成），
+所以「从 panel 取补丁源」这条路在 remote-only 里**永远取不到内容**，与种子帧号无关。
+
+### 架构结论（stage 24 的关键）
+
+「host 回放 + 静态补丁」不能靠 remote-only 自给自足：
+- remote-only：没有合成 → 没有完整 panel → 补丁源空（本发 92 次全黑证实）；
+- 本地合成（glwire_local）：有完整 panel，但每帧 copying out + CA ≈ 120 ms → ~8 fps。
+
+可行方向只剩两个：
+1. **先本地、后 remote**：开机/UI 起来时用本地合成跑几帧，把补丁（dock/Search/右下）截下来，
+   然后切到 remote-only 冻结补丁；
+2. **离线补丁**：在一次本地合成 boot 里把完整 panel 存成资产，host 启动时直接加载；
+   之后所有 remote-only boot 都只做回放 + 这块静态补丁（内容本来就基本不变）。
+
+两者都需要 code 支持「补丁源不依赖当前帧的 panel」，而不是 `eagl_panel_750()`。
