@@ -125,3 +125,31 @@ host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不�
 所以下一步要 code 出 **remote-only + netcfg** 的 root（去掉 /etc/glwire_local），
 再验「回放 + bbox 补丁」是否既 10.9 fps 又完整。
 证据：`logs/stage24/bbox/`（home-complete.png 为完整主屏）。
+
+## remote-only 测试（04:36，root 604502da，host GLWIRE_STATIC_PATCH=1 NO_PANEL=1）
+
+**结论：remote-only 路径跑通了，但 fps ~7（不是 10.9），且完整性问题没解决（屏幕被 A2 测试图案占住）。**
+
+两发（`virtio_gpu=2` / `=1`）共同结果：
+
+| 项 | 结果 |
+|---|---|
+| 录制模式 | `the frame is drawn by the host alone`（remote-only，0 个本地 GL 帧）✅ |
+| 网络 | `netcfg: en0 10.0.2.15` ✅ |
+| 补丁 | `static patch 660x547 1444080 B hash 30c7aa57... at 44,142`，**全程只发 1 次** ✅ |
+| 帧流 | 5796 / 1962 帧，**没有 21eea 的『SpringBoard 不出帧』** ✅ |
+| fps | `virtio_gpu=2`：60 s 窗口 6.95 fps；`virtio_gpu=1`：间隔中位 0.140 s = **7.14 fps**（p25 0.080 s = 12.5）|
+| host 每帧成本 | total ≈ **39–42 ms**（panel=34.6、rec 0.4–2.8、replay 0.3、read 0.6、seg 0.9–4.7）→ 宿主侧可到 ~25 fps |
+
+- **瓶颈在 guest 的帧节拍**（~7 fps），不是宿主回放（40 ms/帧）；
+- 显示验证受阻：`virtio_gpu=2` 时 A3 把空 panel 推到 GPU scanout（screendump 全黑）；
+  `virtio_gpu=1` 时 scanout 停在 A2 测试图案；QMP `screendump device=ramfb` 报 DeviceNotFound。
+
+### 下一步建议（给 code）
+
+1. **完整性验证**：关掉/跳过 A2 测试图案（或让 ramfb 成为第一个 console），否则 screendump 看不到
+   guest 真正显示的画面；或者直接用 `GLWIRE_DUMP` 存宿主 picture（它就是 in-place 写回的内容）看完整性。
+2. **fps**：guest 节拍 ~7 fps 是新的上限；宿主回放 40 ms 已不是瓶颈 —— 要查 guest 每帧在等什么
+   （host reply ~35 ms + CA commit？）。10.9 fps ≈ 92 ms/帧，当前 ~140 ms/帧。
+
+证据：`logs/stage24/remote-a3/`（virtio_gpu=2）、`logs/stage24/remote1/`（virtio_gpu=1）。
