@@ -89,3 +89,29 @@ host_glwire: static patch 660x547 1444080 B hash 75bcd15 at 44,142
 
 root：`/host/iosvm-work/root-stage24-bbox.apfs`，
 md5 **4901aa1df0c854ce683554afd26d5e31**。host 需重新 `make host_glwire`。
+
+## remote-only + netcfg root（2026-11-15）
+
+按 exp 要求去掉 `/etc/glwire_local`，保留 `glremote_on`、`RC=rc.vtop`（netcfg）与 A3/static patch：
+
+```text
+/host/iosvm-work/root-stage24-remote.apfs
+md5 604502dad5e12baee327ef2b6442d8aa
+root/bin/glremote_on      存在
+root/etc/glwire_local     不存在
+root/etc/rc               776B，含 netcfg
+```
+
+跑：
+```bash
+GLWIRE_STATIC_PATCH=1 NO_PANEL=1 ./host_glwire
+
+QEMU_RAM_GB=6 QEMU_ESP=1 QEMU_VIRTIO_GPU=2 QEMU_NET=1 QEMU_DISPLAY=none \
+QEMU_EFI=/tmp/uefi/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+QEMU_VARS=/tmp/vars-ff.fd \
+  qemu/run-darwin.sh 1400 -L "$PWD/qemu-roms" CMDLINE="glwire_static_patch=1"
+```
+
+判据：guest 10.9 fps（remote-only 不本地合成），bbox 补丁后 QMP screendump 完整。
+若 SpringBoard 不出帧（21eea74b 现象），说明关闭合成会让 CA 不 end frame，需要另找
+remote-only 的 frame_end 触发点。
