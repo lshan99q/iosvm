@@ -153,3 +153,33 @@ host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不�
    （host reply ~35 ms + CA commit？）。10.9 fps ≈ 92 ms/帧，当前 ~140 ms/帧。
 
 证据：`logs/stage24/remote-a3/`（virtio_gpu=2）、`logs/stage24/remote1/`（virtio_gpu=1）。
+
+## D2 async reply 首测（05:02，root ff3219ca，host main 130f4a6）
+
+配置：host `GLWIRE_STATIC_PATCH=1 NO_PANEL=1 GLWIRE_ASYNC_REPLY=1`，guest
+`glwire_static_patch=1 glasync=1 glframes=1`，remote-only。
+
+结果：**回归，比同步版慢得多**
+
+| 指标 | 同步 remote-only（604502da） | D2 async（ff3219ca） |
+|---|---:|---:|
+| host 每帧 total | **39–42 ms** | **713–1029 ms** |
+| 其中 rec | 0.4–2.8 ms | **440–750 ms** |
+| 其中 replay | 0.3 ms | 218–237 ms |
+| 其中 panel | 34.6 ms | 36–53 ms |
+| image refs | 0 | **79** |
+| fps | 6.95–7.14 | **1.19** |
+| patch 重发 | 1 | 1 |
+
+- `sent=2` 未出现（async 分支没走到）；`flush -> 2` 正常；
+- **census 仍然 0 行**（`glframes=1` 也没打 `hakios-gl: frame ...`），
+  所以 140 ms 的拆分这次没拿到；
+- 回归点看起来是 **image refs**（0 → 79）：host 每帧要多取 79 个引用，rec 直接涨到 440–750 ms。
+
+### 待 code 查
+
+1. 为什么新 root（ff3219ca）在 remote-only 下每帧带 79 个 image refs（老 root 是 0）？
+   这是本轮 fps 从 7 掉到 1.19 的直接原因；
+2. `glasync=1` 为什么没有让 `sent=2` 出现（分支条件？）；
+3. `glframes=1` 为什么在 remote-only 下仍不打 census 行；
+4. 140 ms 拆分：仅有 host 侧 39–42 ms（同步版）+ guest 端 140 ms，差值 ~100 ms 未分解。
