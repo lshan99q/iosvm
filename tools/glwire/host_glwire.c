@@ -5033,7 +5033,7 @@ main(int argc, char **argv)
 				close_client(client);
 				continue;
 			}
-			if (peek == 'R') {
+			if (peek == 'R' || peek == 'S') {
 				if (serve_frame(client) != 0) {
 					close_client(client);
 				}

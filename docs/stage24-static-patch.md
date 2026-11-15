@@ -50,3 +50,25 @@ host_glwire: static patch 750x1624 4872000 B hash ... at 0,0
 
 判据：`NO_PANEL=1` 回放 fps ≥10，同时 dock 通栏 4 图标 / Search 居中 / 右下不黑。
 当前补丁是**全屏**，先验证 z 顺序与静态假设；掩码数据回来后再收窄 bbox。
+
+## 首测修复：S 必须也走 serve_frame
+
+首测 guest 已发 `S`，host 无 `static patch` 行。根因不是 4.8MB 阻塞，而是
+`host_glwire.c` main 的 peek 分支只把 `R` 交给 `serve_frame()`；`S` 被当成旧 in-band
+record 交给 `serve_record()`，读到 `S` 就关闭连接。
+
+修法：
+
+```c
+if (peek == 'R' || peek == 'S') {
+    if (serve_frame(client) != 0) close_client(client);
+}
+```
+
+修后本地 Python 直接发 `S` 的验证：
+
+```text
+host_glwire: static patch 750x1624 4872000 B hash 75bcd15 at 0,0
+```
+
+同一个 root 490c8258 即可重跑，host 重新 `make host_glwire`。
