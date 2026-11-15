@@ -4942,6 +4942,9 @@ install(void)
 		census_on = strstr(arguments, "glcensus=1") != NULL;
 		tex_log = strstr(arguments, "texlog=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
+		if (eagl_remote_no_local()) {
+			frame_lines = 1;        /* remote-only: always give the exp the frame_us census */
+		}
 		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
 		if ((argument = strstr(arguments, "glslots=")) != NULL && strtoul(argument + 8, NULL, 10) != 0) {
 			/* P4': count the entries of the table that can draw and that the wire does not carry */

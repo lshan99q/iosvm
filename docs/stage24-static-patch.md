@@ -175,3 +175,17 @@ QEMU_VARS=/tmp/vars-ff.fd \
 
 root：`/host/iosvm-work/root-stage24-async.apfs`，
 md5 **ff3219ca44f91a703db6bc8cf66a6d03**。
+
+## async 首测的三个反馈
+
+1. **`sent=2` 其实出现了**：日志里的 `flush -> 2 (rows into the surface)` 就是
+   `eagl_remote_flush()` 返回 2，remote-only+in-place 的 async 分支已触发。
+2. **census 0 行**：`glframes=1` 解析在 remote-only 下没生效。已改为 remote-only 强制
+   `frame_lines=1`，不依赖 boot-arg；新 root 54cd0709。
+3. **79 image refs / rec 440–750ms**：新 root 才出现，先用同一 root 对比
+   `glwire_static_patch=0` 隔离：
+   - 若 0 就恢复 → static patch / `eagl_panel_750` 路径触发；
+   - 若仍 79 → 与 static patch 无关，查 gpu_on/census 改动。
+
+新 root：`/host/iosvm-work/root-stage24-async2.apfs`，
+md5 **54cd07092babfeadc61b48a148edc6fe**。
