@@ -404,7 +404,10 @@ eagl_remote_begin(void)
 		wire_vtop_hook = remote_vtop;
 	}
 	remote_only = wire_vtop_hook != NULL && !remote_wants_local();
-	remote_async_reply = remote_boot_arg("glasync=1") != NULL;
+	/* glasync=1 alone is not safe: the host writes the same surface the guest samples, so the
+	 * next frame's surface seed changes and every layer is re-uploaded.  Keep it opt-in only. */
+	remote_async_reply = remote_boot_arg("glasync=1") != NULL &&
+	    remote_boot_arg("glasync_unsafe=1") != NULL;
 	/* stage fifteen: the record header carries the EAGL context (see remote_note_context) */
 	wire_set_record_version(2);
 	remote_texlog = remote_boot_arg("texlog=1") != NULL;

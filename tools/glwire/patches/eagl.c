@@ -1366,6 +1366,9 @@ surface_say(struct eagl *e, const char *when, unsigned frame)
 static void
 frame_end(struct eagl *e, bool finished)
 {
+	if (eagl_remote_no_local()) {
+		frame_lines = 1;        /* remote-only: census must be available */
+	}
 	if (gpu_fd < 0) {
 		char arguments[1024];
 		size_t size = sizeof(arguments);

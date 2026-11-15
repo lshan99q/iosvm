@@ -189,3 +189,27 @@ md5 **ff3219ca44f91a703db6bc8cf66a6d03**。
 
 新 root：`/host/iosvm-work/root-stage24-async2.apfs`，
 md5 **54cd07092babfeadc61b48a148edc6fe**。
+
+## async 回归根因：in-place surface seed
+
+async 首测 79 refs / rec 440–750ms 的根因不是 static patch（B 关掉后仍 79），而是：
+
+- async 下 host 在上帧回放时直接写 guest 的 panel surface；
+- guest 下一帧 `upload_changed_layers()` 看到 surface seed 变了，把 79 个 layer 全部重传；
+- rec 440–750ms，fps 从 7 掉到 1.2–1.9。
+
+所以 **async + 同一 surface in-place 不安全**；需要双缓冲（host 写 A，guest/display 读 B）或
+host 写独立 picture、guest 再拷。当前先默认关：
+
+- `glasync=1` **不再触发 async**；
+- 只有 `glasync=1 glasync_unsafe=1` 才走 async，供实验。
+
+同步版恢复 7fps，并强制 remote-only census：
+
+```text
+/host/iosvm-work/root-stage24-sync-census.apfs
+md5 d04f080ae4d18b2d1a7c1ba745fe4193
+```
+
+census 强制移到 `frame_end()` 开头（parse 时 remote_only 还没设置），remote-only 每帧应有
+`hakios-gl: frame N ...`。
