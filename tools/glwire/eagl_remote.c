@@ -49,6 +49,8 @@ static int remote_dirty_upload(void);
 static int remote_ack_timeout_ms(void);
 static int remote_upload_scale(void);
 static int remote_enabled;
+static int remote_async_reply;           /* boot-arg glasync=1: one-frame reply pipeline */
+static int remote_pending_reply;
 
 /* Stage 24: one full-screen static patch (BGRA, 750x1624) sent before the first R, then only when
  * its hash changes.  The host composites it over the replay result. */
@@ -402,6 +404,7 @@ eagl_remote_begin(void)
 		wire_vtop_hook = remote_vtop;
 	}
 	remote_only = wire_vtop_hook != NULL && !remote_wants_local();
+	remote_async_reply = remote_boot_arg("glasync=1") != NULL;
 	/* stage fifteen: the record header carries the EAGL context (see remote_note_context) */
 	wire_set_record_version(2);
 	remote_texlog = remote_boot_arg("texlog=1") != NULL;
@@ -962,6 +965,27 @@ remote_ack_note_drop(void)
 	}
 }
 
+static void
+remote_drain_reply(void)
+{
+	char c;
+	int at = 0;
+
+	if (!remote_pending_reply) {
+		return;
+	}
+	remote_pending_reply = 0;
+	if (remote_fd < 0) {
+		return;
+	}
+	while (at < 128 && recv(remote_fd, &c, 1, 0) == 1) {
+		if (c == '\n') {
+			break;
+		}
+		at++;
+	}
+}
+
 int
 eagl_remote_flush(int width, int height)
 {
@@ -970,6 +994,7 @@ eagl_remote_flush(int width, int height)
 	double started;
 	int at = 0;
 
+	remote_drain_reply();
 	if (remote_no_flush) {
 		/*
 		 * The recorders stay installed and every call is still recorded (that is the variable
@@ -1075,6 +1100,14 @@ eagl_remote_flush(int width, int height)
 		close(remote_fd);
 		remote_fd = -1;
 		return 0;
+	}
+	if (remote_async_reply && remote_only && remote_picture_segments_count > 0) {
+		/*
+		 * D2: the host writes the rows in place and its R 0 reply is read at the start of the
+		 * next flush.  One frame of pipeline only; no picture is copied here.
+		 */
+		remote_pending_reply = 1;
+		return 2;
 	}
 	if (remote_ack_effective_ms() == 0) {
 		/* the pre-ack path, unchanged: first frame, ack off, or cap disabled */

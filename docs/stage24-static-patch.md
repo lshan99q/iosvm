@@ -140,3 +140,38 @@ screendump 在 remote-only 下仍是 A2 测试图案（scanout 没被 host 回�
 - host 回放 34–56 ms/帧（11.35 fps 已出现），guest 帧节拍 ~140 ms → guest 7 fps；
 - guest 每帧等 host reply（~35 ms）+ CA/commit，10.9 fps 需要 ~92 ms；
 - 下一步是原 23D 的 D2：把 reply 延后到下一帧开始，与 guest 下一帧重叠（仅 remote-only）。
+
+## 异步 reply（D2，1 帧流水）
+
+`glasync=1`（guest boot-arg，默认关）：
+
+- 只对 **remote-only + in-place**（guest 给了 surface segments）生效；
+- 本帧发完 records 后立刻返回 `sent=2`，不读 reply；
+- 下一帧 `eagl_remote_flush()` 开头 `remote_drain_reply()` 读上一帧的 `R 0`；
+- 最多 1 帧延迟，不做多级队列；
+- 非 remote-only / 非 in-place / 未开 `glasync` 完全走原同步路径。
+
+host 的 `GLWIRE_ASYNC_REPLY=1` 只是语义开关（host 本来就是回放完发 reply），不改变协议；
+guest 用 `glasync=1` 控制是否流水。
+
+## 验证清单（exp）
+
+```bash
+GLWIRE_STATIC_PATCH=1 NO_PANEL=1 GLWIRE_ASYNC_REPLY=1 ./host_glwire
+
+QEMU_RAM_GB=6 QEMU_ESP=1 QEMU_VIRTIO_GPU=2 QEMU_NET=1 QEMU_DISPLAY=none \
+QEMU_EFI=/tmp/uefi/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+QEMU_VARS=/tmp/vars-ff.fd \
+  qemu/run-darwin.sh 1400 -L "$PWD/qemu-roms" \
+  CMDLINE="glwire_static_patch=1 glasync=1 glframes=1"
+```
+
+1. guest 日志有 `hakios-remote: end of frame, on=1 ...` 与 `hakios-gl: frame N ... ( ... waiting ... )`；
+   `waiting` 应从 ~35ms 降到接近 0；`frame_us` 目标 ≤100ms。
+2. host 每帧仍有 `frame ... interval ...`；`static patch` 仍只发 1 次。
+3. 画面：host `GLWIRE_DUMP` picture 完整；remote-only 下 virtio scanout 仍是 A2 图案，
+   不作为判据。
+4. 回退：不传 `glasync=1` 即原同步路径。
+
+root：`/host/iosvm-work/root-stage24-async.apfs`，
+md5 **ff3219ca44f91a703db6bc8cf66a6d03**。
