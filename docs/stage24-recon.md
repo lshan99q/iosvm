@@ -352,3 +352,19 @@ code 可以顺手确认 dump 的触发条件（是否因为 hybrid 下 panel 不
 
 目标 11 fps 需要 ≤91 ms：现在 123 ms = copying out 48 ms（host reply 等待，code 说可被双缓冲 async 解掉）
 + CA/其它 ~74 ms。若双缓冲能省 35–48 ms → ~80 ms ≈ 12 fps。
+
+## hybrid2（08:49，root 4bd10564）：种子改 frame 2000，仍然只发一次且 hash 不变
+
+- guest 到 **frame 7200** 时，`static patch` 只发过 **1 次**：
+  `static patch 660x547 1444080 B hash 30c7aa5777e776c3`（与白块版相同）；
+- 说明：① frame 2000 的本地合成拿到的仍是空/白内容（UI 更晚，估计 frame 4000+ 才出来）；
+  ② 「之后每 60 帧复取」也没有再发出补丁（要么没取到新内容，要么复取逻辑没跑）；
+- fps 与 patch60 相同：frame_us 124–157 ms、copying out 47–50 ms（≈8.75 fps）；
+- `HOSTARGS="--save /tmp/hyb2/frames"` **没有生成任何帧文件**（目录空），
+  与 `GLWIRE_DUMP` 一样在 hybrid/remote-only 下不工作 —— 需要 code 一并看。
+
+### 建议
+
+1. 种子帧再往后（如 frame 4000），或改成内容判定（非黑像素比例 > 阈值）；
+2. 确认「每 60 帧复取补丁」的分支真的在执行（可在发送时打一行 `patch take frame N`）；
+3. 修 `--save` / `GLWIRE_DUMP` 在 remote-only 下不写文件的问题（完整性验证目前没有可用出口）。
