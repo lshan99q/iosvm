@@ -402,3 +402,23 @@ md5 **351c21703233f71d29c6122772d680a0**，`RC=rc.vtop`、
 - A3 push 只占帧 ~2–5%，**不是滚动瓶颈**；guest CA/Mesa 是；
 - **virtio-gpu 的 FPS 收益为零**，定位为 virgl/GPU 加速的铺路；
 - 两发均 `QEMU_ESP=1` + 默认设备集 + `-L qemu-roms` + 每次重置 vars.fd，无 UEFI Shell。
+
+---
+
+# 23D' gkbf 开/关（01:33）：frame_us -46%，但 fps 不动
+
+同一 root `root-a3-gkbf.apfs`（8b3d27c6），两发各 1200 s：
+
+| 指标 | OFF | ON（`gkbf=1`） |
+|---|---|---|
+| 60 s 窗口 | 3.92 fps | 4.13 fps（+5.4%，含 stall） |
+| host 中位 interval | 0.21 s（4.76 fps） | 0.21 s（4.76 fps，**相同**） |
+| frame_us 中位（最后 30 帧） | 384 ms | **207 ms（-46%）** |
+| host 帧 | 1963 | 1846 |
+
+- **省了 46% 帧时间，但 fps 不动** → 当前阶段 fps 由节拍（display link / CA commit）决定，不是渲染成本；
+- Home 截图：ON 完整（两 widget + 全部图标），OFF 有局部重绘；两者背板都是黑的（本无 vibrancy），
+  未见明显视觉代价；ON 第一张全黑是 transition 瞬时；
+- 下一步该在**滚动窗口**里测 gkbf（内容变化大时才有意义）。
+
+证据：`/host/iosvm/logs/s23-23d/gkbf/`。
