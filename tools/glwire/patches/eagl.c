@@ -449,37 +449,80 @@ struct eagl_gpu_push {
 #define EAGL_GPU_PUSH _IOW('g', 1, struct eagl_gpu_push)
 static int gpu_fd = -1;
 static int gpu_on;
+static int glwire_static_patch;          /* boot-arg glwire_static_patch=1 (stage 24) */
+static unsigned char eagl_panel_750_buf[750 * 1624 * 4];
+
+/* The panel surface is 1125x2436 here; both the virtio-gpu scanout and the stage-24 static patch
+ * use 750x1624.  Always produce the packed 750x1624 BGRA copy. */
+static unsigned char *
+eagl_panel_750(struct eagl *e)
+{
+	const unsigned char *base;
+	size_t row;
+	unsigned width, height;
+
+	if (e->images[0].surface == NULL) {
+		return NULL;
+	}
+	base = IOSurfaceGetBaseAddress(e->images[0].surface);
+	row = IOSurfaceGetBytesPerRow(e->images[0].surface);
+	width = (unsigned)e->images[0].width;
+	height = (unsigned)e->images[0].height;
+	if (base == NULL || width == 0 || height == 0 || row < (size_t)width * 4) {
+		return NULL;
+	}
+	if (width == 750 && height == 1624 && row == 750 * 4) {
+		for (unsigned y = 0; y < 1624; y++) {
+			memcpy(eagl_panel_750_buf + (size_t)y * 750 * 4, base + (size_t)y * row, 750 * 4);
+		}
+	} else {
+		const uint32_t *src = (const uint32_t *)base;
+		uint32_t *dst = (uint32_t *)eagl_panel_750_buf;
+
+		for (uint32_t y = 0; y < 1624; y++) {
+			uint32_t sy = (uint32_t)((uint64_t)y * height / 1624);
+			for (uint32_t x = 0; x < 750; x++) {
+				uint32_t sx = (uint32_t)((uint64_t)x * width / 750);
+				dst[y * 750 + x] = src[(size_t)sy * (row / 4) + sx];
+			}
+		}
+	}
+	return eagl_panel_750_buf;
+}
+
+void eagl_remote_static_patch(const void *pixels, int width, int height, size_t stride);
+
+static void
+eagl_static_patch(struct eagl *e)
+{
+	unsigned char *pixels;
+
+	if (!glwire_static_patch) {
+		return;
+	}
+	pixels = eagl_panel_750(e);
+	if (pixels != NULL) {
+		eagl_remote_static_patch(pixels, 750, 1624, 750 * 4);
+	}
+}
 
 static void
 eagl_gpu_push(struct eagl *e)
 {
-	static unsigned char scaled[750 * 1624 * 4];
 	struct eagl_gpu_push p;
+	unsigned char *pixels;
 
-	if (!gpu_on || e->images[0].surface == NULL) {
+	if (!gpu_on) {
 		return;
 	}
-	p.pixels = (uint64_t)(uintptr_t)IOSurfaceGetBaseAddress(e->images[0].surface);
-	p.stride = (uint32_t)IOSurfaceGetBytesPerRow(e->images[0].surface);
-	p.width = (uint32_t)e->images[0].width;
-	p.height = (uint32_t)e->images[0].height;
-	/* The panel surface here is 1125x2436; the virtio-gpu scanout is 750x1624. */
-	if ((p.width != 750 || p.height != 1624) && p.width > 0 && p.height > 0 && p.stride >= p.width * 4) {
-		const uint32_t *src = (const uint32_t *)(uintptr_t)p.pixels;
-		uint32_t *dst = (uint32_t *)scaled;
-
-		for (uint32_t y = 0; y < 1624; y++) {
-			uint32_t sy = (uint32_t)((uint64_t)y * p.height / 1624);
-			for (uint32_t x = 0; x < 750; x++) {
-				uint32_t sx = (uint32_t)((uint64_t)x * p.width / 750);
-				dst[y * 750 + x] = src[(size_t)sy * (p.stride / 4) + sx];
-			}
-		}
-		p.pixels = (uint64_t)(uintptr_t)scaled;
-		p.stride = 750 * 4;
-		p.width = 750;
-		p.height = 1624;
+	pixels = eagl_panel_750(e);
+	if (pixels == NULL) {
+		return;
 	}
+	p.pixels = (uint64_t)(uintptr_t)pixels;
+	p.stride = 750 * 4;
+	p.width = 750;
+	p.height = 1624;
 	if (ioctl(gpu_fd, EAGL_GPU_PUSH, &p) != 0) {
 		static int once;
 		if (!once) {
@@ -1561,6 +1604,7 @@ frame_end(struct eagl *e, bool finished)
 	 * is 0, so a push inside the block above would never happen.
 	 */
 	eagl_gpu_push(e);
+	eagl_static_patch(e);
 	/* P1'''': right after the host's rows (or the hand copy) went into the display surface. */
 	if (e->frames < 3 || e->frames % 50 == 0) {
 		surface_say(e, "after", e->frames + 1);
@@ -4880,6 +4924,7 @@ install(void)
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		gkbf_on = strstr(arguments, "gkbf=1") != NULL;
+		glwire_static_patch = strstr(arguments, "glwire_static_patch=1") != NULL;
 		if (gkbf_on) {
 			vblur_on = 0;
 			group_vibrant_on = 0;

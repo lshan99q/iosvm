@@ -49,6 +49,14 @@ static int remote_dirty_upload(void);
 static int remote_ack_timeout_ms(void);
 static int remote_upload_scale(void);
 static int remote_enabled;
+
+/* Stage 24: one full-screen static patch (BGRA, 750x1624) sent before the first R, then only when
+ * its hash changes.  The host composites it over the replay result. */
+#define STATIC_PATCH_W 750
+#define STATIC_PATCH_H 1624
+static unsigned char static_patch_pixels[STATIC_PATCH_W * STATIC_PATCH_H * 4];
+static uint64_t static_patch_hash, static_patch_sent;
+static int static_patch_ready;
 static int remote_frames;
 static long remote_total_us;
 /* The picture the host draws: instead of sending it back, the host writes it into this buffer at
@@ -458,6 +466,27 @@ int
 eagl_remote_is_on(void)
 {
 	return remote_enabled;
+}
+
+void
+eagl_remote_static_patch(const void *pixels, int width, int height, size_t stride)
+{
+	uint64_t hash = 1469598103934665603ULL;
+
+	if (pixels == NULL || width != STATIC_PATCH_W || height != STATIC_PATCH_H ||
+	    stride < (size_t)STATIC_PATCH_W * 4) {
+		return;
+	}
+	for (int y = 0; y < height; y++) {
+		const unsigned char *row = (const unsigned char *)pixels + (size_t)y * stride;
+		memcpy(static_patch_pixels + (size_t)y * STATIC_PATCH_W * 4, row,
+		    (size_t)STATIC_PATCH_W * 4);
+		for (size_t i = 0; i < (size_t)STATIC_PATCH_W * 4; i++) {
+			hash = (hash ^ row[i]) * 1099511628211ULL;
+		}
+	}
+	static_patch_hash = hash;
+	static_patch_ready = 1;
 }
 
 /* For eagl.c: with this on, composing the frame here (the IOSurface refills, the panel upload)
@@ -982,6 +1011,22 @@ eagl_remote_flush(int width, int height)
 		remote_apply_ack_timeout(remote_fd);
 	}
 	started = remote_now_ms();
+	if (static_patch_ready && static_patch_hash != static_patch_sent) {
+		char patch[96];
+		size_t bytes = sizeof(static_patch_pixels);
+
+		snprintf(patch, sizeof(patch), "S 0 0 %d %d 0 %llu %zu\n",
+		    STATIC_PATCH_W, STATIC_PATCH_H, (unsigned long long)static_patch_hash, bytes);
+		if (send(remote_fd, patch, strlen(patch), 0) != (ssize_t)strlen(patch) ||
+		    send(remote_fd, static_patch_pixels, bytes, 0) != (ssize_t)bytes) {
+			close(remote_fd);
+			remote_fd = -1;
+			return 0;
+		}
+		static_patch_sent = static_patch_hash;
+		remote_say("hakios-remote: static patch %dx%d %zu B hash %llx sent\n",
+		    STATIC_PATCH_W, STATIC_PATCH_H, bytes, (unsigned long long)static_patch_hash);
+	}
 	/*
 	 * The surface when it could be translated (W3: the host writes the rows itself), otherwise the
 	 * packed buffer. The request line says which by its row stride: 0 means the picture is packed.
