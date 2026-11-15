@@ -241,3 +241,17 @@ md5 **b5d5b6722cb83fee03b4194369a475ae**。
 
 预期 `copying out` 从 71ms 降到 ~0，`frame_us` 153→~82ms（12fps）；完整性仍用 host
 `GLWIRE_DUMP` picture（bbox patch 仍在）。
+
+## 70ms copying-out 的真正来源：每帧缩 patch 源
+
+不是 `target_to_surface`（remote-only 已 `composition_off` 跳过 loop），而是
+`eagl_static_patch()` 每帧都调 `eagl_panel_750()`，把 1125×2436 最近邻缩到 750×1624
+（1.2M 像素、每个像素两次除法）。
+
+改成：frame 30 之后每 60 帧取一次补丁源。静态补丁本来就只发 1 次，没必要每帧缩。
+
+root：`/host/iosvm-work/root-stage24-patch60.apfs`，
+md5 **7ba8e9d950b1f81ea540eba180ad6c9e**。
+
+预期 `copying out` 70ms→~1ms，`frame_us` 147→~82ms（12fps）；第一块 patch 在 frame 30 之后，
+避免过渡帧白块。

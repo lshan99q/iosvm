@@ -495,11 +495,16 @@ void eagl_remote_static_patch(const void *pixels, int width, size_t stride);
 static void
 eagl_static_patch(struct eagl *e)
 {
+	static int last = -1;
 	unsigned char *pixels;
 
-	if (!glwire_static_patch) {
+	if (!glwire_static_patch || e->frames < 30) {
 		return;
 	}
+	if (last >= 0 && e->frames - last < 60) {
+		return;
+	}
+	last = (int)e->frames;
 	pixels = eagl_panel_750(e);
 	if (pixels != NULL) {
 		eagl_remote_static_patch(pixels, 750, 750 * 4);
