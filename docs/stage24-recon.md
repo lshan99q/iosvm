@@ -318,3 +318,37 @@ code 把 `eagl_static_patch()` 的 1125x2436→750x1624 缩放从「每帧」改
 1. 先确认还有哪一处每帧 ~48 ms 的整块拷贝（缩放已节流，应不是它）；
 2. 补丁源改为「guest 合成的那一帧」：例如 frame 30 时临时允许本地合成一次，取 patch，然后关掉合成；
 3. 或者干脆在 product 路径（guest 合成）里做补丁，remote-only 只做回放 —— 但那样 fps 回不到 10+。
+
+## hybrid（08:20，root 23c98e54）：补丁源仍是「早帧」，hash 没变
+
+code 改成「frame 30 临时本地合成一次取补丁」。
+
+| 项 | 结果 |
+|---|---|
+| 补丁 | `static patch 660x547 1444080 B hash **30c7aa5777e776c3**` —— **与之前白块版完全相同** |
+| frame_us（frames≥200，n=133） | 123,696 µs（和 patch60 一样） |
+| copying out | 48,488 µs（和 patch60 一样） |
+| waiting / handing | 1 / 23 µs |
+| fps | ~8.75（间隔 burst 18 fps） |
+
+→ **frame 30 太早**：那时（约开机 1–2 分钟）SpringBoard 的 UI 还没画出来，合成出来的仍是黑/白画面，
+所以 hash 与旧版一致、dump 里 bbox 仍是白的。UI 大约在 **frame 2000+**（开机 13–14 分钟）才出现。
+
+建议：补丁的种子帧不要用固定的 frame 30，改成
+- 用时间（例如 host 侧 700 s 之后的第一帧），或
+- 用「合成结果非空」判定（例如面板非黑像素比例 > 阈值），或
+- 直接用 `GLWIRE_DUMP` 里 host 已经写回的非空帧。
+
+另外：这次 `GLWIRE_DUMP_AT=1100` **没有生成文件**（/tmp/hyb 为空），与前面几发不一致，
+code 可以顺手确认 dump 的触发条件（是否因为 hybrid 下 panel 不再上传导致 `dump_once` 某条 early-return）。
+
+### 当前 fps 账本
+
+| 版本 | frame_us | copying out | fps |
+|---|---:|---:|---:|
+| census3（8b8a7477） | 153,275 | 71,419 | 7.25 |
+| patch60（7ba8e9d9） | 121,483 | 48,092 | **8.75** |
+| hybrid（23c98e54） | 123,696 | 48,488 | **8.75**（补丁源未修好） |
+
+目标 11 fps 需要 ≤91 ms：现在 123 ms = copying out 48 ms（host reply 等待，code 说可被双缓冲 async 解掉）
++ CA/其它 ~74 ms。若双缓冲能省 35–48 ms → ~80 ms ≈ 12 fps。
