@@ -1373,7 +1373,7 @@ frame_end(struct eagl *e, bool finished)
 		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 &&
 		    strstr(arguments, "virtio_gpu=2") != NULL) {
 			gpu_fd = open("/dev/hakios-gpu", O_RDWR);
-			gpu_on = gpu_fd >= 0;
+			gpu_on = gpu_fd >= 0 && !eagl_remote_no_local();
 			if (!gpu_on) {
 				say("hakios-gpu: virtio_gpu=2 but /dev/hakios-gpu: %s\n", strerror(errno));
 			}

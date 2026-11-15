@@ -115,3 +115,28 @@ QEMU_VARS=/tmp/vars-ff.fd \
 判据：guest 10.9 fps（remote-only 不本地合成），bbox 补丁后 QMP screendump 完整。
 若 SpringBoard 不出帧（21eea74b 现象），说明关闭合成会让 CA 不 end frame，需要另找
 remote-only 的 frame_end 触发点。
+
+## remote-only 下跳过 A3 空 panel
+
+remote-only 的 guest panel 是空的，A3 push 会把空内容送到 virtio-gpu scanout（screendump 全黑）。
+`eagl.c` 的 lazy init 改为：
+
+```c
+gpu_on = gpu_fd >= 0 && !eagl_remote_no_local();
+```
+
+即 remote-only 只走 host 回放，不做 A3 push。新 root：
+
+```text
+/host/iosvm-work/root-stage24-remote2.apfs
+md5 64354a12180c2aa900daefb197365ffb
+```
+
+完整性验证改用 **host 的 picture**（`GLWIRE_DUMP` 写出的 BGRA）而不是 virtio-gpu screendump；
+screendump 在 remote-only 下仍是 A2 测试图案（scanout 没被 host 回放写）。
+
+## fps 现状
+
+- host 回放 34–56 ms/帧（11.35 fps 已出现），guest 帧节拍 ~140 ms → guest 7 fps；
+- guest 每帧等 host reply（~35 ms）+ CA/commit，10.9 fps 需要 ~92 ms；
+- 下一步是原 23D 的 D2：把 reply 延后到下一帧开始，与 guest 下一帧重叠（仅 remote-only）。
