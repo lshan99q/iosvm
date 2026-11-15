@@ -227,3 +227,17 @@ remote-only 没有本地 draw，`e->in_frame` 一直 false；`frame_end()` 在
 root：`/host/iosvm-work/root-stage24-census3.apfs`，
 md5 **8b8a747746e9b50fc45ae3b6efc7acec**。
 期望 remote-only 每帧 `hakios-gl: frame N ... waiting ...`，`frame_us` ~140ms 可拆。
+
+## remote-only 跳过 4.8MB panel 读回（71ms）
+
+census3 显示 `copying out` 71ms（47%），是 remote-only 下仍做的 panel readback/upload。
+host 用 NO_PANEL 不需要这块 panel，已跳过：
+
+- `if (eagl_remote_no_local()) composition_off = 1;`，不再 `upload_changed_layers()`；
+- `target_to_surface()` 两处都加 `!eagl_remote_no_local()`。
+
+root：`/host/iosvm-work/root-stage24-nopanel.apfs`，
+md5 **b5d5b6722cb83fee03b4194369a475ae**。
+
+预期 `copying out` 从 71ms 降到 ~0，`frame_us` 153→~82ms（12fps）；完整性仍用 host
+`GLWIRE_DUMP` picture（bbox patch 仍在）。
