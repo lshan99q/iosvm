@@ -97,3 +97,31 @@ panel 内存被宿主 picture 覆盖 → `picture(N) vs panel(N+1) diff=0` 是**
 - 目标：bbox 面积 <25%、跨帧稳定 → 之后只补这块（565 约 0.35 MB，首帧一次）。
 
 证据：`logs/stage24/patch2/`（含 `home-complete.png`）。
+
+## bbox 版 static patch 测试（03:44，root 4901aa1d，host 4a186bd）
+
+`GLWIRE_STATIC_PATCH=1 NO_PANEL=1` + guest `glwire_static_patch=1`：
+
+- 握手：`static patch 660x547 1444080 B hash 84bced41... at 44,142`（两侧一致）✅
+- 完整性：screendump 完整主屏（两 widget、全部图标、Search、dock 4 图标）✅
+- **重发大幅下降**：全程 48 次 / 1120 帧（全屏版是 62 次 / 75 帧），60 s 窗口内仅 1 次 ✅
+- **fps**：1120 帧的间隔分布 p25=0.20s(5.0)、median=0.24s(4.2)、p75=0.33s(3.0)；
+  60 s 窗口 158 帧 = 2.63（该窗口含大段 idle）；瞬时最好 0.09s = **10.6 fps**（burst）
+
+| 配置 | 中位 fps | 重发 | 完整 |
+|---|---:|---|---|
+| 无补丁（产品路径） | 3.45–4.76 | — | ✅ |
+| 全屏补丁 | **1.0** | 62/75 帧 | ✅ |
+| bbox 补丁 | **4.2**（p25 5.0，burst 10.6） | 48/1120 帧 | ✅ |
+
+→ bbox 补丁把「重发风暴」解决了，fps 回到基线（4 左右），但**没到 10.9**。
+
+## 结论：10.9 fps 的前提
+
+现有 root 带 `/etc/glwire_local` → **guest 仍在本地合成 + 每帧上传 panel**（~245 ms/帧），
+host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不合成、只显示宿主回放** 的路径
+（remote-only），即：`/bin/glremote_on` 有、`/etc/glwire_local` **没有** + netcfg 通 + host NO_PANEL + 补丁。
+
+所以下一步要 code 出 **remote-only + netcfg** 的 root（去掉 /etc/glwire_local），
+再验「回放 + bbox 补丁」是否既 10.9 fps 又完整。
+证据：`logs/stage24/bbox/`（home-complete.png 为完整主屏）。
