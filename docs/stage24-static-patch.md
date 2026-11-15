@@ -213,3 +213,17 @@ md5 d04f080ae4d18b2d1a7c1ba745fe4193
 
 census 强制移到 `frame_end()` 开头（parse 时 remote_only 还没设置），remote-only 每帧应有
 `hakios-gl: frame N ...`。
+
+## census 0 行根因
+
+remote-only 没有本地 draw，`e->in_frame` 一直 false；`frame_end()` 在
+`if (!e->in_frame) return;` 处提前返回，census/`frame_us` 那段根本没执行。
+
+修法：
+- remote-only 时在 `frame_end()` 开头置 `in_frame=true`；
+- `frame_us` 的 `began` 在每帧末尾更新，下一帧跨度包含 CA + host 往返：
+  `if (eagl_remote_no_local()) e->began = after;`。
+
+root：`/host/iosvm-work/root-stage24-census3.apfs`，
+md5 **8b8a747746e9b50fc45ae3b6efc7acec**。
+期望 remote-only 每帧 `hakios-gl: frame N ... waiting ...`，`frame_us` ~140ms 可拆。

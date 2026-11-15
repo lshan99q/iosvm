@@ -1368,6 +1368,13 @@ frame_end(struct eagl *e, bool finished)
 {
 	if (eagl_remote_no_local()) {
 		frame_lines = 1;        /* remote-only: census must be available */
+		if (!e->in_frame) {
+			/* no local draw calls frame_begin(); the host-only path must still census */
+			e->in_frame = true;
+			if (e->began == 0) {
+				e->began = now_us();
+			}
+		}
 	}
 	if (gpu_fd < 0) {
 		char arguments[1024];
@@ -1679,6 +1686,9 @@ frame_end(struct eagl *e, bool finished)
 	e->last_draws = e->draws;
 	e->calls = e->draws = e->triangles = e->uploads = e->clears = 0;
 	e->upload_bytes = e->attaching = e->flushing = 0;
+	if (eagl_remote_no_local()) {
+		e->began = after;       /* remote-only: the next frame_us spans CA + round trip */
+	}
 }
 
 #ifndef GL_BLEND
