@@ -52,6 +52,11 @@ static EGLDisplay display;
 static EGLConfig config;
 static struct client clients[MAX_CLIENTS];
 static unsigned long long frames_replayed;
+
+/* Stage 24: a full-screen BGRA static patch sent once before an R, composited over the replay. */
+static unsigned char *static_patch_pixels;
+static int static_patch_w, static_patch_h;
+static int static_patch_on, static_patch_init, static_patch_have;
 /* The picture of the frame before: the guest's uploaded panel is the surface as of the previous
  * present (measured: picture(N) == panel(N+1) for every animating frame of a --no-panel run), so
  * the acceptance that "the host drew what the guest drew" is read against this one. */
@@ -3717,19 +3722,54 @@ serve_frame(struct client *client)
 	int panel_known = 0;
 
 	t0 = now_seconds();
-	while (at < (int)sizeof(line) - 1) {
-		char c;
-		ssize_t got = recv(client->fd, &c, 1, 0);
-
-		if (got != 1) {
-			return -1;
-		}
-		if (c == '\n') {
-			break;
-		}
-		line[at++] = c;
+	if (!static_patch_init) {
+		static_patch_init = 1;
+		static_patch_on = getenv("GLWIRE_STATIC_PATCH") != NULL;
 	}
-	line[at] = '\0';
+	for (;;) {
+		int sx, sy, sw, sh, sformat;
+		unsigned long long shash;
+		size_t slen;
+
+		at = 0;
+		while (at < (int)sizeof(line) - 1) {
+			char c;
+			ssize_t got = recv(client->fd, &c, 1, 0);
+
+			if (got != 1) {
+				return -1;
+			}
+			if (c == '\n') {
+				break;
+			}
+			line[at++] = c;
+		}
+		line[at] = '\0';
+		if (sscanf(line, "S %d %d %d %d %d %llu %zu", &sx, &sy, &sw, &sh, &sformat,
+		    &shash, &slen) == 7) {
+			if (!static_patch_on || sformat != 0 || sw <= 0 || sh <= 0 ||
+			    slen != (size_t)sw * (size_t)sh * 4) {
+				fprintf(stderr, "host_glwire: bad static patch '%s'\n", line);
+				return -1;
+			}
+			free(static_patch_pixels);
+			static_patch_pixels = malloc(slen);
+			if (static_patch_pixels == NULL ||
+			    !recv_all(client->fd, static_patch_pixels, slen)) {
+				free(static_patch_pixels);
+				static_patch_pixels = NULL;
+				return -1;
+			}
+			static_patch_w = sw;
+			static_patch_h = sh;
+			static_patch_have = 1;
+			printf("host_glwire: static patch %dx%d %zu B hash %llx at %d,%d\n",
+			    sw, sh, slen, shash, sx, sy);
+			fflush(stdout);
+			continue;
+		}
+		break;
+	}
 	if (sscanf(line, "R %d %d %zu %zu %d %d %d %d %d %d %d %d", &width, &height, &records_bytes, &frame_bytes,
 	    &segment_count, &row_bytes, &segment_count2, &row_bytes2, &version, &dirty_wanted,
 	    &rgb565_wanted, &request_rle) < 4) {
@@ -4237,6 +4277,9 @@ serve_frame(struct client *client)
 			fwrite(picture, 1, frame_bytes, file);
 			fclose(file);
 		}
+	}
+	if (static_patch_on && static_patch_have && width == static_patch_w && height == static_patch_h) {
+		memcpy(picture, static_patch_pixels, (size_t)width * (size_t)height * 4);
 	}
 	/*
 	 * When the guest named its picture buffer's physical memory, write the picture there: the
