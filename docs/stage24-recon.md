@@ -66,3 +66,34 @@ panel 内存被宿主 picture 覆盖 → `picture(N) vs panel(N+1) diff=0` 是**
 
 → 需要 code 查 host 的 `S` 记录解析/读取顺序（补丁是否在首个 R 之前被读走），以及 guest 的发送是否阻塞。
 证据：`logs/stage24/patch/`。
+
+## 侦察第三发（AT=1050，NO_INPLACE）：panel dump 仍不可靠
+
+- `picture(N) vs panel(N+1)` diff=0，`picture(N+1) vs panel(N+1)` diff=78,990 px (6.49%)；
+- 但 panel PNG 只有 4.8 KB（近似纯色面）——**NO_INPLACE 下 panel 内存不可信**
+  （guest 没上传或已被回包覆盖），不能再用它当「完整面板」；
+- 结论：**「完整面板」应该用 QMP screendump 取**（读 guest 真实 framebuffer），
+  回放帧用 GLWIRE_DUMP 的 picture；两者相隔约 1 帧，抖动需用「静置期间连续两张 screendump 相同」来确认。
+- 运行统计 `hostframes=543 MATCH=63 DIFF=480`。
+
+## static patch 修复版首测（03:23，root 490c8258，host df228f8）
+
+`GLWIRE_STATIC_PATCH=1 NO_PANEL=1` + guest `glwire_static_patch=1`，NOUI_BY=1400：
+
+- **握手成功**：
+  - guest：`hakios-remote: static patch 750x1624 4872000 B hash 668796ddfa0b5bef sent`
+  - host：`host_glwire: static patch 750x1624 4872000 B hash 668796ddfa0b5bef at 0,0`
+- **完整性 ✅**：screendump 是完整主屏（两 widget、全部图标、Clock、Search、dock 4 图标）；
+- **fps ❌：60 s 窗口 60 帧 = 1.00 fps**（目标 ≥10）；
+- 原因：**补丁每帧都重发** —— 整屏 hash 覆盖了动画内容，任何像素变化都触发 4.8 MB 重传；
+  实测 62 次重发 / 约 75 帧，4.8 MB × 1/s 直接把 fps 压到 1.0。
+
+### 结论 / 下一步
+
+- 全屏补丁**方向正确但粒度错误**：应只补「回放缺失的静态区域」（掩码），
+  且 hash 只覆盖掩码 bbox 内的像素；否则任何动画都会触发整屏重传；
+- 侦察的任务因此变成「把掩码定到静置主屏上」：用 QMP screendump 作完整面板、
+  GLWIRE_DUMP picture 作回放帧，在静置期（连续两张 screendump 相同）配对求差。
+- 目标：bbox 面积 <25%、跨帧稳定 → 之后只补这块（565 约 0.35 MB，首帧一次）。
+
+证据：`logs/stage24/patch2/`（含 `home-complete.png`）。
