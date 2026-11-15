@@ -1371,6 +1371,12 @@ surface_say(struct eagl *e, const char *when, unsigned frame)
 static void
 frame_end(struct eagl *e, bool finished)
 {
+	static int composed_once;
+	int allow_local = eagl_remote_no_local() && !composed_once && e->frames >= 30;
+
+	if (allow_local) {
+		composed_once = 1;
+	}
 	if (eagl_remote_no_local()) {
 		frame_lines = 1;        /* remote-only: census must be available */
 		if (!e->in_frame) {
@@ -1414,7 +1420,7 @@ frame_end(struct eagl *e, bool finished)
 	 * picture the host wrote into memory this side reads -- plus the layers, which the host cannot
 	 * have unless they are sent (W1.5, upload_changed_layers()).
 	 */
-	if (eagl_remote_no_local()) {
+	if (eagl_remote_no_local() && !allow_local) {
 		composition_off = 1;
 		/* The host is drawing this frame with NO_PANEL; the local 4.8MB panel read-back and
 		 * layer upload are pure cost and must not run. */
@@ -1423,7 +1429,7 @@ frame_end(struct eagl *e, bool finished)
 	}
 	before = now_us();
 	for (unsigned i = 0; i < e->image_count && !composition_off; i++) {
-		if (!eagl_remote_no_local() && e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
+		if ((!eagl_remote_no_local() || allow_local) && e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
 			in_place++;
 			glFlush();                              /* (also after a glFinish: the copy is new since) */
@@ -1452,7 +1458,7 @@ frame_end(struct eagl *e, bool finished)
 	}
 	waited = now_us();
 	for (unsigned i = 0; i < e->image_count && !composition_off; i++) {
-		if (e->images[i].target && e->images[i].drawn) {
+		if ((!eagl_remote_no_local() || allow_local) && e->images[i].target && e->images[i].drawn) {
 			copied += !e->images[i].shared;
 			target_to_surface(e, &e->images[i]);
 			if (shown_texture != 0) {

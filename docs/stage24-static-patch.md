@@ -255,3 +255,23 @@ md5 **7ba8e9d950b1f81ea540eba180ad6c9e**。
 
 预期 `copying out` 70ms→~1ms，`frame_us` 147→~82ms（12fps）；第一块 patch 在 frame 30 之后，
 避免过渡帧白块。
+
+## hybrid：frame 30 本地合成一次，取完整 patch
+
+remote-only 下 guest 不合成 panel，`eagl_static_patch()` 从 panel 取到的就是未合成/被覆盖内容，
+bbox 变白。改成 hybrid：
+
+- frame 30（`e->frames >= 30` 第一次）临时允许本地合成：不置 `composition_off`，
+  跑 `upload_changed_layers()` 与两处 `target_to_surface()`；
+- 同一帧 `eagl_static_patch()` 取到完整 panel，发 bbox；
+- 之后恢复 remote-only，patch 保持。
+
+root：`/host/iosvm-work/root-stage24-hybrid.apfs`，
+md5 **23c98e549064c3784e57c81885bf6eed**。
+
+## 剩余 48ms 归因
+
+census 的 `waiting` 是 `glFinish` 等待（2µs），不是 host reply。`copying out` 是
+`waited` 之后到 `frame_end` 结束，包含 `eagl_remote_flush()` 的 send + **recv host reply**。
+所以 D2 仍有 ~35–48ms 可省；之前 async 的 79 refs 是同一个 surface 的 seed 竞争，
+双缓冲后才能安全启用。
