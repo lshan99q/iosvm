@@ -229,3 +229,29 @@ host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不�
 
 1. code 修 census（remote-only 下每帧一行 `hakios-gl: frame N ... waiting ...`）；
 2. 有了 census 再决定：wait≈35ms → 双缓冲 async 值得做；CA 100ms+ → 先减 CA。
+
+## census3（06:52，root 8b8a7477）：140 ms 终于拆开了
+
+同步 remote-only + patch，census 每 20 帧一行（frames ≥200，n=63）：
+
+| 分量 | median | p25 | p75 |
+|---|---:|---:|---:|
+| **frame_us** | **153,275 µs** | 83,749 | 168,589 |
+| waiting（等宿主 reply） | **2 µs** | 1 | 2 |
+| copying out（面板 4.8 MB 拷贝/上传） | **71,419 µs** | 68,815 | 74,246 |
+| handing on | 29 µs | 17 | 34 |
+| 其它（CA/commit） | **81,184 µs** | 8,646 | 93,037 |
+
+### 结论（与假设相反，但很有用）
+
+1. **waiting ≈ 0**，不是 35 ms —— 同步版根本没有在等宿主 reply；
+   → **D2 异步 reply 没有收益，别做了**（之前 79 refs 的 db 也是 async 引入的）；
+2. 153 ms = **copying out 71 ms（47%）+ CA/其它 81 ms（53%）**；
+3. **只要干掉那 71 ms 的 panel 拷贝/上传，frame_us ≈ 82 ms ≈ 12 fps** —— 直接达标（p25 已经是 84 ms）；
+4. remote-only 下宿主用 `NO_PANEL` 根本不用这块 panel，这个上传是**纯浪费**：
+   在 remote-only 直接跳过 panel 上传（guest 侧一个条件）即可。
+
+### 下一步（给 code）
+
+- `eagl.c`：`remote_only` 时不 upload 面板（跳过那 4.8 MB 拷贝）→ 预期 12 fps；
+- 之后若还要再快，再看 81 ms 的 CA/其它（p25 已到 8.6 ms，说明 CA 本身波动很大）。
