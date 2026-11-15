@@ -342,3 +342,32 @@ host_glwire: offline static patch 660x547 from /tmp/patch.bgra
 `--save` 目录在 main 里先创建。host 重编即可，guest/root 不变。
 
 这样 remote-only 下可以直接看 host picture（in-place 写回内容），也是完整性最终出口。
+
+## 整屏离线补丁（bbox 太小）
+
+host 现在按文件大小推导离线补丁矩形：
+
+- size == 750×1624×4（4,872,000）→ (0,0) 750×1624；
+- 否则默认 (44,142) 660×547；
+- 显式覆盖：`GLWIRE_STATIC_PATCH_RECT=x,y,w,h`。
+
+整屏试：
+
+```bash
+python3 - <<'PY'
+from PIL import Image
+im = Image.open('logs/stage24/bbox/home-complete.png').convert('RGBA')
+open('/tmp/patch-full.bgra', 'wb').write(im.tobytes('raw', 'BGRA'))
+PY
+
+GLWIRE_STATIC_PATCH_FILE=/tmp/patch-full.bgra NO_PANEL=1 \
+  GLWIRE_DUMP=/tmp/final/full GLWIRE_DUMP_AT=1100 ./host_glwire
+```
+
+host 日志：
+
+```text
+host_glwire: offline static patch 750x1624 at 0,0 from /tmp/patch-full.bgra
+```
+
+A2 的 y>689 缺失由此补上；代价是整屏冻结动画（widget 等），先用于完整性/验收。
