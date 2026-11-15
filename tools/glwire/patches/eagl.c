@@ -2312,6 +2312,21 @@ number_text(const float *values, size_t from, size_t count)
 }
 
 static void *ca_context;                /* CoreAnimation's GLContext */
+
+/* Boot-arg gkbf=1: leave out CA's blur chain (ds8 28, vrd 38, vrb 39, sb3 40).  Off by default. */
+static int gkbf_on;
+
+static bool
+gkbf_skips_this(void)
+{
+	unsigned function = ca_context != NULL ?
+	    *(*(uint8_t **)((char *)ca_context + 0x10) + 0x10) : 90;
+
+	return gkbf_on && (function == FUNCTION_DOWNSAMPLE_8 ||
+	    function == FUNCTION_VARIABLE_DOWNSAMPLE ||
+	    function == FUNCTION_VARIABLE_BLUR ||
+	    function == FUNCTION_SHADOW_BLUR);
+}
 static GLfloat function_values[90][20];
 static uint8_t function_given[90];
 
@@ -3758,7 +3773,9 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 		group_draw_end(e, enabled);
 	} else {
 		plain = plain_draw_begin(e, enabled);
-		glDrawArrays(mode, first, count);
+		if (!gkbf_skips_this()) {
+			glDrawArrays(mode, first, count);
+		}
 		if (plain) {
 			plain_draw_end(e, enabled);
 		}
@@ -3799,7 +3816,9 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 		group_draw_end(e, enabled);
 	} else {
 		plain = plain_draw_begin(e, enabled);
-		glDrawElements(mode, count, type, indices);
+		if (!gkbf_skips_this()) {
+			glDrawElements(mode, count, type, indices);
+		}
 		if (plain) {
 			plain_draw_end(e, enabled);
 		}
@@ -4860,6 +4879,11 @@ install(void)
 		}
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
+		gkbf_on = strstr(arguments, "gkbf=1") != NULL;
+		if (gkbf_on) {
+			vblur_on = 0;
+			group_vibrant_on = 0;
+		}
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
 
