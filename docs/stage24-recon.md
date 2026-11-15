@@ -255,3 +255,31 @@ host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不�
 
 - `eagl.c`：`remote_only` 时不 upload 面板（跳过那 4.8 MB 拷贝）→ 预期 12 fps；
 - 之后若还要再快，再看 81 ms 的 CA/其它（p25 已到 8.6 ms，说明 CA 本身波动很大）。
+
+## nopanel 版（07:26，root b5d5b672）：copying out **没有**变化
+
+code 的改动：remote-only 下只置 `composition_off=1`，不再 `upload_changed_layers()`，两处
+`target_to_surface()` 加 `!eagl_remote_no_local()`。
+
+实测（frames≥200，n=95）：
+
+| 分量 | census3（8b8a7477） | nopanel（b5d5b672） |
+|---|---:|---:|
+| frame_us | 153,275 µs | **147,358 µs** |
+| **copying out** | 71,419 µs | **70,310 µs**（几乎没动） |
+| waiting | 2 µs | 2 µs |
+| handing on | 29 µs | 28 µs |
+| fps | ~7.25 | ~6.2 |
+
+- 两个 root 的 `libhakios.gl.dylib` 确实不同（93419a1a vs 3135617c），所以**不是没重建**；
+- 但 `copying out` 没变 → **这 71 ms 不是 `upload_changed_layers()`/`target_to_surface()` 的开销**，
+  census 里的「copying out」计时应该包在别的地方（需要 code 确认计时点到底在哪个函数）；
+- 另外：这次 `GLWIRE_DUMP_AT=1050` 的宿主 picture 是 **白块 + 杂色**（`logs/stage24/nopanel/dump-frame.png`），
+  不像静置主屏；怀疑「跳过 panel 上传」后 **bbox 补丁的数据源（panel 表面）不再更新 → 变成陈旧/白色**，
+  也可能只是过渡帧。两个假设需要分开验证。
+
+### 给 code
+
+1. census 的 `copying out` 计时点在哪？（改了 upload/target_to_surface 都没让 71ms 变化）
+2. 跳过 panel 上传后，static patch 的数据源是否也失效了？（patch 是从 panel 表面取的？）
+   若是，应该只跳过「读回发给宿主」，不要跳过表面的更新。
