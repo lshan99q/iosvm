@@ -290,3 +290,17 @@ md5 **4bd10564583df289ac964505a36d376c**。
 
 `GLWIRE_DUMP_AT` hybrid 下没生成文件，先不阻塞：remote-only 没有 panel upload，dump_once 的
 early-return 需要单独看；完整性仍可用 host picture 的其它 dump 路径。
+
+## 补丁源改用内容阈值 + 复取日志
+
+frame 2000 仍是白块，UI 更晚。`eagl_static_patch()` 现在：
+
+- frame 2000 起每 60 帧取一次 `eagl_panel_750()`；
+- 对 750×1624 的样本每 4 像素统计非黑（`&0xFFFFFF != 0`）；
+- 非黑 < 3000（约 1% 的采样）→ `patch skip frame N nonblack=...`，不发送，60 帧后重试；
+- 通过 → `patch take frame N nonblack=...` 并发送 bbox。
+
+root：`/host/iosvm-work/root-stage24-content.apfs`，
+md5 **3b79e1896a436a02ec1a2513c79e9e51**。
+
+这样 UI 一出现（frame 4000+）就会自动换掉白块 patch，不用再猜固定帧。

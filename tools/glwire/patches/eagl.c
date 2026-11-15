@@ -507,6 +507,19 @@ eagl_static_patch(struct eagl *e)
 	last = (int)e->frames;
 	pixels = eagl_panel_750(e);
 	if (pixels != NULL) {
+		const uint32_t *px = (const uint32_t *)pixels;
+		size_t nonblack = 0;
+
+		for (size_t i = 0; i < 750 * 1624; i += 4) {
+			if ((px[i] & 0xFFFFFFu) != 0) {
+				nonblack++;
+			}
+		}
+		if (nonblack < 3000) {
+			say("hakios-gpu: patch skip frame %u nonblack=%zu\n", e->frames, nonblack);
+			return;
+		}
+		say("hakios-gpu: patch take frame %u nonblack=%zu\n", e->frames, nonblack);
 		eagl_remote_static_patch(pixels, 750, 750 * 4);
 	}
 }
