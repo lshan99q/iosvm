@@ -283,3 +283,38 @@ code 的改动：remote-only 下只置 `composition_off=1`，不再 `upload_chan
 1. census 的 `copying out` 计时点在哪？（改了 upload/target_to_surface 都没让 71ms 变化）
 2. 跳过 panel 上传后，static patch 的数据源是否也失效了？（patch 是从 panel 表面取的？）
    若是，应该只跳过「读回发给宿主」，不要跳过表面的更新。
+
+## patch60（07:50，root 7ba8e9d9）：fps 8.75，但**补丁源是白的**
+
+code 把 `eagl_static_patch()` 的 1125x2436→750x1624 缩放从「每帧」改成「frame 30 之后每 60 帧」。
+
+| 分量（frames≥200，n=118） | census3 | nopanel | **patch60** |
+|---|---:|---:|---:|
+| frame_us | 153,275 | 147,358 | **121,483 µs** |
+| copying out | 71,419 | 70,310 | **48,092 µs** |
+| waiting | 2 | 2 | 2 µs |
+| handing on | 29 | 28 | 24 µs |
+| 其它（CA） | 81,184 | — | **74,052 µs**（p25 4,220 / p75 98,978） |
+| fps（60 s 窗口） | ~7.25 | ~6.2 | **8.75**（525 帧） |
+
+- 缩放节流救回 ~22 ms（71→48），但 **copying out 仍有 ~48 ms** → 说明还有一处每帧整块拷贝；
+- fps 从 7.25 升到 **8.75**，接近但仍未到 11–12。
+
+### 关键问题：remote-only 下补丁源是白的
+
+这次 `GLWIRE_DUMP_AT=1050` 的宿主 picture（`logs/stage24/patch60/dump-frame.png`）：
+
+- 状态栏正常（`rdar:45025538`），但 **bbox (44,142)-(703,689) 整块是白的**，下方是黑；
+- 解释：remote-only 下 guest **不合成 panel**（`composition_off`），host 又把 picture 写回同一个 surface；
+  `eagl_static_patch()` 从 panel 取源 → 取到的就是「未合成/已被覆盖」的内容（白/陈旧）。
+
+→ **架构矛盾**：快路径（remote-only，guest 不合成）= 没有完整 panel 可补；
+  完整路径（glwire_local，guest 合成）= 慢（copying out + CA）。
+  「回放 + 静态补丁」要成立，必须是 **混合**：先让 guest 合成一帧（或几帧）把补丁源填上，
+  再切 remote-only 并冻结补丁 —— 不能全程 remote-only。
+
+### 给 code 的建议
+
+1. 先确认还有哪一处每帧 ~48 ms 的整块拷贝（缩放已节流，应不是它）；
+2. 补丁源改为「guest 合成的那一帧」：例如 frame 30 时临时允许本地合成一次，取 patch，然后关掉合成；
+3. 或者干脆在 product 路径（guest 合成）里做补丁，remote-only 只做回放 —— 但那样 fps 回不到 10+。
