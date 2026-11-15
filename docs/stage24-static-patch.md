@@ -72,3 +72,20 @@ host_glwire: static patch 750x1624 4872000 B hash 75bcd15 at 0,0
 ```
 
 同一个 root 490c8258 即可重跑，host 重新 `make host_glwire`。
+
+## bbox 版本（2026-11-15）
+
+按 exp 的掩码 bbox **(44,142) 660×547** 收窄：
+
+- guest 只取 panel 的这块，`S 44 142 660 547 0 <hash> 1444080\n` + 1,444,080 B；
+- hash 只算 bbox 内像素，动画区变化不再触发 4.8 MB 重传；
+- host 按 (x,y,w,h) 逐行覆盖，不再整屏 memcpy。
+
+host 本地验证：
+
+```text
+host_glwire: static patch 660x547 1444080 B hash 75bcd15 at 44,142
+```
+
+root：`/host/iosvm-work/root-stage24-bbox.apfs`，
+md5 **4901aa1df0c854ce683554afd26d5e31**。host 需重新 `make host_glwire`。

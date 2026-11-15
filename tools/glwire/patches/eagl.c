@@ -490,7 +490,7 @@ eagl_panel_750(struct eagl *e)
 	return eagl_panel_750_buf;
 }
 
-void eagl_remote_static_patch(const void *pixels, int width, int height, size_t stride);
+void eagl_remote_static_patch(const void *pixels, int width, size_t stride);
 
 static void
 eagl_static_patch(struct eagl *e)
@@ -502,7 +502,7 @@ eagl_static_patch(struct eagl *e)
 	}
 	pixels = eagl_panel_750(e);
 	if (pixels != NULL) {
-		eagl_remote_static_patch(pixels, 750, 1624, 750 * 4);
+		eagl_remote_static_patch(pixels, 750, 750 * 4);
 	}
 }
 

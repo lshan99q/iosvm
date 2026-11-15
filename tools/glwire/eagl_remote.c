@@ -52,8 +52,10 @@ static int remote_enabled;
 
 /* Stage 24: one full-screen static patch (BGRA, 750x1624) sent before the first R, then only when
  * its hash changes.  The host composites it over the replay result. */
-#define STATIC_PATCH_W 750
-#define STATIC_PATCH_H 1624
+#define STATIC_PATCH_X 44
+#define STATIC_PATCH_Y 142
+#define STATIC_PATCH_W 660
+#define STATIC_PATCH_H 547
 static unsigned char static_patch_pixels[STATIC_PATCH_W * STATIC_PATCH_H * 4];
 static uint64_t static_patch_hash, static_patch_sent;
 static int static_patch_ready;
@@ -469,16 +471,18 @@ eagl_remote_is_on(void)
 }
 
 void
-eagl_remote_static_patch(const void *pixels, int width, int height, size_t stride)
+eagl_remote_static_patch(const void *pixels, int width, size_t stride)
 {
 	uint64_t hash = 1469598103934665603ULL;
+	const unsigned char *base = pixels;
 
-	if (pixels == NULL || width != STATIC_PATCH_W || height != STATIC_PATCH_H ||
-	    stride < (size_t)STATIC_PATCH_W * 4) {
+	if (base == NULL || width < STATIC_PATCH_X + STATIC_PATCH_W ||
+	    stride < (size_t)width * 4) {
 		return;
 	}
-	for (int y = 0; y < height; y++) {
-		const unsigned char *row = (const unsigned char *)pixels + (size_t)y * stride;
+	for (int y = 0; y < STATIC_PATCH_H; y++) {
+		const unsigned char *row = base + (size_t)(STATIC_PATCH_Y + y) * stride +
+		    (size_t)STATIC_PATCH_X * 4;
 		memcpy(static_patch_pixels + (size_t)y * STATIC_PATCH_W * 4, row,
 		    (size_t)STATIC_PATCH_W * 4);
 		for (size_t i = 0; i < (size_t)STATIC_PATCH_W * 4; i++) {
@@ -1015,8 +1019,9 @@ eagl_remote_flush(int width, int height)
 		char patch[96];
 		size_t bytes = sizeof(static_patch_pixels);
 
-		snprintf(patch, sizeof(patch), "S 0 0 %d %d 0 %llu %zu\n",
-		    STATIC_PATCH_W, STATIC_PATCH_H, (unsigned long long)static_patch_hash, bytes);
+		snprintf(patch, sizeof(patch), "S %d %d %d %d 0 %llu %zu\n",
+		    STATIC_PATCH_X, STATIC_PATCH_Y, STATIC_PATCH_W, STATIC_PATCH_H,
+		    (unsigned long long)static_patch_hash, bytes);
 		if (send(remote_fd, patch, strlen(patch), 0) != (ssize_t)strlen(patch) ||
 		    send(remote_fd, static_patch_pixels, bytes, 0) != (ssize_t)bytes) {
 			close(remote_fd);

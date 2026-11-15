@@ -55,7 +55,7 @@ static unsigned long long frames_replayed;
 
 /* Stage 24: a full-screen BGRA static patch sent once before an R, composited over the replay. */
 static unsigned char *static_patch_pixels;
-static int static_patch_w, static_patch_h;
+static int static_patch_x, static_patch_y, static_patch_w, static_patch_h;
 static int static_patch_on, static_patch_init, static_patch_have;
 /* The picture of the frame before: the guest's uploaded panel is the surface as of the previous
  * present (measured: picture(N) == panel(N+1) for every animating frame of a --no-panel run), so
@@ -3760,6 +3760,8 @@ serve_frame(struct client *client)
 				static_patch_pixels = NULL;
 				return -1;
 			}
+			static_patch_x = sx;
+			static_patch_y = sy;
 			static_patch_w = sw;
 			static_patch_h = sh;
 			static_patch_have = 1;
@@ -4278,8 +4280,15 @@ serve_frame(struct client *client)
 			fclose(file);
 		}
 	}
-	if (static_patch_on && static_patch_have && width == static_patch_w && height == static_patch_h) {
-		memcpy(picture, static_patch_pixels, (size_t)width * (size_t)height * 4);
+	if (static_patch_on && static_patch_have &&
+	    static_patch_x >= 0 && static_patch_y >= 0 &&
+	    static_patch_x + static_patch_w <= width && static_patch_y + static_patch_h <= height) {
+		for (int y = 0; y < static_patch_h; y++) {
+			memcpy(picture + ((size_t)(static_patch_y + y) * (size_t)width +
+			    (size_t)static_patch_x) * 4,
+			    static_patch_pixels + (size_t)y * (size_t)static_patch_w * 4,
+			    (size_t)static_patch_w * 4);
+		}
 	}
 	/*
 	 * When the guest named its picture buffer's physical memory, write the picture there: the
