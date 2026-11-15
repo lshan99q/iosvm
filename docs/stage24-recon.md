@@ -208,3 +208,24 @@ host 回放再快也被这一步拖住。计划的 10.91 fps 来自 **guest 不�
 2. census（`frame_lines`）在 remote-only 下仍不打印，需要继续查（是否 `frame_end` 的 census 分支在
    remote-only 早退）；
 3. 下一步建议：先把 refs=79 修回 0（这是当前最大的开销），再谈 async 的 waiting 拆分与 D2 收益。
+
+## sync-census 验证（06:24，root d04f080a）
+
+同步 + 强制 census（`glwire_static_patch=1`，host STATIC_PATCH+NO_PANEL，无 glasync）：
+
+| 项 | 结果 |
+|---|---|
+| refs | **0** ✅（回归修复） |
+| host 每帧 total | 43.2 ms（rec 2.7、replay 0.5、read 0.7、panel 36.0） |
+| fps | 60 s 窗口 **435 帧 = 7.25**；间隔分布 p10=0.080(12.5)、p25=0.080(12.5)、median=0.150(6.7)、p75=0.160(6.25) |
+| patch 重发 | 1 |
+| **census** | **仍然 0 行** ❌（全串口没有 `waiting for the picture` / `handing on` / `hakios-gl: frame N`） |
+
+→ refs 修好了、fps 回到 7.25（且 p25 已在 12.5 fps），但 **eagl 的 census 在 remote-only 下依旧不打印**，
+140 ms 的拆分仍然拿不到数据。code 需要确认 `frame_end()` 里 census 的强制点是否真的走到（可能整段在
+`eagl_remote_no_local()` 分支外/被 early-return 挡掉）。
+
+### 下一步
+
+1. code 修 census（remote-only 下每帧一行 `hakios-gl: frame N ... waiting ...`）；
+2. 有了 census 再决定：wait≈35ms → 双缓冲 async 值得做；CA 100ms+ → 先减 CA。
