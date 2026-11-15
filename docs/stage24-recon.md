@@ -430,3 +430,36 @@ host_glwire: offline static patch 660x547 from /tmp/patch.bgra
 - 离线补丁**方向可行**：不依赖 guest panel、fps 与 patch60 同级（8.2–8.75）；
 - 但「画面是否完整」还没有可用的观测手段，需要 code 修 dump/save；
 - fps 要继续往上，仍是那 46 ms 的 host reply 等待（双缓冲 async）。
+
+## 完整性验证（10:37，main 535892e，离线补丁 + DUMP）：**只补了上半屏**
+
+dump 修复后（父目录自动创建）一次成功：
+
+```text
+host_glwire: offline static patch 660x547 from /tmp/patch.bgra
+host_glwire: wrote /tmp/final/picture-picture-750x1624.bgra
+```
+
+渲染 `home-complete-remote.png`（host picture = in-place 写回内容）后看到的：
+
+| 区域 | 状态 |
+|---|---|
+| 状态栏 `rdar:45025538` | ✅ |
+| Weather / Calendar 两个 widget | ✅ |
+| 第一行图标 FaceTime / Calendar / Photos / Mail | ✅（在 bbox 内） |
+| 第二行起（Notes/Reminders/Clock/News…） | ❌ 黑 |
+| dock / Search / 右下 | ❌ 黑（只有一点残影） |
+
+→ **bbox (44,142,660×547) 只覆盖了上半部分**；回放在 y>689 的区域**整片缺失**，
+   所以这块补丁远远不够。之前「缺失只有 dock/Search/右下」的估计是错的 ——
+   实际缺失范围大得多（整个下半屏）。
+
+### 结论
+
+1. dump/save 修好后，完整性终于可以量化/看图 ✅；
+2. 需要重新求一个**覆盖下半屏**的掩码（或者干脆整屏补丁，但那是 1.0 fps 的重传问题，
+   离线补丁只有启动时加载一次，整屏 4.8MB 也无所谓！）；
+3. **推荐**：离线补丁直接做**整屏 750×1624**（host 只加载一次，不占每帧成本），
+   replay 之上的整块覆盖 —— 这样不用再算掩码，画面必然完整；代价只是 host 内存 4.8MB。
+
+证据：`logs/stage24/final-verify/home-complete-remote.png`（host picture）。
