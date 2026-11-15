@@ -397,3 +397,36 @@ hakios-gpu: patch skip frame 7460 nonblack=0
    之后所有 remote-only boot 都只做回放 + 这块静态补丁（内容本来就基本不变）。
 
 两者都需要 code 支持「补丁源不依赖当前帧的 panel」，而不是 `eagl_panel_750()`。
+
+## 离线补丁（09:49，main 40c056f，root census3）：加载成功，fps 8.2–8.75
+
+从 `logs/stage24/bbox/home-complete.png` 裁 bbox (44,142,660×547) → `/tmp/patch.bgra`（1,444,080 B），
+host 用 `GLWIRE_STATIC_PATCH_FILE=/tmp/patch.bgra NO_PANEL=1`，guest 不带 `glwire_static_patch`：
+
+```text
+host_glwire: offline static patch 660x547 from /tmp/patch.bgra
+```
+
+| 指标 | 结果 |
+|---|---|
+| fps（60 s 窗口） | **8.23**（494 帧）；间隔 burst 17.8 |
+| frame_us | 128,077–134,439 µs |
+| copying out | 46,333–46,955 µs |
+| waiting | 1–2 µs |
+| 补丁来源 | host 文件（**不再依赖 guest panel**，绕开 remote-only 全黑的问题）✅ |
+
+## 视觉验证仍无出口（三条路都试了）
+
+1. `GLWIRE_DUMP` / `--save`：remote-only 下**不写文件**（本发同样没有 dump）；
+2. `QEMU_VIRTIO_GPU=0`（只留 ramfb）+ GUI screendump：1125×2436 全黑（google 条状），
+   说明 host 的 in-place 写回没有走到 ramfb 扫描的 framebuffer；
+3. `virtio_gpu=1/2`：scanout 是 A2 测试图案 / A3 空面板。
+
+→ 唯一能验完整性的路径是 **修好 host 的 dump/save 在 remote-only 下的 early-return**，
+   然后直接看 host picture（那才是 in-place 写回的内容）。
+
+### 当前结论
+
+- 离线补丁**方向可行**：不依赖 guest panel、fps 与 patch60 同级（8.2–8.75）；
+- 但「画面是否完整」还没有可用的观测手段，需要 code 修 dump/save；
+- fps 要继续往上，仍是那 46 ms 的 host reply 等待（双缓冲 async）。
