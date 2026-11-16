@@ -66,6 +66,7 @@ static int have_previous_picture;
 /* GLWIRE_NO_INPLACE: take the picture's segments but do not write through them (the reply then
  * carries the picture, as it did before). One process's frames are one experiment. */
 static int no_in_place;
+static int ack_only;
 /* GLWIRE_NO_PANEL (or --no-panel): do not draw the panel the guest uploaded -- replay the
  * recorded calls instead. The question it answers is whether the host can produce the frame
  * from CoreAnimation's own stream, which is what the guest would have to stop doing. */
@@ -252,6 +253,66 @@ fnv_update(uint64_t hash, const unsigned char *bytes, size_t count)
 		hash *= 0x100000001b3ULL;
 	}
 	return hash;
+}
+
+/* GLWIRE_SHM=<path>: publish every composited frame into a file a browser bridge can map and read
+ * (tools/glwire/webview.py). The header keeps the sequence number last-bumped, so a reader can tell
+ * a whole frame from a torn one; the pixels follow in BGRA, the read-back's own order. */
+struct shm_header {
+	uint64_t magic;         /* 0x57464c47 = "GLFW" */
+	uint64_t seq;
+	uint32_t width;
+	uint32_t height;
+	uint32_t bytes;
+	uint32_t pad;
+	uint64_t published_ns;  /* CLOCK_MONOTONIC */
+};
+
+static void
+publish_picture(const unsigned char *pixels, size_t bytes, int width, int height)
+{
+	static struct shm_header *header;
+	static int state;       /* 0 = not tried yet, 1 = publishing, -1 = off */
+	struct timespec ts;
+	size_t size;
+	const char *path;
+	int fd;
+
+	if (state == -1)
+		return;
+	if (state == 0) {
+		state = -1;
+		path = getenv("GLWIRE_SHM");
+		if (path == NULL || *path == '\0')
+			return;
+		size = sizeof(*header) + (size_t)width * (size_t)height * 4;
+		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+		if (fd < 0) {
+			perror(path);
+			return;
+		}
+		if (ftruncate(fd, (off_t)size) < 0 ||
+		    (header = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+			perror(path);
+			header = NULL;
+			close(fd);
+			return;
+		}
+		close(fd);
+		header->magic = 0x57464c47;
+		header->width = (uint32_t)width;
+		header->height = (uint32_t)height;
+		header->bytes = (uint32_t)bytes;
+		header->seq = 1;
+		state = 1;
+	}
+	if (header == NULL || header->bytes != bytes || header->width * header->height * 4 != bytes)
+		return;
+	memcpy((unsigned char *)header + sizeof(*header), pixels, bytes);
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	header->published_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+	__sync_synchronize();
+	header->seq++;
 }
 
 /* The panel upload is RGBA (names.h swizzled it); the read-back picture is BGRA. Hash the same
@@ -4381,6 +4442,24 @@ serve_frame(struct client *client)
 	 * validation as a texture reference: the segments must cover every byte and lie in the RAM
 	 * file. If anything is off, the old path sends the picture back instead.
 	 */
+	if (ack_only) {
+		/* GLWIRE_ACK_ONLY=1: no in-place write and no picture; ack header only. */
+		const char ack[] = "R 0\n";
+
+		publish_picture(picture, frame_bytes, width, height);
+		if (!send_all(client->fd, ack, sizeof(ack) - 1)) {
+			free(records);
+			free(picture);
+			free(segments);
+			free(segments2);
+			return -1;
+		}
+		free(records);
+		free(picture);
+		free(segments);
+		free(segments2);
+		return 0;
+	}
 	if (!no_in_place && segments != NULL && ram_memory != NULL) {
 		/* The rows of the display's surface (row_bytes: the picture is written row by row and the
 		 * guest has nothing left to copy), or the packed picture buffer it asked for. */
@@ -4758,6 +4837,8 @@ serve_frame(struct client *client)
 		double now = now_seconds();
 		double interval = last_frame > 0 ? now - last_frame : 0;
 
+		if (picture != NULL)
+			publish_picture(picture, frame_bytes, width, height);
 		last_frame = now;
 		if (panel_known) {
 			printf("host_glwire: frame %llu, %dx%d, %zu records B, %zu picture B, %.1f ms, "
@@ -4932,6 +5013,7 @@ main(int argc, char **argv)
 		ensure_dir(save_dir);
 	}
 	no_in_place = getenv("GLWIRE_NO_INPLACE") != NULL;
+	ack_only = getenv("GLWIRE_ACK_ONLY") != NULL;
 	fbo_log = getenv("GLWIRE_FBO_LOG") != NULL;
 	{
 		/* (ADR-012: the guest's binding survives eagl.c's frame boundary; "=0" restores stage 14) */

@@ -51,6 +51,7 @@ static int remote_upload_scale(void);
 static int remote_enabled;
 static int remote_async_reply;           /* boot-arg glasync=1: one-frame reply pipeline */
 static int remote_noread;               /* boot-arg GLWIRE_NOREAD=1: skip the picture read-back */
+static int remote_ack_only;             /* boot-arg glwire_ack_only=1: host sends R 0 only */
 static int remote_pending_reply;
 
 /* Stage 24: one full-screen static patch (BGRA, 750x1624) sent before the first R, then only when
@@ -408,6 +409,7 @@ eagl_remote_begin(void)
 	/* glasync=1 alone is not safe: the host writes the same surface the guest samples, so the
 	 * next frame's surface seed changes and every layer is re-uploaded.  Keep it opt-in only. */
 	remote_noread = remote_boot_arg("GLWIRE_NOREAD=1") != NULL;
+	remote_ack_only = remote_boot_arg("glwire_ack_only=1") != NULL;
 	remote_async_reply = remote_boot_arg("glasync=1") != NULL &&
 	    remote_boot_arg("glasync_unsafe=1") != NULL;
 	/* stage fifteen: the record header carries the EAGL context (see remote_note_context) */
@@ -1105,6 +1107,11 @@ eagl_remote_flush(int width, int height)
 		close(remote_fd);
 		remote_fd = -1;
 		return 0;
+	}
+	if (remote_ack_only && remote_only && remote_picture_segments_count > 0) {
+		/* glwire_ack_only=1: the host sends only R 0; do not wait or copy a picture. */
+		remote_pending_reply = 1;
+		return 2;
 	}
 	if (remote_noread && remote_only && remote_picture_segments_count > 0) {
 		/* GLWIRE_NOREAD=1: nobody reads the host picture; the in-place rows are already written.
