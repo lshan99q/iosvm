@@ -145,6 +145,8 @@ struct eagl;
 static int tex_log;
 static int eagl_tracing;                /* this frame's calls are written down (boot-arg gltrace=FIRST-LAST) */
 static int frame_lines;                 /* boot-arg glframes=1: a line for every frame (see frame_end()) */
+static int flush_merge_on;              /* boot-arg glwire_flush_merge=1: one frame_end per frame */
+static int flush_merged;                /* ... this frame's frame_end has already run */
 static int latency_lines;               /* boot-arg touch_lat=1: when every frame began and ended (see frame_end()) */
 static uint64_t slow_calls_us;          /* boot-arg glslow=US: a line for every call that takes longer (eagl_leave()) */
 static uint64_t call_began_us;          /* (when the call in progress began) */
@@ -244,6 +246,7 @@ void eagl_remote_upload(GLuint texture, GLenum target, GLint internal, GLsizei w
     GLenum format, GLenum type, const void *pixels, GLsizei row_bytes, GLsizei pixel_bytes);
 int eagl_remote_flush(int width, int height);
 const void *eagl_remote_frame(void);
+size_t eagl_remote_pending_bytes(void);
 int eagl_remote_is_on(void);
 int eagl_remote_no_local(void);
 int eagl_remote_panel_upload_on(void);
@@ -1321,6 +1324,9 @@ frame_begin(struct eagl *e)
 	}
 	e->in_frame = true;
 	e->began = now_us();
+	if (flush_merge_on) {
+		flush_merged = 0;       /* a new frame: the first glFlush will submit it */
+	}
 	/*
 	 * Fifteenth stage: eagl.c ends a frame on glFlush/glFinish, and CoreAnimation's pass does not end
 	 * there -- the next frame's first draws continue it.  Say what is bound at the head of the frame,
@@ -3986,6 +3992,7 @@ my_glFinish(void *context)
 	clear_now(e);
 	glFinish();
 	frame_end(e, true);
+	flush_merged = 0;
 	EAGL_LEAVE(e, 0x2d0);
 }
 
@@ -3999,6 +4006,11 @@ my_glFlush(void *context)
 	if (eagl_tracing) {
 		eagl_trace("glFlush()\n");
 	}
+	if (flush_merge_on && flush_merged && eagl_remote_pending_bytes() < (2u << 20)) {
+		EAGL_LEAVE(e, 0x2d8);
+		return;
+	}
+	flush_merged = 1;
 	clear_now(e);
 	began = now_us();
 	glFlush();
@@ -5040,6 +5052,7 @@ install(void)
 		tex_log = strstr(arguments, "texlog=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
 		function_timing_on = frame_lines;
+		flush_merge_on = strstr(arguments, "glwire_flush_merge=1") != NULL;
 		if (eagl_remote_no_local()) {
 			frame_lines = 1;        /* remote-only: always give the exp the frame_us census */
 		}

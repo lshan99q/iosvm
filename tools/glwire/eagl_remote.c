@@ -714,6 +714,12 @@ remote_upload_scale(void)
 	return scale;
 }
 
+size_t
+eagl_remote_pending_bytes(void)
+{
+	return w.at;
+}
+
 int
 eagl_remote_upload_scale(void)
 {
