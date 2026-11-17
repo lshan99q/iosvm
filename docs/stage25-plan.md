@@ -60,3 +60,14 @@ IOSVM
 `panic(cpu 1): Ticket spinlock[...] timeout after 60000047 ticks; current owner on CPU 0 @lock_ticket.c:386`，
 panicked task `logd_helper`。与 stage21 四核 panic 同模式。**判死，不再试 `-smp 4`**。
 → 15 fps 只能靠搬走/砍掉客机工作：25.2 表面零拷贝、25.3 线程采样器、25.4 脏矩形、25.5 glFlush 细拆。
+
+## 25.6 复核：「4.9 MB 往返 46.8 ms，拷贝改成共享」（2026-11-17 22:30）
+结论：**这件事其实已经做过了，不必重做；现在剩下的 9–12 ms 不是拷贝，是每帧 ack 往返。**
+- 回程（宿主画面 → 客机）：`W3 in-place` 早就把宿主画面**直接写进客机 display surface 的内存**（客机侧不再拷那一趟，
+  注释写「48 ms of a 77 ms frame」）；再往前一步的 `GLWIRE_ACK_ONLY`/`glwire_ack_only=1` 连画面都不回，只回一个 ack。
+- 去程（客机 → 宿主）：records 只有 4–19 KB/帧（不是 4.9 MB）；panel 4.9 MB 上传实测 30 次/发，不是每帧。
+- 现役 `fb_noblit` 之后，整屏 4.9 MB 的放大/回写也已经没了（驱动 62 ms → 24 µs）。
+- 所以剩下的是：客机发完 records 后**等宿主回 `R 0` 的往返**（census 的 `copying out` 8–14 ms、ackonly3 里 wait 6.4 ms）。
+  优化方向不是「共享内存」（已共享：`ram.img` 本来就是 `share=on` 的 mmap，W3 就是走它），而是**把 ack 流水线化**：
+  允许 1–2 帧在途、窗口满了才等，或在 `glFinish` 之外不阻塞等 ack。预期省 5–9 ms。
+- 排期：P0（多核绑核复测）先跑；之后做 ack 流水线（boot-arg `glwire_ack_window=2`，默认 1 保持现状）。
