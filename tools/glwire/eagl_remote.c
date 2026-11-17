@@ -1110,12 +1110,14 @@ eagl_remote_flush(int width, int height)
 	}
 	if (remote_ack_only && remote_only && remote_picture_segments_count > 0) {
 		/* glwire_ack_only=1: the host sends only R 0; do not wait or copy a picture. */
+		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 		remote_pending_reply = 1;
 		return 2;
 	}
 	if (remote_noread && remote_only && remote_picture_segments_count > 0) {
 		/* GLWIRE_NOREAD=1: nobody reads the host picture; the in-place rows are already written.
 		 * Keep only the R 0 reply for the next flush to drain. */
+		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 		remote_pending_reply = 1;
 		return 2;
 	}
@@ -1124,6 +1126,7 @@ eagl_remote_flush(int width, int height)
 		 * D2: the host writes the rows in place and its R 0 reply is read at the start of the
 		 * next flush.  One frame of pipeline only; no picture is copied here.
 		 */
+		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
 		remote_pending_reply = 1;
 		return 2;
 	}
