@@ -378,6 +378,10 @@ static struct group_texture *group_of(struct eagl *e, GLuint texture);
 static __thread struct eagl *current;
 static struct eagl *contexts[8];
 static uint32_t slot_calls[SLOTS];
+/* glframes=1: per-entry GL/CA function time, top 12 every 200 frames. */
+static int function_timing_on;
+static uint64_t function_timing_us[SLOTS];
+static uint32_t function_timing_calls[SLOTS];
 /*
  * P4' (eighth stage): the entries of the table that can put pixels down and that the wire does not
  * carry. spec.def holds the 62 calls CoreAnimation is seen to make, and a frame's record is nine
@@ -599,7 +603,7 @@ eagl_enter(struct eagl *e, unsigned offset)
 		}
 	}
 	e->calls++;
-	if (slow_calls_us != 0) {
+	if (slow_calls_us != 0 || function_timing_on) {
 		call_began_us = now_us();
 	}
 }
@@ -614,15 +618,59 @@ eagl_leave(struct eagl *e, unsigned offset)
 			say("hakios-gl: %s: error %#x\n", eagl_slot_name(offset), error);
 		}
 	}
-	if (slow_calls_us != 0) {
+	if (slow_calls_us != 0 || function_timing_on) {
 		uint64_t now = now_us();
 
+		if (function_timing_on) {
+			unsigned slot = offset / 8;
+
+			if (slot < SLOTS) {
+				function_timing_us[slot] += now - call_began_us;
+				function_timing_calls[slot]++;
+			}
+		}
 		/* "tl: slow NAME US at US, frame N": a call that took long, and when it ended (tools/frames.py) */
-		if (now - call_began_us >= slow_calls_us) {
+		if (slow_calls_us != 0 && now - call_began_us >= slow_calls_us) {
 			say("tl: slow %s %llu at %llu, frame %u%s\n", eagl_slot_name(offset), now - call_began_us, now, e->frames + 1,
 			    e->in_frame ? "" : " (before its first draw)");
 		}
 	}
+}
+
+static void
+function_timing_report(struct eagl *e)
+{
+	unsigned top[12] = { 0 };
+	uint64_t top_us[12] = { 0 };
+	char text[768];
+	size_t used = 0;
+
+	for (unsigned i = 0; i < SLOTS; i++) {
+		uint64_t us = function_timing_us[i];
+
+		if (us == 0) {
+			continue;
+		}
+		for (unsigned j = 0; j < 12; j++) {
+			if (us > top_us[j]) {
+				for (unsigned k = 11; k > j; k--) {
+					top_us[k] = top_us[k - 1];
+					top[k] = top[k - 1];
+				}
+				top_us[j] = us;
+				top[j] = i;
+				break;
+			}
+		}
+	}
+	for (unsigned j = 0; j < 12 && top_us[j] != 0; j++) {
+		used += (size_t)snprintf(text + used, sizeof(text) - used, "%s%u %s x%u %llu us",
+		    j == 0 ? "" : "; ", top[j], eagl_slot_name(top[j] * 8), function_timing_calls[top[j]],
+		    function_timing_us[top[j]] / 200);
+	}
+	say("hakios-gl: timing: frame %u, top functions (id name calls per-frame-us):%s\n", e->frames, text);
+	bzero(function_timing_us, sizeof(function_timing_us));
+	bzero(function_timing_calls, sizeof(function_timing_calls));
 }
 
 /* An entry the library has no function for: say so, once an entry. */
@@ -1713,6 +1761,9 @@ frame_end(struct eagl *e, bool finished)
 		summary(e);
 	}
 	census_report();
+	if (function_timing_on && e->frames % 200 == 0) {
+		function_timing_report(e);
+	}
 	if (e->frames == 600 && e->errors == 0) {
 		check_errors = 0;
 	}
@@ -4988,6 +5039,7 @@ install(void)
 		census_on = strstr(arguments, "glcensus=1") != NULL;
 		tex_log = strstr(arguments, "texlog=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
+		function_timing_on = frame_lines;
 		if (eagl_remote_no_local()) {
 			frame_lines = 1;        /* remote-only: always give the exp the frame_us census */
 		}
