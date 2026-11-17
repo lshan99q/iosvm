@@ -94,3 +94,18 @@ CA commit→显示仍是串行，Amdahl 上限 1.5–2×；当前 12–14 fps �
 - 画面：`shm.bin` → PNG 的 **sha256 = 基线 `42e14ed2…`，逐字节相同**。
 - 对照（同核同负载，补丁常开）：`SMP=1` 中位 9.9 fps → **多核净收益 +58%**。
 - 结论（可写进交付）：**11 fps 周目标达成 1.4×（15.6 fps），且画面完整**；抖动的下限（4.7 fps 窗）来自宿主负载尖峰，不是客机 panic。
+
+## 十一、翻案：SMP=2 仍会 panic（2026-11-18 04:08，`s25-quiet`）——稳定性没解决
+- 04:01 起机的低负载复核发（同样的 `SMP=2` 绑核 + 补丁常开）在 04:08 崩了：
+  `panic(cpu 0 caller 0xfffffff007aee070): Ticket spinlock[0xfffffff007b6c880] timeout after 60000021 ticks;
+  cticket 0xf, nticket 0x11, waiting for 0x10, current owner on CPU 1`。
+- 符号化：caller = `_hw_lck_ticket_timeout_panic`；**锁地址 `0xfffffff007b6c880` = `_pset0 + 0x100`，是调度器 processor-set 结构里的锁**，
+  不是设备/驱动锁。→ 与「持有调度锁的 vCPU 被宿主调度走」完全吻合：绑核降低了概率，但**没有消除**。
+- 事实汇总：绑核后成功跑过 2 次 30 分钟（23:29、02:12），第 3 次（04:08）约 7 分钟就崩；**MTBF 量级 1 小时，不可当长跑配置**。
+- 结论修正：
+  - **长跑/演示默认回到 `SMP=1 cpus=1`（13.9 fps，历史上无此类 panic）**；
+  - `SMP=2` 定位成「爆发模式」：15.6–18.3 fps，但存在约每小时一次的 Ticket spinlock 风险，只能短跑/演示用，且失败是 panic 而非降级。
+- 下一步（P1）：
+  1. 把 ticket 超时改成可配置（10×），看是「宿主抢占造成的假超时」还是「真死锁」——放宽后能自愈就是前者；
+  2. 真正的隔离：cgroup cpuset 独占核（`cpuset.cpus.partition=isolated`，需要权限）或宿主 isolcpus；当前 `taskset` 只是亲和性，挡不住别的进程进这几个核；
+  3. 若两步都拿不到，多核就停在「爆发模式」，交付用单核。
