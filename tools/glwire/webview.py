@@ -46,17 +46,25 @@ class Picture:
         self.started = time.time()
         self.last_error = ""
         self.map = None
+        self.ino = None
         self.size = 0
 
     def attach(self):
         fd = os.open(self.path, os.O_RDONLY)
-        size = os.fstat(fd).st_size
+        st = os.fstat(fd)
+        size = st.st_size
+        self.ino = st.st_ino
         self.map = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ)
         self.size = size
         os.close(fd)
 
     def snapshot(self):
         """(seq, width, height, pixels) or None when nothing is published yet."""
+        try:                       # a restarted publisher makes a new file: follow it
+            if self.map is not None and os.stat(self.path).st_ino != getattr(self, "ino", None):
+                self.map = None
+        except OSError:
+            self.map = None
         if self.map is None:
             try:
                 self.attach()

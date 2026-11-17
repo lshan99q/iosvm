@@ -3,6 +3,9 @@
 #
 #   tools/glwire/run-pinned.sh [TAG] [SECONDS]
 #
+# GLWIRE_PATCH_MIN_COVERAGE=2 keeps the static patch always on: the replay alone leaves the lower half
+# black (and some frames wholly wrong), and the patch is what makes the picture complete.
+#
 # Why the pinning matters: with `-smp 2` and no pinning the guest panics inside boot
 # ("Ticket spinlock timeout after 60000047 ticks", CPU 1 waiting on a ticket owned by CPU 0):
 # a vCPU thread that the host deschedules long enough makes the other CPU spin to the timeout.
@@ -25,6 +28,7 @@ rm -f /dev/shm/glwire-frame
 cd "$ROOT"
 GLWIRE_NO_PANEL=1 GLWIRE_STATIC_PATCH=1 GLWIRE_STATIC_PATCH_FILE=/tmp/patch-full.bgra \
 GLWIRE_ACK_ONLY=1 GLWIRE_SHM=/dev/shm/glwire-frame \
+GLWIRE_PATCH_MIN_COVERAGE=2 \
   nohup taskset -c "$HOST_CORES" ./tools/glwire/host_glwire --no-panel 9110 "$K/qemu/ram.img" >"$OUT/host.log" 2>&1 &
 sleep 2
 cd "$K"
