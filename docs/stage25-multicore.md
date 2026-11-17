@@ -42,5 +42,14 @@ panic(cpu 1 caller 0xfffffff007aedb18): Ticket spinlock[0xfffffff007b6c880] time
   对照 guest 的 LR 回溯符号化（`hakios-kernel` 的符号），确认 CPU 0 卡在哪个函数、是否在等 IO/睡眠。
 - 纪律：一次一发；结果带 hostframes/panic 点/墙钟；与 `SMP=1` 基线成对比较。
 
-## 五、如果多核真的救活，收益预期
+## 五、P0 结果（2026-11-17 23:04）：绑核后多核跑通，H1 成立
+- `s25-smp-pin`（`SMP=2`+`cpus=2`，qemu `taskset -c 20-23`、host_glwire `24-25`）：**714 帧、0 次 Ticket spinlock、0 SIGSEGV**，
+  guest `2 of 2 processors are running`，驱动 27–30 µs/swap、9–10 swap/s。
+- 量化版 `s25-smp2-pin`（同绑核 + 10 s 采样，841 帧后停）：**墙钟中位 15.8 fps**（11.1 / 13.0 / 15.8 / 19.4 / 19.8 五个 10 s 窗），
+  CPU/帧合计 127 ms（两个 vCPU，129–200% 核），load 8–9，**0 panic**。
+- 对照：同样参数不绑核 → 5 帧就 panic。**结论：H1（vCPU 被宿主调度走导致锁超时）成立；多核只要独占核就可用。**
+- 代价与注意：MTTCG 总 CPU 从 75–81 ms/帧 涨到 127 ms/帧（并行 + 开销），墙钟从 ~75 ms 降到 ~63 ms；
+  RT 优先级不可用（无 CAP_SYS_NICE），只有绑核这一层保护；窗口抖动大（11–20 fps），需要成对比较。
+
+## 六、如果多核真的救活，收益预期
 CA commit→显示仍是串行，Amdahl 上限 1.5–2×；当前 12–14 fps 的 1.5× = 18–21 fps，直接越过 15 fps 目标。
