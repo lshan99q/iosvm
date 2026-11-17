@@ -9,7 +9,7 @@
 - **状态：已达成**（2026-11-17 17:17）——稳态中位 **13.9 fps / 75 ms**，画面与基线逐字节相同。见第五节。
 
 ## 二、当前最好成绩（可直接引用）
-- **长跑交付用单核：13.9 fps / 75 ms**（SMP=1，历史无 panic）；**爆发模式**：`SMP=2` 绑核 15.6–18.3 fps，但约每小时一次 Ticket spinlock panic（`_pset0+0x100` 调度锁，见 docs/stage25-multicore.md 第十一节），只能短跑/演示。`tools/glwire/run-pinned.sh` 起栈，
+- **交付用单核：13.9 fps / 75 ms**（`SMP=1`+`cpus=1`，画面逐字节相同，历史无调度锁 panic）；**多核已判死**：绑核能跑但会 panic（`_pset0+0x100` 调度锁，放宽超时 4× 也救不回，见 docs/stage25-multicore.md 第十二节）。`tools/glwire/run-pinned.sh` 可起栈，`NCPU=2` 只当短跑实验。
   配置 = remote-only + 全屏补丁 + host `GLWIRE_ACK_ONLY=1` + guest `glwire_ack_only=1 gkbf=1` + auto `fb_noblit`
   + `QEMU_SMP=2 cpus=2` + vCPU 绑 `taskset` 独占核。多核净收益 +60%（同负载 SMP=1 中位 9.9 fps）。
 - 单核（旧现役）：13.9 fps，75 ms/帧；成对测同负荷窗口 14.8 vs 12.8 fps（对照 = 不加 `fb_noblit`）。

@@ -114,7 +114,7 @@ The frame the host composites is the one to look at.
 
 | | measured |
 |---|---|
-| host replay, complete picture | **13.9 fps** one vCPU (the long-run setting) / **15.6–18.3 fps** on two pinned vCPUs, which is a burst mode: the guest still panics about once an hour on a contended scheduler lock; picture byte-identical to the baseline |
+| host replay, complete picture | **13.9 fps** on one vCPU (the delivered setting; picture byte-identical to the baseline). Two pinned vCPUs reached 15.6–18.3 fps but panic on a scheduler lock often enough to be unusable |
 | the host's own cost per frame | ~41 ms before `gkbf=1`; **~1.4 ms** with it (records 90 KB → 4–19 KB a frame) — never the bottleneck |
 | the guest's frame budget | was 117.1 ms = CA 71.0 + encode/copy 46.8 + wait 1 µs; the "CA 71 ms" turned out to be the display driver's **full-panel upscale blit** (750×1624 → 1125×2436, 2.74 M pixels): 62 ms/swap, now skipped (`fb_noblit=1`) |
 
