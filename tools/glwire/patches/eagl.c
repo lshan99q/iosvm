@@ -246,6 +246,7 @@ void eagl_remote_upload(GLuint texture, GLenum target, GLint internal, GLsizei w
     GLenum format, GLenum type, const void *pixels, GLsizei row_bytes, GLsizei pixel_bytes);
 int eagl_remote_flush(int width, int height);
 const void *eagl_remote_frame(void);
+void eagl_remote_wait_acks(void);
 size_t eagl_remote_pending_bytes(void);
 int eagl_remote_is_on(void);
 int eagl_remote_no_local(void);
@@ -1778,6 +1779,9 @@ frame_end(struct eagl *e, bool finished)
 	e->upload_bytes = e->attaching = e->flushing = 0;
 	if (eagl_remote_no_local()) {
 		e->began = after;       /* remote-only: the next frame_us spans CA + round trip */
+	}
+	if (finished) {
+		eagl_remote_wait_acks();
 	}
 }
 

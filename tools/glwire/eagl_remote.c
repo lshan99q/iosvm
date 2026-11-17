@@ -53,6 +53,8 @@ static int remote_async_reply;           /* boot-arg glasync=1: one-frame reply 
 static int remote_noread;               /* boot-arg GLWIRE_NOREAD=1: skip the picture read-back */
 static int remote_ack_only;             /* boot-arg glwire_ack_only=1: host sends R 0 only */
 static int remote_pending_reply;
+static int remote_ack_window = 1;      /* glwire_ack_window=N: N-1 frames may be in flight */
+static int remote_window_inflight;
 
 /* Stage 24: one full-screen static patch (BGRA, 750x1624) sent before the first R, then only when
  * its hash changes.  The host composites it over the replay result. */
@@ -410,6 +412,17 @@ eagl_remote_begin(void)
 	 * next frame's surface seed changes and every layer is re-uploaded.  Keep it opt-in only. */
 	remote_noread = remote_boot_arg("GLWIRE_NOREAD=1") != NULL;
 	remote_ack_only = remote_boot_arg("glwire_ack_only=1") != NULL;
+	{
+		const char *window = remote_boot_arg("glwire_ack_window=");
+
+		if (window != NULL) {
+			int n = atoi(window);
+
+			if (n >= 2 && n <= 8) {
+				remote_ack_window = n;
+			}
+		}
+	}
 	remote_async_reply = remote_boot_arg("glasync=1") != NULL &&
 	    remote_boot_arg("glasync_unsafe=1") != NULL;
 	/* stage fifteen: the record header carries the EAGL context (see remote_note_context) */
@@ -999,6 +1012,53 @@ remote_drain_reply(void)
 	}
 }
 
+static void
+remote_drain_available_acks(void)
+{
+	char c;
+
+	if (remote_fd < 0) {
+		return;
+	}
+	while (remote_window_inflight > 0 && recv(remote_fd, &c, 1, MSG_DONTWAIT) == 1) {
+		if (c == '\n') {
+			remote_window_inflight--;
+		}
+	}
+}
+
+static int
+remote_wait_one_ack(void)
+{
+	char c;
+
+	if (remote_fd < 0) {
+		remote_window_inflight = 0;
+		return 0;
+	}
+	while (recv(remote_fd, &c, 1, 0) == 1) {
+		if (c == '\n') {
+			remote_window_inflight--;
+			return 1;
+		}
+	}
+	remote_window_inflight = 0;
+	return 0;
+}
+
+void
+eagl_remote_wait_acks(void)
+{
+	if (remote_ack_window < 2) {
+		return;
+	}
+	while (remote_window_inflight > 0) {
+		if (!remote_wait_one_ack()) {
+			break;
+		}
+	}
+}
+
 int
 eagl_remote_flush(int width, int height)
 {
@@ -1007,7 +1067,11 @@ eagl_remote_flush(int width, int height)
 	double started;
 	int at = 0;
 
-	remote_drain_reply();
+	if (remote_ack_window >= 2) {
+		remote_drain_available_acks();
+	} else {
+		remote_drain_reply();
+	}
 	if (remote_no_flush) {
 		/*
 		 * The recorders stay installed and every call is still recorded (that is the variable
@@ -1051,6 +1115,13 @@ eagl_remote_flush(int width, int height)
 		setsockopt(remote_fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
 		remote_apply_socket_buffer(remote_fd);
 		remote_apply_ack_timeout(remote_fd);
+	}
+	if (remote_ack_window >= 2 && remote_ack_only && remote_only && remote_surface_segments_count > 0) {
+		while (remote_window_inflight >= remote_ack_window - 1) {
+			if (!remote_wait_one_ack()) {
+				break;
+			}
+		}
 	}
 	started = remote_now_ms();
 	if (static_patch_ready && static_patch_hash != static_patch_sent) {
@@ -1117,7 +1188,11 @@ eagl_remote_flush(int width, int height)
 	if (remote_ack_only && remote_only && remote_picture_segments_count > 0) {
 		/* glwire_ack_only=1: the host sends only R 0; do not wait or copy a picture. */
 		wire_reset(&w, remote_arena, REMOTE_ARENA_BYTES);
-		remote_pending_reply = 1;
+		if (remote_ack_window >= 2) {
+			remote_window_inflight++;
+		} else {
+			remote_pending_reply = 1;
+		}
 		return 2;
 	}
 	if (remote_noread && remote_only && remote_picture_segments_count > 0) {
