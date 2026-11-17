@@ -15,8 +15,8 @@ IOSVM
    └─ 24.6 交付：成对测 13.9 fps / 75 ms + /dev/shm 画面 sha256 与基线相同 ✅
 
 └─ stage 25 冲 15 fps（≤67 ms/帧）— 现在
-   ├─ 25.1 E1：fbscale=1（显示面 375x812，CA 光栅像素 ÷4）        [exp 跑着]
-   ├─ 25.2 E2：CA 逐函数时间 census（若无 E1 不够，按数据砍）       [code 待命]
+   ├─ 25.1 E1：fbscale=1（显示面 375x812，CA 光栅像素 ÷4）        ✗ fps 过线、画面崩（见下）
+   ├─ 25.2 E2：CA 逐函数时间 census（正在做）                      [code 做中]
    ├─ 25.3 E3：依据归因再砍（CA 记账 / 跳帧合并 / 半分辨率资源）
    └─ 25.4 成对测 + 画面复核 + 收口文档（README、handover、demo）
 ```
@@ -38,3 +38,18 @@ IOSVM
 - 只看墙钟：`samples.csv` 帧数增量/秒（10 s 采样，含 loadavg）。客机时间戳会低估，不能用来算 fps。
 - 单发绝对值不可比：必须成对/同 load 窗口；`/tmp/s24-pair.py A B`。
 - 报告必带：system md5 `49ae3cf4`、lib `40463969`、root/kernel md5、日志路径。
+
+## E1 结果（2026-11-17 18:24，判废）
+| 指标 | fbscale=2（现役） | fbscale=1 |
+|---|---:|---:|
+| 墙钟 fps（10 s 窗口，load 8.7–11.9） | 12.1–13.9 | **中位 18.3（7.1–29.9）** |
+| 客机 CPU/帧 | 75–81 ms | **中位 44 ms** |
+| 驱动 `in the driver` | 26–48 µs | 30–51 µs |
+| `not blitted` | 495–510 | 321–357 |
+| 画面 | 完整 | **崩**：Dock 只剩 2 图标、文字糊/截断、右侧列缺失；SHM 输出也掉到 375x812 |
+
+判读：CA 光栅约占 31–37 ms（fbscale 4 倍像素差换来的），非光栅约 30 ms。
+所以即使把光栅全砍掉也到不了 24 fps；到 15 fps（≤67 ms）只差 **10–14 ms**，
+下一步必须用数据定位（E2 逐函数 census），不再猜参数。
+
+证据：`logs/s24-scale1/`（`samples.csv`、`serial.log`、`shm.bin`，快照 `/tmp/scale1.png`）。
