@@ -60,7 +60,7 @@ The second, faster loop — the host does the drawing, the guest only records it
 | networking to the host (LAN) | **yes** — `en0` 10.0.2.15, HTTP both ways | [addendum 30](docs/research/linux-kernel-build.md) |
 | names, DNS | no — configd's plugin never registers here | addendum 30 |
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
-| animation smoothness | ~4–7 fps locally; **13.9 fps with the host drawing the frame**, complete picture | [stage 24](docs/stage24-blitfast.md) |
+| animation smoothness | ~4–7 fps locally; **15.9 fps with the host drawing the frame** (2 pinned vCPUs), complete picture | [stage 25](docs/stage25-multicore.md) |
 | complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
 | watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
@@ -114,7 +114,7 @@ The frame the host composites is the one to look at.
 
 | | measured |
 |---|---|
-| host replay, complete picture | **13.9 fps** (75 ms/frame, median of load-matched windows; 10.2 fps / 105 ms without the panel-blit skip) |
+| host replay, complete picture | **15.9 fps** (~63 ms/frame; two pinned vCPUs, 30-minute run, 0 panics; 9.9 fps on one vCPU under the same load) |
 | the host's own cost per frame | ~41 ms before `gkbf=1`; **~1.4 ms** with it (records 90 KB → 4–19 KB a frame) — never the bottleneck |
 | the guest's frame budget | was 117.1 ms = CA 71.0 + encode/copy 46.8 + wait 1 µs; the "CA 71 ms" turned out to be the display driver's **full-panel upscale blit** (750×1624 → 1125×2436, 2.74 M pixels): 62 ms/swap, now skipped (`fb_noblit=1`) |
 
