@@ -55,6 +55,14 @@
 - **预期与坑**：帧提交（CA commit → 显示）始终串行，Amdahl 上限在 1.5–2×；MTTCG 的原子/内存序会比单核慢，
   iOS 的锁竞争可能吃掉一部分；核数越多，TCG tb 缓存与内存带宽越容易打满。
 
-## 六、当前实验与下一步
-- 跑着：`s24-smp2`（`-smp 2`，其余同现役），约 20 分钟出数。
-- 之后：`-smp 4` → 若有效，固化 `QEMU_SMP`；再把「表面零拷贝」与「线程级采样器」排进下一轮。
+## 六、多核实测：判死（2026-11-17 21:16，补强 23C）
+- `s24-smp2b`：`QEMU_SMP=2` + `CMDLINE="cpus=2 …"`，guest 打印 `GenericARMPE: 2 of 2 processors are running`（真 SMP），
+  起机后仅 5 帧。
+- **panic(cpu 1 caller 0xfffffff007aedb18): Ticket spinlock[0xfffffff007b6c880] timeout after 60000047 ticks;
+  cticket 0xf4, nticket 0xf6, waiting for 0xf5, current owner on CPU 0 @lock_ticket.c:386**，panicked task pid 29 `logd_helper`。
+- 这与 stage21 的 4 核 panic 同一失败模式；23C（SMP=2/4 全 `hostframes=0`）当时的「只判死、没给 cpus=」疑点至此补齐：
+  **即便正确传 `cpus=2`，当前 ack-only/remote-only 路径下 2 vCPU 也会 Ticket spinlock 超时 panic**。
+- 判死（第三次同方向失败：stage21 panic / 23C hostframes=0 / 本次 panic），不再试 `-smp 4`（更激进只会更糟）。
+  11-02 那次 `SMP=4` + `cpus=4` 能跑，属旧 in-place 配置，不能外推。
+- 影响：多核这条「结构性 1.3–1.8×」拿不到，15 fps 只能靠把客机工作搬走/砍掉（25.2/25.3/25.4/25.5）。
+``

@@ -16,6 +16,7 @@ IOSVM
 
 └─ stage 25 冲 15 fps（≤67 ms/帧）— 现在
    ├─ 25.1 E1：fbscale=1（显示面 375x812，CA 光栅像素 ÷4）        ✗ fps 过线、画面崩（见下）
+   ├─ 25.1b 多核（SMP=2 + cpus=2）                              ✗ Ticket spinlock panic，判死
    ├─ 25.2 E2：CA 逐函数时间 census（正在做）                      [code 做中]
    ├─ 25.3 E3：依据归因再砍（CA 记账 / 跳帧合并 / 半分辨率资源）
    └─ 25.4 成对测 + 画面复核 + 收口文档（README、handover、demo）
@@ -53,3 +54,9 @@ IOSVM
 下一步必须用数据定位（E2 逐函数 census），不再猜参数。
 
 证据：`logs/s24-scale1/`（`samples.csv`、`serial.log`、`shm.bin`，快照 `/tmp/scale1.png`）。
+
+## 多核判死（2026-11-17 21:16，补强 23C）
+`s24-smp2b`：`QEMU_SMP=2` + `CMDLINE="cpus=2"`，guest 报 `2 of 2 processors are running`，5 帧后
+`panic(cpu 1): Ticket spinlock[...] timeout after 60000047 ticks; current owner on CPU 0 @lock_ticket.c:386`，
+panicked task `logd_helper`。与 stage21 四核 panic 同模式。**判死，不再试 `-smp 4`**。
+→ 15 fps 只能靠搬走/砍掉客机工作：25.2 表面零拷贝、25.3 线程采样器、25.4 脏矩形、25.5 glFlush 细拆。
