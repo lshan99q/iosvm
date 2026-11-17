@@ -53,3 +53,10 @@ panic(cpu 1 caller 0xfffffff007aedb18): Ticket spinlock[0xfffffff007b6c880] time
 
 ## 六、如果多核真的救活，收益预期
 CA commit→显示仍是串行，Amdahl 上限 1.5–2×；当前 12–14 fps 的 1.5× = 18–21 fps，直接越过 15 fps 目标。
+
+## 六、P0b 结果：SMP=4 不划算（2026-11-17 23:15）
+- `s25-smp4-pin`（`SMP=4`+`cpus=4`，绑 `20-27`，732 帧，0 panic，guest `4 of 4 processors are running`）：
+  四个 10 s 窗 **34.1 / 4.1 / 11.6 / 17.3 fps**，中位 **14.4 fps**；CPU/帧合计 **108–305 ms**（中位 212 ms，344% 核）。
+- 对比 `SMP=2`（中位 15.8 fps、CPU/帧 127 ms、129–200% 核）：加核**没换来墙钟收益**，总 CPU 反而近翻倍（MTTCG 开销 + 锁竞争），
+  并且出现 4.1 fps 的停顿窗。**结论：2 vCPU 目前是甜点，4 核不采用。**
+- 仍待做：绑核 `SMP=1` 对照（同核/同负载）把净收益钉死；SMP=2 跑 30 分钟以上验证长期稳定性（841 帧只覆盖了 ~2 分钟稳态）。
