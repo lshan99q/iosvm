@@ -9,10 +9,11 @@
 - **状态：已达成**（2026-11-17 17:17）——稳态中位 **13.9 fps / 75 ms**，画面与基线逐字节相同。见第五节。
 
 ## 二、当前最好成绩（可直接引用）
-- **15.8 fps，~63 ms/帧**（SMP=2 双 vCPU 绑核，短跑中位）：`tools/glwire/run-pinned.sh` 一条命令起机，
+- **18.3 fps，~55 ms/帧**（SMP=2 双 vCPU 绑核 + 静态补丁常开，短跑中位；画面 sha256 = 基线）：`tools/glwire/run-pinned.sh` 一条命令起机，
   配置 = remote-only + 全屏补丁 + host `GLWIRE_ACK_ONLY=1` + guest `glwire_ack_only=1 gkbf=1` + auto `fb_noblit`
   + `QEMU_SMP=2 cpus=2` + vCPU 绑 `taskset` 独占核。多核净收益 +60%（同负载 SMP=1 中位 9.9 fps）。
 - 单核（旧现役）：13.9 fps，75 ms/帧；成对测同负荷窗口 14.8 vs 12.8 fps（对照 = 不加 `fb_noblit`）。
+- **测量发必须 `GLWIRE_PATCH_MIN_COVERAGE=2`（补丁常开）**：门限打开时回放残缺帧会跳过补丁，画面变成黑+绿块（21:53 引入、23:29 踩到，见 docs/stage25-multicore.md 第九节）。
 - **多核必须绑核**：不绑核 `-smp 2` 会在起机阶段 `Ticket spinlock timeout` panic（docs/stage25-multicore.md）。
 - 关键两刀：`gkbf=1`（CA 记录量 90 KB/帧 → 4–19 KB，宿主 41 → 1.4 ms/帧）+ **`fb_noblit=1`**
   （拿掉客机每帧 1125×2436 = 274 万像素的整屏放大 blit，驱动自报 62 ms → 24 µs）。
