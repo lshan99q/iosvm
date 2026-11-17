@@ -114,7 +114,7 @@ The frame the host composites is the one to look at.
 
 | | measured |
 |---|---|
-| host replay, complete picture | **18.3 fps** (~55 ms/frame; two pinned vCPUs, picture byte-identical to the baseline; 9.9 fps on one vCPU under the same load) |
+| host replay, complete picture | **15.6 fps** (~64 ms/frame; two pinned vCPUs, 30-minute run, 0 panics, picture byte-identical to the baseline; 9.9 fps on one vCPU under the same load) |
 | the host's own cost per frame | ~41 ms before `gkbf=1`; **~1.4 ms** with it (records 90 KB → 4–19 KB a frame) — never the bottleneck |
 | the guest's frame budget | was 117.1 ms = CA 71.0 + encode/copy 46.8 + wait 1 µs; the "CA 71 ms" turned out to be the display driver's **full-panel upscale blit** (750×1624 → 1125×2436, 2.74 M pixels): 62 ms/swap, now skipped (`fb_noblit=1`) |
 
