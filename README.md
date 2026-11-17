@@ -60,7 +60,7 @@ The second, faster loop — the host does the drawing, the guest only records it
 | networking to the host (LAN) | **yes** — `en0` 10.0.2.15, HTTP both ways | [addendum 30](docs/research/linux-kernel-build.md) |
 | names, DNS | no — configd's plugin never registers here | addendum 30 |
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
-| animation smoothness | ~4–7 fps locally; **9.09 fps with the host drawing the frame**, complete picture | [stage 24](docs/stage24-plan-11fps.md) |
+| animation smoothness | ~4–7 fps locally; **13.9 fps with the host drawing the frame**, complete picture | [stage 24](docs/stage24-blitfast.md) |
 | complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
 | watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
@@ -114,9 +114,14 @@ The frame the host composites is the one to look at.
 
 | | measured |
 |---|---|
-| host replay, complete picture | **9.09 fps** (median interval 110 ms over 400 frames) |
-| the host's own cost per frame | ~41 ms (panel 35.8 ms + records/replay/read ~5 ms) — not the bottleneck |
-| the guest's frame budget | 117.1 ms = **CA 71.0 ms** + encode/copy 46.8 ms + wait **1 µs** |
+| host replay, complete picture | **13.9 fps** (75 ms/frame, median of load-matched windows; 10.2 fps / 105 ms without the panel-blit skip) |
+| the host's own cost per frame | ~41 ms before `gkbf=1`; **~1.4 ms** with it (records 90 KB → 4–19 KB a frame) — never the bottleneck |
+| the guest's frame budget | was 117.1 ms = CA 71.0 + encode/copy 46.8 + wait 1 µs; the "CA 71 ms" turned out to be the display driver's **full-panel upscale blit** (750×1624 → 1125×2436, 2.74 M pixels): 62 ms/swap, now skipped (`fb_noblit=1`) |
+
+Measured 2026-11-17: with `gkbf=1 glwire_ack_only=1 fb_noblit=1` the guest spends 75 ms a frame and the
+picture is byte-identical to the 9.09 fps baseline. The wall-clock figure moves ±30% with host load, so
+compare paired runs, never single shots. See [stage 24 blit](docs/stage24-blitfast.md) and
+[the gkbf negative result](docs/stage24-gkbf.md).
 
 Two consequences worth writing down, because both look like they should work and do not:
 
@@ -162,9 +167,10 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
   Apple binaries in the tree, no impersonating a device to Apple's servers, no credentials.
 - **Not a jailbreak.** The port's own kernel is lenient about code signing by construction (AMFI is a
   stand-in that accepts any parseable signature); nothing here attacks a real device.
-- **Not fast.** The renderer is a CPU rasteriser. With the host drawing the frame the ceiling is
-  9–14 fps (9.09 measured, 11 the short-term target); 24 fps is a target, not a claim, and it needs a
-  real 3D path or same-architecture virtualisation.
+- **Not fast.** The renderer is a CPU rasteriser. With the host drawing the frame the 11 fps target is
+  met (13.9 fps / 75 ms a frame, 2026-11-17); the old 9.09 fps figure is kept in the stage-24 docs as the
+  baseline it is compared against. 24 fps is a target, not a claim: it needs a real 3D path or
+  same-architecture virtualisation.
 
 ## Documentation
 
