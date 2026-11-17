@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IOSVM · 快画面</title>
+<style>
+  :root{
+    --bg:#0d0d0b; --panel:#16160f; --ink:#eceadf; --dim:#8f8b7d; --rule:#2b2b22; --accent:#e2623c;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --serif:"Palatino Linotype",Palatino,Georgia,serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:var(--serif);
+       display:grid;grid-template-columns:1fr auto;gap:0;text-wrap:pretty}
+  .stage{display:grid;place-items:center;padding:24px;min-height:100vh}
+  .device{
+    position:relative;border:1px solid var(--rule);border-radius:34px;overflow:hidden;
+    box-shadow:0 30px 80px rgba(0,0,0,.6);background:#000;
+    height:min(88vh,900px); aspect-ratio:1125/1624;
+  }
+  .device img{width:100%;height:100%;object-fit:cover;display:block;cursor:crosshair}
+  .device .hint{
+    position:absolute;left:0;right:0;bottom:0;padding:8px 14px;font-family:var(--mono);font-size:11px;
+    color:var(--dim);background:linear-gradient(transparent,rgba(0,0,0,.75));pointer-events:none;
+  }
+  aside{width:320px;border-left:1px solid var(--rule);background:var(--panel);padding:26px 22px;
+        display:flex;flex-direction:column;gap:22px}
+  h1{font-size:15px;letter-spacing:.16em;font-weight:600;margin:0;font-family:var(--mono)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.7}
+  .stat{font-family:var(--mono);font-size:11px;color:var(--dim);display:flex;justify-content:space-between;
+        border-bottom:1px solid var(--rule);padding:7px 0}
+  .stat b{color:var(--ink);font-weight:600}
+  .keys{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  button{
+    font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink);background:#1f1f16;
+    border:1px solid var(--rule);border-radius:6px;padding:9px 8px;cursor:pointer;transition:180ms cubic-bezier(.2,.7,.2,1)
+  }
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button:active{transform:translateY(1px)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .toast{font-family:var(--mono);font-size:11px;color:var(--dim);min-height:16px}
+  .toast.bad{color:var(--accent)}
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(226,98,60,.4);font-family:var(--mono);font-size:11px}
+  @media (max-width:860px){
+    body{grid-template-columns:1fr}
+    aside{width:auto;border-left:none;border-top:1px solid var(--rule)}
+    .device{height:min(64vh,760px)}
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="device">
+      <img id="screen" src="/stream.mjpg" alt="虚拟机画面">
+      <div class="hint">点一下 = 手指点一下（走 QMP 输入，进客机 virtio-tablet）</div>
+    </div>
+  </div>
+
+  <aside>
+    <div>
+      <h1>IOSVM · 快画面</h1>
+      <p class="sub">宿主 V100 回放的合成画面，JPEG 流。<br>不是 QEMU VNC 的客机帧缓冲。</p>
+    </div>
+
+    <div>
+      <div class="stat"><span>数据源</span><b>GLWIRE_SHM</b></div>
+      <div class="stat"><span>分辨率</span><b id="sRes">—</b></div>
+      <div class="stat"><span>已推帧</span><b id="sFrames">—</b></div>
+      <div class="stat"><span>瞬时帧率</span><b id="sFpsNow">—</b></div>
+      <div class="stat"><span>平均帧率</span><b id="sFps">—</b></div>
+      <div class="stat"><span>状态</span><b id="sState">连接中</b></div>
+    </div>
+
+    <div class="keys">
+      <button data-key="home">Home</button>
+      <button data-key="power">电源</button>
+      <button data-key="volumeup">音量 +</button>
+      <button data-key="volumedown">音量 −</button>
+    </div>
+    <div class="toast" id="toast"></div>
+    <div class="sub">
+      画面 = 宿主回放合成帧；点按走 QMP <code>input-send-event</code> 进客机 virtio-tablet。<br>
+      客机 framebuffer 只有上半屏，所以不再走 VNC。
+    </div>
+  </aside>
+
+<script>
+(function(){
+  var img = document.getElementById('screen');
+  var toast = document.getElementById('toast');
+  var res = document.getElementById('sRes');
+  var framesEl = document.getElementById('sFrames');
+  var fpsEl = document.getElementById('sFps');
+  var fpsNowEl = document.getElementById('sFpsNow');
+  var stateEl = document.getElementById('sState');
+  var started = Date.now();
+
+  // 画面重新连上（服务重启）时换一个 URL，避免 <img> 卡在断流上
+  img.addEventListener('error', function(){
+    stateEl.textContent = '断流，重连中';
+    setTimeout(function(){ img.src = '/frame.jpg?t=' + Date.now(); }, 800);
+    setTimeout(function(){ img.src = '/stream.mjpg?t=' + Date.now(); }, 1200);
+  });
+
+  function post(payload){
+    return fetch('/input', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    }).then(function(r){ return r.json(); });
+  }
+
+  img.addEventListener('click', function(ev){
+    var box = img.getBoundingClientRect();
+    var x = (ev.clientX - box.left) / box.width;
+    var y = (ev.clientY - box.top) / box.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    post({type:'tap', x: x * 1000, y: y * 1000}).then(function(r){
+      toast.textContent = r.ok ? 'tap ' + Math.round(x*1000)/10 + '%, ' + Math.round(y*1000)/10 + '%'
+                               : '失败：' + (r.error || '未知');
+      toast.className = r.ok ? 'toast' : 'toast bad';
+    }).catch(function(e){
+      toast.textContent = '失败：' + e;
+      toast.className = 'toast bad';
+    });
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll('button[data-key]'), function(btn){
+    btn.addEventListener('click', function(){
+      post({type:'key', name: btn.dataset.key}).then(function(r){
+        toast.textContent = r.ok ? 'key ' + btn.dataset.key : '失败：' + (r.error || '未知');
+        toast.className = r.ok ? 'toast' : 'toast bad';
+      }).catch(function(e){
+        toast.textContent = '失败：' + e; toast.className = 'toast bad';
+      });
+    });
+  });
+
+  function poll(){
+    fetch('/stats').then(function(r){ return r.json(); }).then(function(s){
+      res.textContent = s.width ? s.width + '×' + s.height : '—';
+      framesEl.textContent = s.frames;
+      var secs = Math.max(1, (Date.now() - started) / 1000);
+      fpsEl.textContent = (s.frames / secs).toFixed(1) + ' fps';
+      fpsNowEl.textContent = (s.fps_now || 0).toFixed(1) + ' fps';
+      stateEl.textContent = s.error ? '错误：' + s.error : '正常';
+    }).catch(function(){
+      stateEl.textContent = '桥接未响应';
+    });
+    setTimeout(poll, 2000);
+  }
+  poll();
+})();
+</script>
+</body>
+</html>

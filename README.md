@@ -7,7 +7,7 @@
 [![status](https://img.shields.io/badge/status-boots%20to%20the%20home%20screen-brightgreen)]()
 [![platform](https://img.shields.io/badge/host-Linux%20x86__64-blue)]()
 [![guest](https://img.shields.io/badge/guest-Darwin%2016.5%20%C2%B7%20arm64-blue)]()
-[![renderer](https://img.shields.io/badge/renderer-Mesa%20softpipe%20%C2%B7%20CPU-orange)]()
+[![renderer](https://img.shields.io/badge/renderer-Mesa%20softpipe%20or%20host%20GL%20replay-orange)]()
 [![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 <img src="docs/demo/control-center.png" width="230" alt="Control Center">
@@ -38,6 +38,14 @@ The point is the loop, not the screenshot:
                                         Mesa softpipe ─┘  (a CPU rasteriser, hence the frame rate)
 ```
 
+The second, faster loop — the host does the drawing, the guest only records it:
+
+```
+    guest CoreAnimation ──GL records──► host_glwire ──► real GL (a V100 here)
+                                             │
+                                             └──► JPEG stream ──► browser, clicks back over QMP
+```
+
 ## What works today
 
 | | state | evidence |
@@ -52,7 +60,9 @@ The point is the loop, not the screenshot:
 | networking to the host (LAN) | **yes** — `en0` 10.0.2.15, HTTP both ways | [addendum 30](docs/research/linux-kernel-build.md) |
 | names, DNS | no — configd's plugin never registers here | addendum 30 |
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
-| animation smoothness | ~4–7 fps; ~140 ms of Mesa per composited frame | addendum 32b |
+| animation smoothness | ~4–7 fps locally; **9.09 fps with the host drawing the frame**, complete picture | [stage 24](docs/stage24-plan-11fps.md) |
+| complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
+| watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
 `docs/state-of-the-port.md` is the one-page handover view of the same table.
 
@@ -76,6 +86,13 @@ tools/qemu/qmpmux.py --qmp 4445 --port 4465
 tools/qemu/webvnc.py --port 5980 --qmp 4465      # then http://127.0.0.1:5980/
 #    …or from a shell
 tools/qemu/tap.py 683 1689                      # the Settings icon
+
+# 5. Or let the host draw the frame: boot with the guest replaying only, then watch that frame
+#    (the guest's own panel stays half-empty — see "Drawing the frame on the host" below)
+GLWIRE_NO_PANEL=1 GLWIRE_STATIC_PATCH=1 \
+  GLWIRE_STATIC_PATCH_FILE=/tmp/patch-full.bgra GLWIRE_SHM=/dev/shm/glwire-frame \
+  tools/glwire/host_glwire &                   # the replay, publishing each frame
+python3 tools/glwire/webview.py --port 6083 --crop 1624   # then http://127.0.0.1:6083/
 ```
 
 The tools in `tools/qemu/` are the ones this project actually uses:
@@ -88,6 +105,29 @@ The tools in `tools/qemu/` are the ones this project actually uses:
 | `webvnc.py` | the browser viewer: frames out, clicks and keys in |
 | `vncbridge.py` | the same for a VNC viewer instead of a browser |
 | `demo.sh` | the whole sequence in one command, a picture of every step |
+
+## Drawing the frame on the host (stages 23–24)
+
+The CPU rasteriser is the ceiling, so the next step was to stop asking it to draw: the guest records
+its CoreAnimation GL calls, ships them over a socket, and the host replays them on a real GL device.
+The frame the host composites is the one to look at.
+
+| | measured |
+|---|---|
+| host replay, complete picture | **9.09 fps** (median interval 110 ms over 400 frames) |
+| the host's own cost per frame | ~41 ms (panel 35.8 ms + records/replay/read ~5 ms) — not the bottleneck |
+| the guest's frame budget | 117.1 ms = **CA 71.0 ms** + encode/copy 46.8 ms + wait **1 µs** |
+
+Two consequences worth writing down, because both look like they should work and do not:
+
+- **the guest is not waiting for the host.** `wait = 1 µs`, so asynchronous replies and double
+  buffering buy nothing.
+- **the records are tiny.** 12.65 KB per frame, 0.26 % of the 4.87 MB picture; de-duplicating them
+  saves under 0.12 ms. The 46.8 ms is a 4.9 MB round trip, not encoding.
+
+`virtio-gpu` (stage 23) is implemented end to end — control queue, 2D resource, scanout, transfer,
+flush — and measured **zero** frame-rate gain (1.80 → 1.85 fps, inside the noise): the transport was
+never the bottleneck. It stays as the groundwork for a 3D path, not as a speed-up.
 
 ## How it came to boot
 
@@ -109,6 +149,7 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
 |---|---|
 | `patches/` | the changes made to the port: one patch per finding, with the reason |
 | `tools/qemu/` | the boot-and-operate tooling above |
+| `tools/glwire/` | the guest's GL wire protocol: `host_glwire.c` (the replay), `webview.py` (that frame in a browser) |
 | `tools/apfs/` | reading and writing the images without Apple's tools |
 | `guest/` | programs that run inside the machine (the painter, `netcfg`) |
 | `proto/`, `host/vkbridge/` | GPU transport and its host-side Vulkan backend (submodules) |
@@ -121,8 +162,9 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
   Apple binaries in the tree, no impersonating a device to Apple's servers, no credentials.
 - **Not a jailbreak.** The port's own kernel is lenient about code signing by construction (AMFI is a
   stand-in that accepts any parseable signature); nothing here attacks a real device.
-- **Not fast.** The renderer is a CPU rasteriser. 24 fps is a target, not a claim: the measured
-  ceiling today is about 7 fps of animation.
+- **Not fast.** The renderer is a CPU rasteriser. With the host drawing the frame the ceiling is
+  9–14 fps (9.09 measured, 11 the short-term target); 24 fps is a target, not a claim, and it needs a
+  real 3D path or same-architecture virtualisation.
 
 ## Documentation
 
