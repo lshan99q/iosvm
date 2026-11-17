@@ -57,7 +57,7 @@ static unsigned long long frames_replayed;
 /* Stage 24: a full-screen BGRA static patch sent once before an R, composited over the replay. */
 static unsigned char *static_patch_pixels;
 static int static_patch_x, static_patch_y, static_patch_w, static_patch_h;
-static int static_patch_on, static_patch_init, static_patch_have;
+static int static_patch_on, static_patch_init, static_patch_have, static_patch_skipped;
 /* The picture of the frame before: the guest's uploaded panel is the surface as of the previous
  * present (measured: picture(N) == panel(N+1) for every animating frame of a --no-panel run), so
  * the acceptance that "the host drew what the guest drew" is read against this one. */
@@ -4426,7 +4426,34 @@ serve_frame(struct client *client)
 			fclose(file);
 		}
 	}
-	if (static_patch_on && static_patch_have &&
+	/* Is the replay anything but the idle home screen yet?  The static patch is the home screen's
+	 * undrawn lower half, so it must not be pasted over a frame an app has drawn into: the demo
+	 * would then look frozen whatever the guest did.  Coverage = share of clearly lit pixels in
+	 * the lower 60% of the frame; below patch_min_coverage the patch is applied. */
+	if (static_patch_on && static_patch_have) {
+		const char *env = getenv("GLWIRE_PATCH_MIN_COVERAGE");
+		double min_cov = env != NULL ? atof(env) : 0.10;
+		size_t lit = 0, total = 0;
+
+		for (int y = (int) (height * 0.4); y < (int) height; y++) {
+			const unsigned char *row = picture + (size_t) y * (size_t) width * 4;
+
+			for (int x = 0; x < (int) width; x++, total++) {
+				const unsigned char *p = row + (size_t) x * 4;
+
+				if (p[0] > 8 || p[1] > 8 || p[2] > 8) {
+					lit++;
+				}
+			}
+		}
+		if (total != 0 && (double) lit / (double) total >= min_cov) {
+			static_patch_skipped = 1;
+		} else {
+			static_patch_skipped = 0;
+		}
+	}
+	if (!static_patch_skipped &&
+	    static_patch_on && static_patch_have &&
 	    static_patch_x >= 0 && static_patch_y >= 0 &&
 	    static_patch_x + static_patch_w <= width && static_patch_y + static_patch_h <= height) {
 		for (int y = 0; y < static_patch_h; y++) {

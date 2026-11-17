@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IOSVM · 11 fps 达成 · 实时演示机</title>
+<style>
+  :root{--paper:#14140f;--ink:#efeadd;--dim:#a8a294;--rule:#2e2e25;--accent:#e2623c;--ok:#7ddc7d}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:ui-serif,Georgia,"Times New Roman",serif;line-height:1.5}
+  .wrap{display:grid;grid-template-columns:minmax(320px,1fr) minmax(360px,520px);gap:28px;padding:28px;max-width:1500px;margin:0 auto}
+  @media (max-width:980px){.wrap{grid-template-columns:1fr}}
+  h1{font-size:26px;margin:0 0 6px}
+  .sub{color:var(--dim);font-size:14px;margin-bottom:16px}
+  .big{color:var(--accent);font-size:44px;line-height:1;letter-spacing:-1px}
+  .big small{font-size:15px;color:var(--dim);letter-spacing:0}
+  .phone{border:1px solid var(--rule);border-radius:18px;overflow:hidden;background:#000;position:relative;aspect-ratio:750/1624;max-height:78vh;margin:0 auto}
+  .phone iframe{width:100%;height:100%;border:0;display:block}
+  .hint{color:var(--dim);font-size:13px;margin-top:10px;text-align:center}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0 18px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--rule)}
+  th{color:var(--dim);font-weight:normal}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;border:1px solid var(--rule);font-size:12px;color:var(--dim)}
+  .ok{color:var(--ok)}
+  .card{border:1px solid var(--rule);border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .kv{display:flex;justify-content:space-between;gap:12px;font-size:14px;padding:4px 0;border-bottom:1px dotted var(--rule)}
+  .kv:last-child{border-bottom:0}
+  .kv b{font-weight:600;font-variant-numeric:tabular-nums}
+  code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--dim)}
+</style>
+<div class="wrap">
+  <div>
+    <h1>IOSVM · stage 24 成果 · 实时演示机</h1>
+    <div class="sub">宿主体素回放 + ack-only + gkbf + 免面板 blit —— 目标 11 fps，实测 <b class="ok">13.9 fps / 75 ms</b></div>
+    <div class="phone"><iframe id="live" src="http://" + location.hostname + ":6083/"></iframe></div>
+    <div class="hint">这台就是客机实时画面（宿主回放帧）；<b>直接点画面 = 触摸屏点按</b>，可操控 SpringBoard。</div>
+  </div>
+  <div>
+    <div class="card">
+      <div class="big" id="fps">— <small>fps（实时，最近 3 s）</small></div>
+      <div class="kv"><span>累计帧 / 分辨率</span><b id="frames">—</b></div>
+      <div class="kv"><span>连接</span><b id="conn">连接中…</b></div>
+    </div>
+    <div class="card">
+      <div style="color:var(--dim);font-size:13px;margin-bottom:6px">一帧 75 ms 的去向</div>
+      <table>
+        <tr><th>段</th><th style="text-align:right">ms</th></tr>
+        <tr><td>display 整屏放大 blit（原 62 ms，已废）</td><td class="n">~0</td></tr>
+        <tr><td>GL 插桩路径（glFlush 13.3 为主）</td><td class="n">13.8</td></tr>
+        <tr><td>像素相关合成/布局（fbscale 差分推断）</td><td class="n">31–37</td></tr>
+        <tr><td>CA/backboardd 其余 + TCG（归因中）</td><td class="n">25–30</td></tr>
+        <tr><td>宿主回放（不计入客机帧）</td><td class="n">1.4</td></tr>
+      </table>
+      <div style="color:var(--dim);font-size:13px">演进：9.09 fps / 117 ms → <b class="ok">13.9 fps / 75 ms</b>；多核已判死（Ticket spinlock panic）。</div>
+    </div>
+    <div class="card">
+      <div style="color:var(--dim);font-size:13px;margin-bottom:6px">怎么自己看</div>
+      <div class="kv"><span>实时页（可点击操控）</span><b><a href="http://" + location.hostname + ":6083/" id="link6083" style="color:var(--accent)">:6083/</a></b></div>
+      <div class="kv"><span>状态 JSON</span><b><a href="/status" style="color:var(--accent)">/status</a></b></div>
+      <div class="kv"><span>guest md5</span><b><code>system 49ae3cf4 / root 7c7da1a5</code></b></div>
+      <div class="kv"><span>二进制约</span><b><code>kernel c153053e / lib 40463969</code></b></div>
+    </div>
+  </div>
+</div>
+<script>
+  var host = location.hostname || '127.0.0.1';
+  document.getElementById('live').src = location.protocol + '//' + host + ':6083/';
+  document.getElementById('link6083').href = location.protocol + '//' + host + ':6083/';
+  function poll(){
+    fetch('/status', {cache:'no-store'}).then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function(s){
+        document.getElementById('conn').textContent = '在线';
+        document.getElementById('conn').className = 'ok';
+        document.getElementById('fps').innerHTML = (s.fps_now||0).toFixed(1) + ' <small>fps（实时，最近 3 s）</small>';
+        document.getElementById('frames').textContent = (s.frames||0) + ' 帧 / ' + (s.width||0) + '×' + (s.height||0);
+      }).catch(function(e){
+        document.getElementById('conn').textContent = '等待客机出帧（首帧约 15–20 分钟）';
+        document.getElementById('conn').className = '';
+      });
+  }
+  poll(); setInterval(poll, 3000);
+</script>
+</html>

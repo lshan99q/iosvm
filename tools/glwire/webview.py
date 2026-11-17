@@ -66,6 +66,7 @@ class Picture:
         magic, seq, w, h, nbytes, _pad, _ns = HEADER.unpack_from(self.map, 0)
         if magic != 0x57464C47 or nbytes != w * h * 4:
             return None
+        self.last_error = ""
         if HEADER.size + nbytes > self.size:
             return None
         return seq, w, h, bytes(self.map[HEADER.size:HEADER.size + nbytes])
@@ -170,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             with open(PAGE, "rb") as f:
                 return self._page(f.read(), "text/html; charset=utf-8")
-        if path == "/stats":
+        if path in ("/stats", "/status"):
             p = self.picture
             now = time.time()
             recent = sum(1 for t in p.times if now - t <= 3.0)
