@@ -42,3 +42,26 @@
   下一步优先验证「换掉 LL/SC」：用 `-cpu max`（ARMv8.1 LSE 原子）看 xnu 是否改用 LSE、是否不再死锁（T3），
   再做 `tb-size=4096`（T2）与 panic 现场（T4/T5）。
 - 注意：T1 也证明“内核 SMP 路径本身能跑”（同一内核、同一 `_pset0` 锁，只是不并行），H-B 权重下降。
+
+### T3：`-cpu max`（ARMv8.1 LSE 原子）——负（2026-11-18 21:30，`s27-smp2-lse`）
+- 同型 panic：`panic(cpu 0 ...): Ticket spinlock[0xfffffff007b6c880] timeout after 60000034 ticks; ...
+  waiting for 0xe2, current owner: 0xfffffff636175698 (on CPU 1)`。换 CPU 模型不能绕过。
+
+### T4：panic 瞬间抓现场（2026-11-18 21:37，`s27-smp2-dump`）
+- 看门狗在 panic 后 2 秒内拿到：**guest CPU0 的完整寄存器**（QMP `info registers`）、宿主 qemu 每个线程的占用。
+- 关键读数：**owner 线程在 CPU 1**；宿主侧两个 vCPU 线程各 ~62% CPU（都在跑，不是睡死）→ 持有者不是“被挂起”，而是**在 CPU1 上忙**。
+- 拿不到的东西：① CPU1 的寄存器（QMP `human-monitor-command` 的 `cpu 1` 状态不跨调用保留，`info registers` 永远指向 CPU0；
+  已验证 `cpu 1; info registers` 不被接受）；② 宿主线程栈（`ptrace_scope` 禁止 attach，无 root）；
+  ③ guest gdbstub（系统 gdb 不支持 aarch64，且没装 gdb-multiarch）。
+- 已给 `qemu/run.sh` 加 `QEMU_GIC` 覆盖（默认 3），供下面的 GICv2 试验用。
+
+### GICv2 —— 不启动（2026-11-18 21:51，`s27-smp2-gic2`）
+- `-M virt,gic-version=2` 下内核在 loader 跳转后无任何输出（`jumping to f745d4a8` 之后停住），guest 串口 0 行 panic。
+- 结论：**GICv2 不被这个内核支持，排除。**
+
+### 现在的结论与下一步
+- 已排除：多核调参（超时 4×）、绑核（只降低概率）、`-cpu max`、GICv2、`thread=single`（能稳但无加速）。
+- 现场指向：**锁持有者（CPU1 上的线程）在忙但不放锁** → 要么 CPU1 在中断里自锁（同一把 pset 锁重入），要么它在等另一把锁（锁序反转），
+  要么 MTTCG 丢了唤醒/中断使它永远出不了临界区。要证实必须看 **CPU1/持有者的 PC**。
+- 下一步（T5，唯一可行）：**内核补丁**——在 `lock_ticket.c` 的超时 panic 里打印持有者线程的保存现场（pc/lr/sp + 8 个栈字），
+  再离线符号化（`/tmp/knsyms.txt`）。这是在没有 root/ptrace 的情况下唯一能拿到 CPU1 线索的办法。
