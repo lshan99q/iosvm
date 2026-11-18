@@ -60,7 +60,7 @@ The second, faster loop — the host does the drawing, the guest only records it
 | networking to the host (LAN) | **yes** — `en0` 10.0.2.15, HTTP both ways | [addendum 30](docs/research/linux-kernel-build.md) |
 | names, DNS | no — configd's plugin never registers here | addendum 30 |
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
-| animation smoothness | ~4–7 fps locally; **15.9 fps with the host drawing the frame** (2 pinned vCPUs), complete picture | [stage 25](docs/stage25-multicore.md) |
+| animation smoothness | ~4–7 fps on the CPU rasteriser; **13.9 fps with the host drawing the frame** (one vCPU, the delivered setting); two pinned vCPUs reach ~15.9 fps but are not yet stable — [open problem](#multi-core-an-open-problem-stage-27) | [stage 25](docs/stage25-multicore.md), [stage 27](docs/stage27-multicore.md) |
 | complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
 | watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
@@ -114,7 +114,7 @@ The frame the host composites is the one to look at.
 
 | | measured |
 |---|---|
-| host replay, complete picture | **13.9 fps** on one vCPU (the delivered setting; picture byte-identical to the baseline). Two pinned vCPUs reached 15.6–18.3 fps but panic on a scheduler lock often enough to be unusable |
+| host replay, complete picture | **13.9 fps** on one vCPU (the delivered setting; picture byte-identical to the baseline). Two pinned vCPUs reach ~15.9 fps (stage 25) but have panicked on a scheduler lock in stage 27 — see below |
 | the host's own cost per frame | ~41 ms before `gkbf=1`; **~1.4 ms** with it (records 90 KB → 4–19 KB a frame) — never the bottleneck |
 | the guest's frame budget | was 117.1 ms = CA 71.0 + encode/copy 46.8 + wait 1 µs; the "CA 71 ms" turned out to be the display driver's **full-panel upscale blit** (750×1624 → 1125×2436, 2.74 M pixels): 62 ms/swap, now skipped (`fb_noblit=1`) |
 
@@ -133,6 +133,25 @@ Two consequences worth writing down, because both look like they should work and
 `virtio-gpu` (stage 23) is implemented end to end — control queue, 2D resource, scanout, transfer,
 flush — and measured **zero** frame-rate gain (1.80 → 1.85 fps, inside the noise): the transport was
 never the bottleneck. It stays as the groundwork for a 3D path, not as a speed-up.
+
+## Multi-core: an open problem (stage 27)
+
+Multi-core is **not ruled out** — it is the largest measured speed-up available, and it is being
+worked on as a must-solve item. Pinning helps; it has not yet made the configuration reliable.
+
+| configuration (same host load) | median fps | result |
+|---|---|---|
+| 1 vCPU, pinned | 9.9 | baseline |
+| 2 vCPUs, pinned to two host cores | 15.6–15.9 | +58–60 %; stage 25 ran 30 min with 0 panics, stage 27 reproduced scheduler-lock panics |
+| 4 vCPUs, pinned | 14.4 | no gain: total CPU per frame nearly doubles (MTTCG overhead and lock contention) |
+| 2 vCPUs, not pinned | — | Ticket spinlock panic within 5 frames |
+
+Stage 27 (2026-11-18) records five pinned two-vCPU runs: two ran 30 minutes without a panic, three
+crashed within 5–10 minutes, all on the scheduler processor-set lock (`_pset0`). Loosening the
+ticket-lock timeout 4× did not help, which points at a lock holder that stops releasing rather than a
+short host preemption. The working hypotheses and the test matrix (`thread=single`, `tb-size`, CPU
+model, a panic-time dump of every CPU, host isolation) are in [stage 27](docs/stage27-multicore.md).
+Until those tests pass, the delivered setting stays one vCPU.
 
 ## How it came to boot
 
@@ -177,6 +196,8 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
 | | |
 |---|---|
 | [`docs/state-of-the-port.md`](docs/state-of-the-port.md) | one page: what works, what does not |
+| [`docs/stage25-multicore.md`](docs/stage25-multicore.md) | the first pinned two-vCPU measurements |
+| [`docs/stage27-multicore.md`](docs/stage27-multicore.md) | the multi-core problem: hypotheses, test matrix, acceptance |
 | [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md) | the long note: every measurement, and the mistakes |
 | [`docs/architecture.md`](docs/architecture.md) | how the pieces fit |
 | [`docs/phases.md`](docs/phases.md) | milestones, one acceptance command each |
