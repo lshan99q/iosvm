@@ -62,3 +62,21 @@ GL=1 GLREMOTE=1 REST=1 CONFIGD=1 THEOS=/host/iosvm-work/tmp-theos DARWIN=$PWD/sy
 1. 解决 loader：装 lld 或用 llvm-objdump 定位并二进制改 `display-scale`（3→1），再 `fbscale=1` 起一发，看布局是否正常（预期：画面正确 + CPU/帧 75 → ~45–50 ms）。
 2. 若 1× 布局可接受 → 巩固 20 fps；若布局崩 → 回到 C（脏矩形）路线，20 fps 降级为“需更大改动”。
 3. 线程级采样仍值得做（补 25–30 ms 盲区），可与上面并行。
+
+## 七、B 路线实测：1× 判死，并推翻了 E1 的“像素成本”结论（2026-11-18 14:55）
+- 做法：loader 二进制补丁 `display-scale` 3→1（`a1004738: mov w8,#1`）+ `fbscale=1`，客机日志确认 **`display 375x812`**、SHM 输出 375×812，单核绑核跑 30 分钟。
+- 结果：**92 帧、CPU/帧 82 ms（基线 75–87）、墙钟 8.5 fps**——比基线没快，反而更慢；画面不可用（黑+绿块）。
+  画面废有两层原因：① 静态补丁是 750×1624 的旧图，375×812 的帧贴不上（尺寸不匹配直接跳过）；② 1× 回放的覆盖本身也不全。
+- **重要更正**：18:14 的 E1（`fbscale=1`、loader 仍 3×）测到的“CPU/帧 75→44 ms”是**假收益**——
+  当时 UIKit 以为 3×（画 1125 宽）而 surface 只有 375 宽，大量绘制被裁掉没做，所以快；窗口布局也因此崩。
+  所以 **“像素相关 31–37 ms”这个数不成立**，stage 25 档案里引用它的地方以本条为准。
+- 结论：**B 路线判死**（1× 不给性能、画面不可用）；而且真实账本里目前只有 `glFlush 13.3 ms`、`copy_out ~10.5 ms` 是硬数据，
+  其余 50+ ms 仍是盲区。20 fps（−26 ms）必须先把盲区分掉，再谈砍哪块。
+
+## 八、下一阶段（本轮起）
+1. **线程级 CPU 采样**（现在能构建 guest 了）：每帧/每 200 帧打印 SpringBoard、backboardd、eagl/CA render 线程的 user+sys 增量，
+   把 50+ ms 分到进程/线程；这是 20 fps 的前置条件。
+2. 依据采样结果选刀：若 backboardd 合成占大头 → 研究跳过/降频合成；若 SpringBoard 布局占大头 → CA 路径；
+   若 restart/eagl 线程占大头 → wire/记录路径（已知道 13.3 ms 在 glFlush）。
+3. 恢复交付状态：loader 已打补丁，需要时可从 `loader.efi.bak-scale3` 回滚；
+   root 仍是 `root-stage24-blitfast4.apfs`（`7c7da1a5`），system `49ae3cf4`。
