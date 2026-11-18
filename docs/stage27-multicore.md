@@ -77,3 +77,19 @@
 - 要继续 T5，先修构建：要么清空 `BUILD/obj` 在宿主上全量重编（~30–45 分钟），要么找出容器内 link 步骤为什么走 `LC_MAIN`
   （旧内核是 `LC_UNIXTHREAD`，链接参数/工具链差异）。修好后探针才有意义。
 - 重要教训：**动内核前先确认构建产物格式**（`llvm-objdump --macho --private-headers | grep LC_UNIXTHREAD`），否则白跑起机。
+
+### T5 续：内核构建修好了（2026-11-19 02:20）
+- **根因**：`xnu-deps/host/bin/ld64` 这个包装脚本优先用 cctools 的 `ld64`（能理解 XNU 段布局），找不到才退回 LLVM 的 `ld64.lld`。
+  而 `xnu-deps/host/cctools/` 里没有 ld64（它随 Theos 提供），于是退回 LLVM 19 → **产出 `LC_MAIN` + `__TEXT vmaddr=0`**，loader 拒绝（`unexpected kernel layout`）。
+- **修复**（宿主上构建，不要用容器——容器看不到 theos 目录）：
+  ```
+  export LD_LIBRARY_PATH=/home/lshan/theos/cctools/lib:$LD_LIBRARY_PATH
+  PATH=$PWD/xnu-deps/host/bin:$PATH \
+  CCTOOLS_LD64=/home/lshan/theos/cctools/bin/aarch64-apple-darwin11-ld \
+  make kernel JOBS=16 BUILD_DSYM=0          # dSYM 步骤要关（DSYMUTIL 变量为空）
+  # 改过链接器后必须删掉 BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837* 强制重链
+  ```
+- 校验（必须过）：`llvm-objdump --macho --private-headers hakios-kernel | grep LC_UNIXTHREAD`，且 `__TEXT vmaddr = 0xfffffff007004000`。
+- 新内核（含 pset 探针）：**`331c9c8f304252699f71d24b8c825ff5`**，02:25 起 `s27-pset2`（`SMP=2`+`cpus=2` 绑核 + `fb_hz=15`）等 panic，
+  看门狗会在 panic 后抓 guest CPU0 寄存器和宿主线程状态。
+- 上一发验证结论：回滚的旧内核（`ff93b21b`，11-03 的）虽然能起机、画面同基线，但**没有 `fb_noblit`**（驱动每帧 60–115 ms 全屏 blit）→ CPU/帧 111 ms，**不能当交付内核**。
