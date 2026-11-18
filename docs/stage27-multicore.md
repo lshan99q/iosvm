@@ -65,3 +65,15 @@
   要么 MTTCG 丢了唤醒/中断使它永远出不了临界区。要证实必须看 **CPU1/持有者的 PC**。
 - 下一步（T5，唯一可行）：**内核补丁**——在 `lock_ticket.c` 的超时 panic 里打印持有者线程的保存现场（pc/lr/sp + 8 个栈字），
   再离线符号化（`/tmp/knsyms.txt`）。这是在没有 root/ptrace 的情况下唯一能拿到 CPU1 线索的办法。
+
+### T5：内核探针写好了，但**内核构建管线现在产不出可启动的内核**（2026-11-18 22:05–00:20）
+- 补丁本身完成：`lock_ticket.c` 记录 pset 锁最后获取点（`hakios_pset_lock()`：PC + 线程），`processor.h` 的 `pset_lock()` 宏改走它，
+  超时 panic 增加 `pset last took it at %p (thread %p)`。
+- **构建坑一**：`make kernel` 在 dSYM 步骤失败（`DSYMUTIL` 变量为空，bash 把 `--minimize` 当命令执行）→ 用 `BUILD_DSYM=0` 绕开。
+- **构建坑二（致命）**：容器里编出来的内核是 `LC_MAIN` 入口，而 loader 只认 `LC_UNIXTHREAD`（报 `unexpected kernel layout`，`entry 0`）→ 不可启动。
+  老的可用内核（`hakios-kernel.new-2359`、`prebuilt/hakios-kernel`）都是 `LC_UNIXTHREAD`。
+- **构建坑三**：改到宿主上编，`BUILD/obj` 里全是容器路径（`/host/iosvm-work/...`）的依赖，宿主 make 直接 `No rule to make target` 全崩。
+- 处置：**内核已回滚**到可用备份 `hakios-kernel.new-2359`（md5 `ff93b21b73c74be26d1079caa77b534d`），并起一发 `s27-restore` 验证能启动、画面同基线。
+- 要继续 T5，先修构建：要么清空 `BUILD/obj` 在宿主上全量重编（~30–45 分钟），要么找出容器内 link 步骤为什么走 `LC_MAIN`
+  （旧内核是 `LC_UNIXTHREAD`，链接参数/工具链差异）。修好后探针才有意义。
+- 重要教训：**动内核前先确认构建产物格式**（`llvm-objdump --macho --private-headers | grep LC_UNIXTHREAD`），否则白跑起机。
