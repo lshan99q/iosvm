@@ -33,5 +33,12 @@
 - 然后把多核并入交付配方（与 `fb_hz=15` 一起），并更新 handover 的“判死清单”（移除多核、改写结论）。
 - 中途任何实验都遵守：一发一台、成对比较、load 分组、画面校验。
 
-## 五、当前进度
-- T1 正在跑：`s27-smp2-single`（`QEMU_ACCEL=tcg,thread=single` + `SMP=2` + `cpus=2` + 绑核 + `fb_hz=15`，2026-11-18 20:39 起机）。
+## 五、进度
+### T1：`thread=single` 跑满 30 分钟不 panic —— H-A 成立（2026-11-18 21:13，`s27-smp2-single`）
+- `QEMU_ACCEL=tcg,thread=single` + `SMP=2`+`cpus=2` + 绑核 + `fb_hz=15`：**415 帧、0 次 Ticket spinlock、0 panic**，
+  guest `2 of 2 processors are running`，画面 sha256 = 基线 `42e14ed2…`。
+- 性能：CPU/帧中位 56 ms（窗口 35–135），墙钟 8.1 fps（load 8.7–11.8）——串行 TCG 没有并行收益，**这是诊断用量，不是解法**。
+- 判读：**只有 vCPU 并行执行（MTTCG）时才死锁** → 指向 QEMU 的并行独占监视器/内存序实现（H-A）。
+  下一步优先验证「换掉 LL/SC」：用 `-cpu max`（ARMv8.1 LSE 原子）看 xnu 是否改用 LSE、是否不再死锁（T3），
+  再做 `tb-size=4096`（T2）与 panic 现场（T4/T5）。
+- 注意：T1 也证明“内核 SMP 路径本身能跑”（同一内核、同一 `_pset0` 锁，只是不并行），H-B 权重下降。
