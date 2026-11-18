@@ -135,3 +135,9 @@ CA commit→显示仍是串行，Amdahl 上限 1.5–2×；当前 12–14 fps �
 - 影响：**任何 guest 侧改动（eagl/lib/root）都暂时做不了**；kernel 侧（hakios-kernel）仍有源码，但 guest 用户态不行。
 - 要恢复：重新解出 sysimage（源 IPSW 的 Darwin 卷），或从备份恢复该目录。在此之前，`glwire_ack_window` 只能留在工作树里等。
 - 备注：工作树里 `userland/src/eagl_remote.c` 已包含 ack window 的实现（`remote_ack_window`、`glwire_ack_window=`），未验证、未打包。
+
+## 十四、系统镜像重建的验收（2026-10-18 10:33，`s25-recover`）
+- 10-18 的 `PREBUILT=1` 构建顺带重写了 `userland/system.apfs`（`49ae3cf4` → `6be494f1`，大小同为 2,476,752,896）。
+- 用**已知可用的 root `7c7da1a5` + 新 system `6be494f1`** 启动验收（`SMP=1` 绑核，684 帧，load 10.5–13）：
+  正常起机、`display 750x1624`、**画面 sha256 = 基线 `42e14ed2…`**、0 panic、中位 **14.5 fps / 76 ms**。
+- 结论：新系统镜像与旧的等价可用；md5 记录以 `6be494f1` 为准。构建禁忌已写进 handover 第六节。

@@ -18,7 +18,8 @@
 - 关键两刀：`gkbf=1`（CA 记录量 90 KB/帧 → 4–19 KB，宿主 41 → 1.4 ms/帧）+ **`fb_noblit=1`**
   （拿掉客机每帧 1125×2436 = 274 万像素的整屏放大 blit，驱动自报 62 ms → 24 µs）。
 - md5：root `7c7da1a5e4dc5cb6044e4e813f001ae3`、kernel `c153053e3b6e374ae9c5f05c6ca1f508`、
-  system `49ae3cf4fd53334b475a921eb9915008`、lib `40463969cfb9cb7be14a20ded6042a05`。
+  system **`6be494f16775402cab1fa2120ca24112`**（10-18 由 build.sh 重建，大小与旧 `49ae3cf4` 相同、启动/画面 sha256 相同，可用）、
+  lib `40463969cfb9cb7be14a20ded6042a05`。
 - 注意：墙钟 fps 随宿主负载剧烈波动（隔壁 win2022-gpu 常占 3.4 核）。单发绝对值不可比，
   **必须成对测 + 看 CPU/帧**（采样脚本见第七节）。
 
@@ -65,6 +66,10 @@
 - 侧写：`/dev/shm` 快照转 PNG 用 `/tmp/s24-shot.py <shm.bin> <out.png>`（40 字节头 + BGRA）。
 - 报告必带 system md5 + lib md5 + kernel md5；工作基线 system `8bf5f838`。
 - scion 命令必须在 `/home/lshan/DSH-desktop/iosvm` 下执行；`scion message` 用 `--body-file`（heredoc 直接跟参数会报错）。
+- **构建禁忌**：`userland/build.sh` 会**重写 `userland/system.apfs`**（2.4 GB），跑之前必须先备份；它还要
+  `-isysroot ~/theos/sdks/iPhoneOS16.5.sdk`，而容器里 `~/theos/sdks` 是空的 → 动态程序编不过（`_strdup`/`-lSystem` 错）。
+  `PREBUILT=1` 能跑通但会跳过 GL lib 与大部分程序，产出的 root 只有 4.19 MB，不可用。
+  当前状态：**guest 侧（eagl/lib/root）暂时无法正确重建**；`glwire_ack_window` 的实现留在工作树里等 SDK。
 
 ## 七、省 token 规则（主人明确要求撑到本周日）
 1. 每轮最多 2 条 dispatch，单条 ≤400 字，只派一个可量化实验。
