@@ -127,3 +127,11 @@ CA commit→显示仍是串行，Amdahl 上限 1.5–2×；当前 12–14 fps �
   交付回 **`SMP=1`+`cpus=1`：13.9 fps / 75 ms，画面逐字节相同，历史上无此类 panic**；
   15.6–18.3 fps 那一档记为“多核实测但不可靠”，文档留档不删，避免以后有人再撞一遍。
 - 真要再碰多核，前提是换 CPU 模型/真虚拟化（同架构 hypervisor）或修 xnu 在这套 PE 下的 SMP 路径，不是调参能解决的。
+
+## 十三、基础设施阻塞：guest userland 现在建不了（2026-11-18 08:10）
+- 想给 ack 流水线（`glwire_ack_window`，工作树里已有实现）打包时发现：`userland/build.sh` 依赖 `DARWIN=../sysimage`
+  （从 IPSW 提取的 Darwin 根），而 **`/home/lshan/DSH-desktop/iosvm-work/sysimage` 已不存在**，全盘 `/home/lshan` 下也找不到。
+  → 动态链接的 guest 程序全部报 `ld64.lld: error: library not found for -lSystem`，root.apfs/lib 无法重建。
+- 影响：**任何 guest 侧改动（eagl/lib/root）都暂时做不了**；kernel 侧（hakios-kernel）仍有源码，但 guest 用户态不行。
+- 要恢复：重新解出 sysimage（源 IPSW 的 Darwin 卷），或从备份恢复该目录。在此之前，`glwire_ack_window` 只能留在工作树里等。
+- 备注：工作树里 `userland/src/eagl_remote.c` 已包含 ack window 的实现（`remote_ack_window`、`glwire_ack_window=`），未验证、未打包。
