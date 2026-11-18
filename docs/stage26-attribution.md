@@ -1,0 +1,26 @@
+# stage 26 归因：一帧的 CPU 到底在谁身上（2026-11-18 17:00）
+
+方法：给注入进 backboardd / SpringBoard / 其他进程的库加 5 s 周期探针（`getrusage(RUSAGE_SELF)`），
+再加 `host_statistics(HOST_CPU_LOAD_INFO)` 取 guest 的 user/system/idle tick 累计。纯用户态探针，不改渲染路径。
+日志：`logs/s26-cpuprobe/`、`logs/s26-hostcpu/`。
+
+## 一、结果
+- **guest CPU 拆分（337 个 5 s 区间）**：**user 40.5% / system 59.5% / idle 0.0%**。
+  → 客机是满载的，而且 **六成时间在内核态**；`fbscale`/CA/像素那类用户态优化不可能解决它。
+- **按进程（同发的探针）**：SpringBoard **≈0%**、backboardd **0.2%**、containermanagerd **13.1%**（占一个核）。
+  三个加起来只有 ~13%；**剩下 ~87% 不在这些被注入的进程里**（其他用户态进程 + 内核 + TCG 开销）。
+- 旁证：1× 缩放实验（`display 375x812`、CPU/帧反而 82 ms）与这个结论一致——像素不是重点。
+
+## 二、含义
+- 之前“CA/像素占 31–37 ms”的推断（来自 E1 的假收益）已被推翻；真实结构是**内核态为主**。
+- 内核态的大头候选：syscall/异常陷入（TCG 下每次陷入都贵）、mach IPC（iOS 的 UI 通路）、内存拷贝/缺页、
+  驱动路径。要定位必须**在内核里数**，不能靠猜。
+- containermanagerd 的 13% 值得单独查：如果它是在空转轮询，砍掉它就能白拿 ~13%（76 → 66 ms，≈15 fps）。
+
+## 三、下一步（按性价比）
+1. **内核态全进程 CPU 采样**：heartbeat 已有 `allproc` 遍历，扩成“每个进程的 user+system 增量，取前 8 名”，
+   一次内核构建（~15 min）就能把 87% 分到具体进程。
+2. **syscall 计数**：在 syscall 入口按编号计数、heartbeat 每 5 s 打 top 8，确认是陷入次数还是某几个慢调用。
+3. **便宜 A/B（无需重建）**：`fb_hz=15`（降低显示刷新/唤醒频率，正在跑）、`ca_vbl=1`（CA 用 vsync 而不是自己的定时器）、
+   以及裁掉 containermanagerd 的 root（用 `JOBS=` 构建）。
+4. 结论纪律：任何改动必须同时看墙钟、CPU/帧、画面 sha256；单发不可比，成对或带 load。
