@@ -6,6 +6,10 @@
 # GLWIRE_PATCH_MIN_COVERAGE=2 keeps the static patch always on: the replay alone leaves the lower half
 # black (and some frames wholly wrong), and the patch is what makes the picture complete.
 #
+# fb_hz=15: the display refresh at 15 Hz instead of 60 -- the refresh notices/wakeups are kernel time
+# and cost ~18 ms a frame (69 -> 51 ms measured; 10 Hz is the same, 5 Hz is worse).  fb_beat=0 keeps
+# the refresh from gating frames, so this lowers cost without lowering the frame rate.
+#
 # Why the pinning matters: with `-smp 2` and no pinning the guest panics inside boot
 # ("Ticket spinlock timeout after 60000047 ticks", CPU 1 waiting on a ticket owned by CPU 0):
 # a vCPU thread that the host deschedules long enough makes the other CPU spin to the timeout.
@@ -35,7 +39,7 @@ cd "$K"
 python3 -c "open('qemu/vars.fd','wb').write(b'\xff'*(64<<20))"
 env QEMU_RAM_GB=12 QEMU_INSTANCE=1 QEMU_NET=1 QEMU_SMP="$NCPU" QEMU_TB_MB=1536 \
   QEMU_EFI="$K/qemu/efi64.fd" QEMU_VARS="$K/qemu/vars.fd" \
-  CMDLINE="cpus=$NCPU virtio_gpu=2 virtio_sound=1 virtio_net=1 fb_beat=0 fbscale=2 metal=1 gkbf=1 glwire_ack_only=1 launchd_disable_all_timeouts=1" \
+  CMDLINE="cpus=$NCPU virtio_gpu=2 virtio_sound=1 virtio_net=1 fb_beat=0 fbscale=2 metal=1 fb_hz=15 gkbf=1 glwire_ack_only=1 launchd_disable_all_timeouts=1" \
   nohup timeout "$SECS" taskset -c "$CORES" bash qemu/run-darwin.sh "$SECS" -L "$K/qemu-roms" >"$OUT/serial.log" 2>&1 &
 echo "up: tag=$TAG vcpus=$NCPU cores=$CORES host=$HOST_CORES logs=$OUT"
 echo "watch: python3 tools/glwire/webview.py --port 6083 --bind 0.0.0.0 --crop 0"

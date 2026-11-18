@@ -9,7 +9,8 @@
 - **状态：已达成**（2026-11-17 17:17）——稳态中位 **13.9 fps / 75 ms**，画面与基线逐字节相同。见第五节。
 
 ## 二、当前最好成绩（可直接引用）
-- **交付用单核：13.9 fps / 75 ms**（`SMP=1`+`cpus=1`，画面逐字节相同，历史无调度锁 panic）；**多核已判死**：绑核能跑但会 panic（`_pset0+0x100` 调度锁，放宽超时 4× 也救不回，见 docs/stage25-multicore.md 第十二节）。`tools/glwire/run-pinned.sh` 可起栈，`NCPU=2` 只当短跑实验。
+- **交付用单核 + `fb_hz=15`：CPU/帧 51 ms ≈ 19.6 fps**（实测 60 Hz 69 ms → 15 Hz 51 ms，画面逐字节相同；10 Hz 53 ms、5 Hz 64 ms，拐点在 10–15 Hz）；
+- 单核旧口径：13.9 fps / 75 ms（`SMP=1`+`cpus=1`，画面逐字节相同，历史无调度锁 panic）；**多核已判死**：绑核能跑但会 panic（`_pset0+0x100` 调度锁，放宽超时 4× 也救不回，见 docs/stage25-multicore.md 第十二节）。`tools/glwire/run-pinned.sh` 可起栈，`NCPU=2` 只当短跑实验。
   配置 = remote-only + 全屏补丁 + host `GLWIRE_ACK_ONLY=1` + guest `glwire_ack_only=1 gkbf=1` + auto `fb_noblit`
   + `QEMU_SMP=2 cpus=2` + vCPU 绑 `taskset` 独占核。多核净收益 +60%（同负载 SMP=1 中位 9.9 fps）。
 - 单核（交付）：13.9 fps / 75 ms（load 5.5–8）；**高负载复核 11.7 fps / 87 ms（load 10–15.5，0 panic，画面 sha256 = 基线）**——墙钟随宿主负载线性掉，报数必须带 load。
