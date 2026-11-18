@@ -93,3 +93,23 @@
 - 新内核（含 pset 探针）：**`331c9c8f304252699f71d24b8c825ff5`**，02:25 起 `s27-pset2`（`SMP=2`+`cpus=2` 绑核 + `fb_hz=15`）等 panic，
   看门狗会在 panic 后抓 guest CPU0 寄存器和宿主线程状态。
 - 上一发验证结论：回滚的旧内核（`ff93b21b`，11-03 的）虽然能起机、画面同基线，但**没有 `fb_noblit`**（驱动每帧 60–115 ms 全屏 blit）→ CPU/帧 111 ms，**不能当交付内核**。
+
+### T5 第三轮：找到持锁者了——**在 `thread_block_reason` 里拿着 pset 锁**（2026-11-19 06:00，`s27-pset3`）
+- 探针升级为 64 项环形表（记录每次 pset 锁获取的 thread+PC），panic 打印 `owner took it at %p`。崩溃样本：
+  ```
+  panic(cpu 0 …): Ticket spinlock[0xfffffff007b6cc80] timeout after 60000027 ticks;
+  cticket: 0xbd, nticket: 0xbf, waiting for 0xbe,
+  pset last took it at 0xfffffff00733d598 (thread 0xfffffff43e7dd698),
+  owner took it at 0xfffffff007303ce4, current owner: 0xfffffff43e808e50 (on CPU 1)
+  ```
+- 符号化（用当次内核的符号表）：
+  - **`owner took it at … → _thread_block_reason+0xbc`** ← **持有者正在线程阻塞/切换路径里**；
+  - `pset last took it at … → _waitq_select_queue_flush+0x114`（唤醒路径，也是 pset 锁的常见入口）；
+  - panic caller → `_lck_grp_ticket_update_spin`。
+- 判读：这不是“锁被忘了放”，而是**在 `thread_block_reason` 里接手/持着 `_pset0` 调度锁的线程把 CPU 切走了（或被卡住），锁再也没有释放**；
+  另一颗 CPU 在 `lck_ticket_contended` 里无限等 ticket 0xbe。典型形态是「持调度锁做上下文切换」的握手在 MTTCG 下被打断/丢失。
+- 下一步（代码级，不再靠撞概率）：
+  1. 读 xnu 的 `thread_block_reason()` → `machine_switch_context()` 段，确认 pset 锁在何处置放、由谁置放；
+  2. 对照本 port 的 arm64 切换代码（`ml_switch_context` / 汇编存栈）看是否假设了“中断关闭的原子性”，而 TCG 的 `thread=multi` 下该假设失效；
+  3. 若确认是“切走后锁未放”，可试最小补丁：在切换前显式释放 pset 锁（或改用不跨切换持锁的写法），先在 SMP=2 上验证 2×60 分钟。
+- 复盘：`thread=single` 不崩、`thread=multi` 崩 → 竞争窗口只在并行执行时打开；`-cpu max`/GICv2/放宽超时都无效，与“持锁切走”这一解释一致。
