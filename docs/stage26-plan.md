@@ -42,3 +42,23 @@ GL=1 GLREMOTE=1 REST=1 CONFIGD=1 THEOS=/host/iosvm-work/tmp-theos DARWIN=$PWD/sy
 - `GL=1`：编 `libhakios.gl.dylib`（不加就跳过 GL 库）；`GLREMOTE=1`：生成 `/redwood/bin/glremote_on`（不开就没有 remote-only，实测 `on=0`）；
   `REST=1`/`CONFIGD=1`：补齐 launchd 任务与配置。
 - 构建会重写 `system.apfs`（2.4 GB）——跑前备份；输入不变时内容等价（实测回到了原始 `49ae3cf4`）。
+
+## 五、本轮结果（2026-11-18 13:26 / 13:50）
+### A1 ack 流水线（`glwire_ack_window=2`，新 root 已验证 `on=1`）
+- 起机正常、画面 **sha256 = 基线 `42e14ed2…`**、0 panic；`s26-ackwin` 711 帧。
+- 数字：墙钟中位 **14.3 fps**（18.5/16.3/14.3/12.8/4.0，load 6.7–8.8），CPU/帧中位 **72 ms**（对照同负载 75–76 ms）；
+  census `copying out` **9 120 µs**（对照 10 537 µs，只降 1.4 ms）。
+- 判读：**提升在噪声内（~4%），ack 往返的 10.5 ms 大头其实不是“等 ack”**，而是发送与记录路径本身。
+  → `glwire_ack_window` 保持默认 1，不作为交付项；该实现留档。
+### B 像素路径：卡在 loader 工具链
+- 真凶确认：`xnuloader/loader.c:3247` **硬编码 `display-scale=3`**（并写进 `/chosen`，MobileGestalt 从这里取主屏 scale）。
+  驱动侧虽然会随 `fbscale` 改 DT 属性，但 MobileGestalt 早已读走缓存 → 这就是 18:14 那次 `fbscale=1` 画面被裁的原因。
+- 已做的准备：给 loader.c 加了 `#ifndef LOADER_DISPLAY_SCALE`（默认 3，行为不变），重建时 `-DLOADER_DISPLAY_SCALE=1` 即可 1× 运行。
+- **阻塞**：容器里没有 `lld-link`，`xnuloader/build.sh` 跑不了（`command not found`），loader.efi 无法重建。
+  两条路：① 装 lld（新软件，需登记 `/home/lshan/new/n.md` 并征得同意）；② 直接对 loader.efi 打**二进制补丁**把 `mov #3` 改成 `#1`（可逆、但需要反汇编定位）。本轮均未做。
+- 结论：**20 fps 的路线 B 需要先解决 loader 构建/改值**；路线 A 已证明最多 ~1.4 ms，达不到 20 fps。
+
+## 六、下一轮建议顺序
+1. 解决 loader：装 lld 或用 llvm-objdump 定位并二进制改 `display-scale`（3→1），再 `fbscale=1` 起一发，看布局是否正常（预期：画面正确 + CPU/帧 75 → ~45–50 ms）。
+2. 若 1× 布局可接受 → 巩固 20 fps；若布局崩 → 回到 C（脏矩形）路线，20 fps 降级为“需更大改动”。
+3. 线程级采样仍值得做（补 25–30 ms 盲区），可与上面并行。
