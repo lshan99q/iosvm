@@ -141,3 +141,14 @@ CA commit→显示仍是串行，Amdahl 上限 1.5–2×；当前 12–14 fps �
 - 用**已知可用的 root `7c7da1a5` + 新 system `6be494f1`** 启动验收（`SMP=1` 绑核，684 帧，load 10.5–13）：
   正常起机、`display 750x1624`、**画面 sha256 = 基线 `42e14ed2…`**、0 panic、中位 **14.5 fps / 76 ms**。
 - 结论：新系统镜像与旧的等价可用；md5 记录以 `6be494f1` 为准。构建禁忌已写进 handover 第六节。
+
+## 十五、ack 流水线：能编出来了，但 root 配置没复现（2026-11-18 12:15）
+- 构建环境复盘：SDK 在 `/home/lshan/theos/sdks-git/iPhoneOS16.5.sdk`，但容器只挂 `iosvm/` 与 `iosvm-work/`。
+  把 SDK 复制到 `iosvm-work/tmp-theos/sdks/`，再 `GL=1 THEOS=/host/iosvm-work/tmp-theos DARWIN=$PWD/sysimage ./userland/build.sh`：
+  **rc=0**，`mkeagl` 跑过，产 root `b43453be`(5.9 MB)/lib `76b78ab7`/system `49ae3cf4`（system 还回到了原始值）。
+- 但用这个新 root 起机（`glwire_ack_window=2`）发现：`hakios-remote: end of frame, on=0` —— **wire 根本没开**，
+  客机在本地画（root 里的选项/rc 与工程用的不一致；默认 build 没有把 remote-only 那套配置烤进去）。
+  所以这次不是「ack window 卡住」，而是「测的镜像配置不对」，**ack window 仍未被验证**。
+- 处置：root 恢复成已知可用的 `root-stage24-blitfast4.apfs`（`7c7da1a5`）；新 root 存档 `iosvm-work/root-stage25-ackwin.apfs`（不配置 wire，只当构建样本）。
+- 要真正验 ack window，需要工程构建时用的那套 root 选项（RC/JOBS/glremote 配置）——目前没在文档里，要么问 code/主人，要么从旧 root 里反查配置文件。
+- 结论：ack 流水线暂停（无收益证据、验证成本高）；交付仍是单核 13.9/14.5 fps，多核判死。
