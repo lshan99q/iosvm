@@ -17,8 +17,10 @@
    | 返回主屏（end） | 8.7 | 0–22 | 71 ms |
    | 空闲（残留动画） | 7.3 | 2–22 | 76 ms |
    最好的窗口（burst 4/5）：tap 24–31 fps、scroll 20–49 fps、CPU/帧 20–31 ms——说明**短时爆发能到 20 fps 以上**。
-3. **异常**：这半小时里 **SpringBoard 被终止 4 次**（`wifid: Client SpringBoard terminated`），
-   之后 burst 10–15 完全不出帧——这是“掉帧/卡顿”的最大嫌疑，下一步单独查（崩溃原因/内存/被杀）。
+3. **更正**：日志里 4 条 `wifid: Client SpringBoard terminated` 是 **wifid 的 XPC 客户端断开**，不是 SpringBoard 进程被杀——
+   整发只有 **1 次 SpringBoard 启动**（pid=24），也没有任何 jetsam/内存压力记录（`memory: free 1400+ MB`）。
+   burst 10–15 不出帧的真实原因更简单：第一轮 tap 已经**打开了设置 App**，之后的“左右划/固定坐标点击”都发生在设置里，
+   不产生可见变化，所以没有帧。测量脚本需要每轮先回主屏、且 tap 只做一次。
 4. 变差的部分：burst 7 以后 CPU/帧从 ~30 ms 涨到 70–100 ms，与 SpringBoard 反复重启、系统后台活动同时发生。
 
 ## 下一步
