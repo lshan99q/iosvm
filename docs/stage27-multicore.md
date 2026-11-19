@@ -113,3 +113,15 @@
   2. 对照本 port 的 arm64 切换代码（`ml_switch_context` / 汇编存栈）看是否假设了“中断关闭的原子性”，而 TCG 的 `thread=multi` 下该假设失效；
   3. 若确认是“切走后锁未放”，可试最小补丁：在切换前显式释放 pset 锁（或改用不跨切换持锁的写法），先在 SMP=2 上验证 2×60 分钟。
 - 复盘：`thread=single` 不崩、`thread=multi` 崩 → 竞争窗口只在并行执行时打开；`-cpu max`/GICv2/放宽超时都无效，与“持锁切走”这一解释一致。
+
+### T5 第四轮：锁的持有区间缩到 `thread_invoke` 的调度临界区（2026-11-19 08:00）
+- 代码事实（`osfmk/kern/sched_prim.c`）：
+  - `thread_invoke()` 在 **2503 行 `pset_lock(pset)`**，在 **2692/2715 行 `pset_unlock(pset)`**，真正的切换在 **3276 行 `machine_switch_context()`**。
+  - `machine_switch_context()` → `Switch_context` 汇编，**不负责释放 pset 锁**；也就是说锁必须在 2692/2715 之前就放掉。
+  - 而我们的探针显示：持有者在 **`_thread_block_reason+0xbc`** 取锁 —— 说明它卡在 2503→2692 这段临界区里，**没走到放锁点**。
+- 待查点（这段里唯一可能“等”的东西）：
+  - 2503–2692 之间会做选线程、`sched_ipi_perform()`（向别的 CPU 发 IPI）、实时线程处理等；
+  - 若 IPI 在 TCG 下丢失/迟到，或选线程时又拿了另一把锁（锁序反转），就会停在这里。
+- 下一步（用小成本探针继续切分）：在 `thread_invoke` 临界区内加“阶段标记”（进入 2503 后、发 IPI 前、发 IPI 后、选线程后各写一个全局序号），
+  panic 时打印该序号 → 直接知道卡在哪一步；再决定修法（guest 内核补丁或 QEMU 侧规避）。
+- 现有探针内核 `73c2a5de`（`LC_UNIXTHREAD` ✓、含环形表）可继续用；单核交付路径不受影响。
