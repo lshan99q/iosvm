@@ -93,6 +93,17 @@ Dates are commit dates on `main`. The repository has about 700 commits from 2026
 | 2026-11-18 | Stage 26 — `fb_hz=15` cuts CPU per frame from 69 ms to 51 ms with an identical picture | `cc17734`, `730e0f7` |
 | 2026-11-18 | Stage 27 — multi-core reopened as a must-solve item; single-threaded TCG runs SMP=2 for 30 minutes with no panic, which points at parallel vCPUs | `b5bd190`, `6df855c` |
 
+## Performance over time
+
+![Frame rate history](docs/charts/fps-history.png)
+
+The development dashboard, and how it is regenerated:
+
+![Development dashboard](docs/charts/dashboard.png)
+
+- `python3 docs/charts/make_chart.py` redraws `docs/charts/fps-history.png` from the measured runs.
+- `python3 docs/charts/dashboard.py` redraws `docs/charts/dashboard.png`.
+
 ## What works today
 
 | | state | evidence |
