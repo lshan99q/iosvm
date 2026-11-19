@@ -125,3 +125,17 @@
 - 下一步（用小成本探针继续切分）：在 `thread_invoke` 临界区内加“阶段标记”（进入 2503 后、发 IPI 前、发 IPI 后、选线程后各写一个全局序号），
   panic 时打印该序号 → 直接知道卡在哪一步；再决定修法（guest 内核补丁或 QEMU 侧规避）。
 - 现有探针内核 `73c2a5de`（`LC_UNIXTHREAD` ✓、含环形表）可继续用；单核交付路径不受影响。
+
+### T6：同核绑定仍崩 → 不是宿主并行/LL-SC 争用（2026-11-19 12:53，`s27-pset5-samecore`）
+- 两个 vCPU 都绑到**同一个宿主核**（`taskset=20`，确认 qemu 亲和性=20），MTTCG 语义不变、宿主不并行：**仍然 panic**。
+  ```
+  panic(cpu 1 …): Ticket spinlock[0xfffffff007b6cc80] … waiting for 0xe,
+  pset last took it at 0xfffffff007303cf4 (thread …),
+  owner took it at 0xfffffff00730a2b0, select loops 948876, current owner: … (on CPU 0)
+  ```
+- 符号化：**`owner took it at → _sched_timeshare_maintenance_continue+0xe4`**（分时调度维护的 continuation），
+  `pset last took it at → _thread_block_reason+0xbc`，`select loops 948876`。
+- 判读：**持有者卡在 `sched_timeshare_maintenance_continue` 里不放 pset 锁**，另一颗 CPU 在 `thread_select` 的 restart 循环里空转近百万次。
+  这解释了为什么同核也崩：问题不在宿主并行度，而在**这个维护例程在 MTTCG 的交替执行下不退出**（或退出条件永远不成立）。
+- 下一步：读 `sched_timeshare_maintenance_continue` 的循环/退出条件，加“进入/退出/循环次数”探针；若确认是它在自旋，
+  修法就是给它一个有界退出（或修掉让条件不成立的那个状态）。
