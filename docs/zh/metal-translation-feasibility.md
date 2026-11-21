@@ -15,7 +15,8 @@
 | **外部报告**（reported） | 外部项目自己的文档（给出 URL），在此未复跑 |
 | **推测**（speculation） | 推理，已如此标注 |
 
-本笔记中的数字没有一个是估算值。实验尚无数字之处写 `TBD (M5)`。
+本笔记中的数字没有一个是估算值。本笔记安排的测量现在都在
+[`docs/zh/stage29-metal-translation.md`](stage29-metal-translation.md) §5 中；记录中没有实测的数字会直接说明，而不是估算。
 
 反引号中的路径，如 `docs/ru/metal.md` 或 `docs/air.md`，属于 **HakiOS 的 Guest 树**
 （`/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel`）——本移植构建于其上，本笔记将其作为
@@ -373,7 +374,7 @@ M0–M4（项目的 M2「GPU 通道」是这项工作之上的父项）。
 | **M2** | 最小的真实路径：插件、线路、宿主 Vulkan 执行器、浏览器中的帧 | `guest/metal-plugin/`、`host/metalwire/`、`tools/metalwire/` | lavapipe 测试全绿；GPU 1 帧回读且 `crc_ok=1`；画面在 `webview.py` 中可见；客户端在 Guest 中运行 | **是——进行中**（代码由其他角色负责） |
 | **M3** | 针对一个系统 shader 的 AIR→SPIR-V | 一份 spike 报告，而不是 `main` 上的代码 | 来自真实 `.metallib` 的 `clearFragment01` 在宿主 GPU 上画出预期像素 | **否**——独立的时间盒 spike；本实验不得尝试 |
 | **M4** | 让 CA 的 Metal 渲染器跑在翻译后的设备上 | 在库问题得到回答之前没有可交付物 | 一帧 CA 画面通过该设备上屏 | **否**——被 R1–R3 阻断；必须先有法务答案 |
-| **M5** | 测量 | 结果填入 `docs/stage29-metal-translation.md` | 带 CRC 与逐字节一致性、按负载分带的成对运行，给数字不给形容词 | **部分**——协议与 CSV 字段已存在；数字来自负责人的运行（`TBD (M5)`） |
+| **M5** | 测量 | 结果填入 `docs/stage29-metal-translation.md` | 带 CRC 与逐字节一致性、按负载分带的成对运行，给数字不给形容词 | **是**——5 × 400 帧、中位 58.3 fps、完整 `memcmp`、同场次 Replay 对照（§5.6）；30 分钟长跑是唯一记录为未运行的项目 |
 | **M6** | 决策 | 更新 ADR-013 状态（作为方向采纳 / 保留为实验 / 停止） | 审查 M2–M5 证据 | **否**——在 M5 之后 |
 
 ### 5.4 明确不在范围内
