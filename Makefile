@@ -77,6 +77,19 @@ host: ## build the host Vulkan backend (host/vkbridge submodule)
 	$(MAKE) -C host/vkbridge
 
 # ---------------------------------------------------------------------------
+# Metal->Vulkan translation experiment (stage 29)
+# ---------------------------------------------------------------------------
+
+metalwire: ## where the Metal->Vulkan translation experiment lives (branch-only, stage 29)
+	@echo "The Metal->Vulkan translation experiment is on branch experiment/metal-translation:"
+	@echo "  git fetch origin && git switch --track origin/experiment/metal-translation"
+	@echo "  make metalwire-host      # the host Vulkan translator (no guest needed)"
+	@echo "  make metalwire-test      # its test on lavapipe, CI-safe"
+	@echo "  make metalwire-guest     # the guest Metal plug-in + client (HAKIOS=<checkout>)"
+	@echo "  make metalwire-worktree  # the private guest run tree (HAKIOS=<checkout>)"
+	@echo "Read docs/stage29-metal-translation.md first; the Replay path is untouched."
+
+# ---------------------------------------------------------------------------
 # Guest side (needs the iPhoneOS SDK, so: a Mac — see ADR-009)
 # ---------------------------------------------------------------------------
 
