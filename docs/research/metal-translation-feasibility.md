@@ -14,7 +14,9 @@
 | **reported** | an outside project's own documentation (URL given), not re-run here |
 | **speculation** | reasoning, labelled as such |
 
-No number in this note is estimated. Where the experiment has no number yet it says `TBD (M5)`.
+No number in this note is estimated. The measurements this note scheduled are now in
+[`docs/stage29-metal-translation.md`](../stage29-metal-translation.md) §5; where a number there is
+not measured the record says so rather than estimating.
 
 Paths in backticks such as `docs/ru/metal.md` or `docs/air.md` belong to the **HakiOS guest tree**
 (`/home/lshan/DSH-desktop/iosvm-work/hakios-xnu-kernel`), which the port is built on and which this
@@ -408,10 +410,10 @@ Milestones are this experiment's own; they are **not** the project milestones M0
 | # | what | deliverable | gate | in this experiment? |
 |---|---|---|---|---|
 | **M1** | feasibility and decision (this note + ADR-013) | `docs/research/metal-translation-feasibility.md`, `docs/adr/ADR-013-metal-translation.md`, `docs/stage29-metal-translation.md` | the report answers the six questions and names what it cannot prove; the lead decides to build M2 | **yes — this document** |
-| **M2** | the smallest real path: plug-in, wire, host Vulkan executor, browser frame | `guest/metal-plugin/`, `host/metalwire/`, `tools/metalwire/` | lavapipe test green; GPU 1 frame read back with `crc_ok=1`; picture visible in `webview.py`; client runs in the guest | **yes — in progress** (other roles own the code) |
+| **M2** | the smallest real path: plug-in, wire, host Vulkan executor, browser frame | `guest/metal-plugin/`, `host/metalwire/`, `tools/metalwire/` | lavapipe test green; GPU 1 frame read back with `crc_ok=1`; picture visible in `webview.py`; client runs in the guest | **yes — done on the branch** (2,000/2,000 frames `crc_ok=1`, browser capture in `docs/demo/`) |
 | **M3** | AIR→SPIR-V for one system shader | a spike report, not code on `main` | `clearFragment01` from a real `.metallib` draws the expected pixel on the host GPU | **no** — separate time-boxed spike; this experiment must not attempt it |
 | **M4** | CA's Metal renderer on the translated device | nothing shippable until the library question is answered | a CA frame through the device, on screen | **no** — blocked by R1–R3; requires a legal answer first |
-| **M5** | measurements | results filled into `docs/stage29-metal-translation.md` | paired runs with CRC and byte-identity, load-banded, numbers not adjectives | **partly** — the protocol and CSV fields exist; the numbers are the lead's runs (`TBD (M5)`) |
+| **M5** | measurements | results filled into `docs/stage29-metal-translation.md` | paired runs with CRC and byte-identity, load-banded, numbers not adjectives | **yes** — 5 × 400 frames, median 58.3 fps, full `memcmp`, Replay control measured in the same session (§5.6); the 30-minute soak is the one item recorded as not run |
 | **M6** | decision | ADR-013 status updated (accept as direction / keep as experiment / stop) | M2–M5 evidence reviewed | **no** — after M5 |
 
 ### 5.4 Explicitly out of scope
