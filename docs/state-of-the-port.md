@@ -12,6 +12,7 @@ not have to rediscover any of it.
 | the panel is writable, from the kernel and from a user-space program | addenda 5 and 7, `docs/demo/first-pixels.png`, `userland-frame.png` |
 | CoreAnimation draws through Mesa `softpipe` | addendum 12, `docs/demo/system-ui-first.png` |
 | **the iOS home screen is drawn by the system itself** | addendum 15, `docs/demo/home-screen.png` |
+| (experiment, branch `experiment/metal-translation`) a synthetic Metal client's blit/present is translated to the host's Vulkan, checked byte for byte and shown in a browser; CoreAnimation is **not** on Metal | `docs/stage29-metal-translation.md`, `docs/demo/metal-translation-webview.png` |
 
 ## How to get the home screen
 
