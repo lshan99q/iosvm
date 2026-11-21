@@ -42,6 +42,9 @@ changing it needs a maintainer review, as `docs/adr/ADR-006-no-credentials.md` r
 | Path | What it is | Made from | SHA256 |
 |---|---|---|---|
 | `docs/demo/**/*.png`, `docs/demo/**/*.gif` | milestone acceptance captures | `tools/screendump.sh` on our own VM; see the NOTES file beside each | per file, in that NOTES file |
+| `docs/charts/fps-history.png` | frame-rate history chart | `python3 docs/charts/make_chart.py`, from the measurements recorded in the stage docs | `95d6db7ca8a4549e7192bc53584729ac1be973e350c99ae41e588a7edd6aa256` |
+| `docs/charts/dashboard.png` | development dashboard | `python3 docs/charts/dashboard.py`, from `git log` and the stage docs | `447ad51571ceab205f65a85c93baa7dcbc785b1c5cfdc4f345f0ab82b93ee1ae` |
+| `docs/charts/metal-translation-history.png` | the Metal→Vulkan experiment's frame rates by implementation (stage 29) | `python3 docs/charts/metal-translation-history.py`, from the runs in `docs/stage29-metal-translation.md` §5.4 | `b5eef8311b7d730790f77cbfea8a686ac0e8626c70514c2442c110dd673e3688` |
 
 ## The tool chain is not downloaded for you
 

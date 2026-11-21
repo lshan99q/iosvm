@@ -67,6 +67,7 @@ PLANNED_PREFIX = {
     "docs/zh/": "archive: quotes the original document names it was written under",
     "guest/": "M2: the guest plugin",
     "host/": "submodule: fetched by make submodule, absent in a bare clone",
+    "tools/metalwire/": "stage 29 experiment: the harness lives on branch experiment/metal-translation",
     "proto/": "submodule: fetched by make submodule, absent in a bare clone",
     "hw/": "M2: the QEMU device",
     "tests/": "M2: protocol units and fake-gpu",
