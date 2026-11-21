@@ -57,3 +57,6 @@ tools/host-glquad/gpu_host
 tools/host-glquad/gpu_host_ram
 tools/host-glquad/rammap
 .scion/
+
+# metalwire host translator build product
+host/metalwire/metalwire_host

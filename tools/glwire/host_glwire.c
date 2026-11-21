@@ -4994,6 +4994,39 @@ make_display(void)
 		}
 	}
 	if (query != NULL && get_display != NULL && query(8, devices, &count) && count > 0) {
+		/*
+		 * Metal experiment: more than one card is in this host, and the delivered replay must not
+		 * take the other experiment's GPU (stage 23 met the same problem and answered it with
+		 * GLWIRE_SOFTWARE_GL). GLWIRE_EGL_DEVICE=N asks for the Nth EGL device; -1 keeps the old
+		 * "first one that initialises". The index is printed, with the DRM render node where the
+		 * driver names it, so a run can prove which card it used.
+		 */
+		{
+			const char *wanted = getenv("GLWIRE_EGL_DEVICE");
+			PFNEGLQUERYDEVICESTRINGEXTPROC describe =
+			    (PFNEGLQUERYDEVICESTRINGEXTPROC)eglGetProcAddress("eglQueryDeviceStringEXT");
+			int choose = wanted != NULL ? atoi(wanted) : -1;
+
+			if (getenv("GLWIRE_EGL_LIST") != NULL || choose >= 0) {
+				for (EGLint i = 0; i < count; i++) {
+					const char *node = describe != NULL ? describe(devices[i], EGL_DRM_RENDER_NODE_FILE_EXT) : NULL;
+
+					printf("host_glwire: EGL device %d%s%s%s\n", i, node != NULL ? " " : "",
+					    node != NULL ? node : "", i == choose ? "  <- asked for" : "");
+				}
+				fflush(stdout);
+			}
+			if (choose >= 0 && choose < count) {
+				EGLDisplay candidate = get_display(EGL_PLATFORM_DEVICE_EXT, devices[choose], NULL);
+
+				if (candidate != EGL_NO_DISPLAY && eglInitialize(candidate, &major, &minor)) {
+					return candidate;
+				}
+				fprintf(stderr, "host_glwire: EGL device %d did not initialise; falling back\n", choose);
+			} else if (choose >= 0) {
+				fprintf(stderr, "host_glwire: no EGL device %d (%d present); falling back\n", choose, (int) count);
+			}
+		}
 		for (EGLint i = 0; i < count; i++) {
 			EGLDisplay candidate = get_display(EGL_PLATFORM_DEVICE_EXT, devices[i], NULL);
 
