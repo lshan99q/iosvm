@@ -92,6 +92,7 @@ Dates are commit dates on `main`. The repository has about 700 commits from 2026
 | 2026-11-17 | Two pinned vCPUs: 15.8 fps median; a 30-minute run with 0 panics (later revisited, see below) | `cc33526` |
 | 2026-11-18 | Stage 26 — `fb_hz=15` cuts CPU per frame from 69 ms to 51 ms with an identical picture | `cc17734`, `730e0f7` |
 | 2026-11-18 | Stage 27 — multi-core reopened as a must-solve item; single-threaded TCG runs SMP=2 for 30 minutes with no panic, which points at parallel vCPUs | `b5bd190`, `6df855c` |
+| 2026-11-22 | Stage 29 (experiment branch) — a Metal client's commands are recorded in the guest, translated to Vulkan on the host and shown in a browser: 2,000/2,000 frames byte-exact, 58.3 fps median for the synthetic 750×1624 client; CoreAnimation still draws through GL | [`experiment/metal-translation`](docs/stage29-metal-translation.md) |
 
 ## Performance over time
 
@@ -120,6 +121,7 @@ The development dashboard, and how it is regenerated:
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
 | animation smoothness | ~4–7 fps on the CPU rasteriser; **13.9 fps with the host drawing the frame** (one vCPU, the delivered setting); two pinned vCPUs reach ~15.9 fps but are not yet stable — [open problem](#multi-core-an-open-problem-stage-27) | [stage 25](docs/stage25-multicore.md), [stage 27](docs/stage27-multicore.md) |
 | complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
+| Metal calls translated to the host's Vulkan (experiment, separate branch) | **partly** — a Metal client's blit/present is recorded in the guest, executed on the host's Vulkan GPU (device 1) and served in a browser; CoreAnimation is **not** on Metal yet (no renderer library / AIR compiler) | [stage 29](docs/stage29-metal-translation.md) |
 | watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
 `docs/state-of-the-port.md` is the one-page handover view of the same table.
@@ -215,6 +217,54 @@ which supports hypothesis H-A: the failure needs vCPUs running in parallel. The 
 matrix (`tb-size`, CPU model, a panic-time dump of every CPU, host isolation) is in
 [stage 27](docs/stage27-multicore.md). Until those tests pass, the delivered setting stays one vCPU.
 
+## Metal translation (experiment, stage 29)
+
+A separate branch, [`experiment/metal-translation`](docs/stage29-metal-translation.md), asks the
+other half of [ADR-002](docs/adr/ADR-002-api-translation.md): instead of replaying CoreAnimation's
+GL records, replace the guest's Metal device and translate at the API level. It is an experiment,
+not a delivered path — the Replay path above is untouched and remains the baseline.
+
+What it shows: the port's own `IOAcceleratorES` + `MetalPluginName` discovery path loads a Metal
+device bundle we wrote; a Metal client in the guest can make a device, a queue, a buffer, a texture
+and a blit+present; the command buffer is recorded at `commit` and executed on the host's Vulkan
+device (the second V100, slot 1); the picture is read back, CRC-checked and published into the same
+shared memory `tools/glwire/webview.py` serves, so a translated frame is visible in a browser:
+
+![A translated frame, served by webview.py](docs/demo/metal-translation-webview.png)
+
+| | measured (2026-11-21/22, one vCPU, GPU 1, synthetic 750×1624 client) |
+|---|---|
+| frames / correctness | 5 × 400 frames, 2,000 / 2,000 `crc_ok=1`, full `memcmp` of source vs read-back identical, 0 panics |
+| fps | median **58.3** (57.4–60.1) |
+| guest, per frame | picture fill 2.6 ms, Metal calls 0.19 ms, commit 7.1 ms, wait 13.7 ms |
+| host, per frame | 4.2 ms (GPU copy 0.94 ms, read-back + sampled checksum 0.31 ms, publish 2.9 ms) |
+| wire | 0 picture bytes on the socket: the host reads the pixels from guest RAM (`hakios_vtop`, as the Replay path does) |
+| transport, before/after | **1.94 fps** with the 4.87 MB picture inline on the socket, **58.3 fps** median with the by-reference upload — the transport, not the translation, was the cost |
+
+![Frame rate by implementation: the transport and the checksum were the cost](docs/charts/metal-translation-history.png)
+
+What it does **not** show: a CoreAnimation frame. This port's window server does not take a Metal
+path (its renderer library is missing and, behind it, an AIR→SPIR-V compiler), so the translated
+client is a synthetic Metal program painted by the test, and its 58.3 fps must not be compared with
+the delivered 13.9 fps as if it were the same workload. The honest comparison, the dead ends and
+the self-corrections are in [stage 29](docs/stage29-metal-translation.md); the decision is
+[ADR-013](docs/adr/ADR-013-metal-translation.md); the research note is
+[the feasibility report](docs/research/metal-translation-feasibility.md).
+
+How to run it (the branch owns the tooling; nothing here changes main's build):
+
+```sh
+make metalwire-host                              # the Vulkan translator (no guest needed)
+make metalwire-test                              # its CI-safe test on lavapipe
+HAKIOS=<hakios checkout> make metalwire-guest     # guest bundle + client (needs the iPhoneOS SDK)
+HAKIOS=<hakios checkout> make metalwire-worktree  # private run tree (sudo once; ~90 MB)
+tools/metalwire/prepare-guest.sh translate        # root image with the Metal client
+tools/metalwire/run-guest.sh translate 300        # boot it (instance 3, ports 4474/4475)
+```
+
+It uses GPU 1 and ports 9111/9210/4474/4475 on purpose, so it can run beside another experiment on
+the same host; the delivered Replay path (GPU 0, port 9110) is never touched.
+
 ## How it came to boot
 
 Three things had to be true, and the research note records the measurement behind each:
@@ -236,6 +286,8 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
 | `patches/` | the changes made to the port: one patch per finding, with the reason |
 | `tools/qemu/` | the boot-and-operate tooling above |
 | `tools/glwire/` | the guest's GL wire protocol: `host_glwire.c` (the replay), `webview.py` (that frame in a browser) |
+| `host/metalwire/`, `guest/metal-plugin/` | the Metal→Vulkan experiment: the host Vulkan translator and the guest Metal device bundle (stage 29, branch `experiment/metal-translation`) |
+| `tools/metalwire/` | the experiment's own run tree, root-image preparation and measurement harness |
 | `tools/apfs/` | reading and writing the images without Apple's tools |
 | `guest/` | programs that run inside the machine (the painter, `netcfg`) |
 | `proto/`, `host/vkbridge/` | GPU transport and its host-side Vulkan backend (submodules) |
@@ -261,6 +313,9 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
 | [`docs/stage25-multicore.md`](docs/stage25-multicore.md) | the first pinned two-vCPU measurements |
 | [`docs/stage27-multicore.md`](docs/stage27-multicore.md) | the multi-core problem: hypotheses, test matrix, acceptance |
 | [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md) | the long note: every measurement, and the mistakes |
+| [`docs/stage29-metal-translation.md`](docs/stage29-metal-translation.md) | the Metal→Vulkan experiment: what was measured, and what it does not prove |
+| [`docs/research/metal-translation-feasibility.md`](docs/research/metal-translation-feasibility.md) | the M1 note: where Metal can be intercepted, why CA is not on it, which translator exists |
+| [`docs/adr/ADR-013-metal-translation.md`](docs/adr/ADR-013-metal-translation.md) | the decision: device plug-in, commit-level translation, by-reference transport, host Vulkan |
 | [`docs/architecture.md`](docs/architecture.md) | how the pieces fit |
 | [`docs/phases.md`](docs/phases.md) | milestones, one acceptance command each |
 | [`docs/adr/`](docs/adr) | the decisions, with their evidence |
@@ -338,6 +393,7 @@ MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
 | 2026-11-17 | 双 vCPU 绑核：中位 15.8 fps；30 分钟运行 0 次 panic（后被重新审视，见下文） | `cc33526` |
 | 2026-11-18 | 第 26 阶段——`fb_hz=15` 使每帧 CPU 从 69 ms 降至 51 ms，画面完全一致 | `cc17734`、`730e0f7` |
 | 2026-11-18 | 第 27 阶段——多核重新列为必须解决的问题；单线程 TCG 下 SMP=2 运行 30 分钟无 panic，指向并行 vCPU | `b5bd190`、`6df855c` |
+| 2026-11-22 | 第 29 阶段（实验分支）——客人机 Metal 客户端的命令被翻译为宿主 Vulkan 并显示在浏览器中：2000/2000 帧逐字节一致，合成 750×1624 客户端中位 58.3 fps；CoreAnimation 仍走 GL | [`experiment/metal-translation`](docs/stage29-metal-translation.md) |
 
 ## 当前能力
 
@@ -355,6 +411,7 @@ MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
 | GPU 加速 | 否——本机只有 CPU 软光栅 | — |
 | 动画流畅度 | CPU 软光栅约 4–7 fps；**宿主绘制时 13.9 fps**（单 vCPU，交付配置）；双 vCPU 绑核约 15.9 fps，但尚不稳定——见[开放问题](#多核未解决的问题第-27-阶段) | [第 25 阶段](docs/stage25-multicore.md)、[第 27 阶段](docs/stage27-multicore.md) |
 | 宿主绘制完整画面 | **是**——客人机的 CoreAnimation 调用在宿主 GL 上回放，所见即结果 | [第 23 阶段结论](docs/stage23-verdict.md) |
+| Metal 调用翻译到宿主 Vulkan（实验，独立分支） | **部分**——客人机 Metal 客户端的 blit/present 被记录、在宿主 Vulkan GPU（1 号卡）上执行并在浏览器中可见；CoreAnimation 尚未走 Metal（缺渲染库与 AIR 编译器） | [第 29 阶段](docs/stage29-metal-translation.md) |
 | 在浏览器中观看该画面 | **是**——`tools/glwire/webview.py`，JPEG 流，点击经 QMP 回传 | `tools/glwire/webview.html` |
 
 `docs/state-of-the-port.md` 是同一张表的一页式交接视图。
@@ -434,6 +491,50 @@ CPU 软光栅是性能上限，因此下一步是不再让它绘制：客人机�
 
 第 27 阶段（2026-11-18）记录了 5 次双 vCPU 绑核运行：2 次运行 30 分钟无 panic，3 次在 5–10 分钟内崩溃，全部发生在调度器 processor-set 锁（`_pset0`）上。将票据锁超时放宽 4 倍无效，这说明更可能是持锁者停止释放锁，而非宿主短暂抢占。第一项测试（T1）使用 `thread=single`，运行 30 分钟无 panic，支持假设 H-A：故障需要 vCPU 并行运行。测试矩阵的其余部分（`tb-size`、CPU 型号、panic 时转储所有 CPU、宿主机隔离）见[第 27 阶段文档](docs/stage27-multicore.md)。在这些测试通过之前，交付配置仍为单 vCPU。
 
+## Metal 转译（实验，第 29 阶段）
+
+独立分支 [`experiment/metal-translation`](docs/stage29-metal-translation.md) 探索
+[ADR-002](docs/adr/ADR-002-api-translation.md) 的另一半：不再回放 CoreAnimation 的 GL 记录，而是替换客人机的
+Metal 设备、在 API 层翻译。这是实验路径，不是交付路径——上面的 Replay 路径原样保留，仍是基线。
+
+它验证了：移植自带的 `IOAcceleratorES` + `MetalPluginName` 发现链能加载我们写的 Metal 设备 bundle；客人机里的
+Metal 客户端可以创建设备、队列、buffer、texture 并完成 blit+present；命令缓冲在 `commit` 时被记录、在宿主
+Vulkan 设备（第二块 V100，1 号卡）上执行；画面被读回、CRC 校验并写入与 `tools/glwire/webview.py` 相同的共享
+内存，因此转译后的画面能在浏览器中看到：
+
+![转译画面，由 webview.py 提供](docs/demo/metal-translation-webview.png)
+
+| | 实测（2026-11-21/22，单 vCPU，1 号卡，合成 750×1624 客户端） |
+|---|---|
+| 帧数 / 正确性 | 5 × 400 帧，2000/2000 `crc_ok=1`，源数据与读回数据完整 `memcmp` 一致，0 次 panic |
+| 帧率 | 中位 **58.3**（57.4–60.1） |
+| 客人机每帧 | 生成画面 2.6 ms、Metal 调用 0.19 ms、commit 7.1 ms、wait 13.7 ms |
+| 宿主每帧 | 4.2 ms（GPU 拷贝 0.94 ms、读回+抽样校验 0.31 ms、发布 2.9 ms） |
+| 传输 | socket 上 0 图片字节：宿主经 `hakios_vtop` 直接从客人机内存读取像素（与 Replay 路径同一机制） |
+| 传输前后对比 | 480 万像素内联在 socket 上时 **1.94 fps**；改为按引用传输后中位 **58.3 fps**——代价在传输，不在翻译 |
+
+![各实现的帧率：代价在传输与校验，不在翻译](docs/charts/metal-translation-history.png)
+
+它**没有**验证：CoreAnimation 的 Metal 帧。本移植的窗口服务器不走 Metal（缺渲染库，且背后缺 AIR→SPIR-V
+编译器），所以被翻译的客户端是测试程序，其 58.3 fps 不能与交付的 13.9 fps 当作同一负载比较。诚实的对比、
+死胡同和自我修正都在[第 29 阶段](docs/stage29-metal-translation.md)；决策在
+[ADR-013](docs/adr/ADR-013-metal-translation.md)；调研在
+[可行性报告](docs/research/metal-translation-feasibility.md)。
+
+运行方式（工具在实验分支；不改变 main 的构建）：
+
+```sh
+make metalwire-host                              # 宿主 Vulkan 翻译器（无需客人机）
+make metalwire-test                              # 在 lavapipe 上的 CI 测试
+HAKIOS=<hakios 检出目录> make metalwire-guest      # 客人机 bundle + 客户端（需要 iPhoneOS SDK）
+HAKIOS=<hakios 检出目录> make metalwire-worktree   # 私有运行树（一次 sudo；约 90 MB）
+tools/metalwire/prepare-guest.sh translate         # 生成带 Metal 客户端的 root 镜像
+tools/metalwire/run-guest.sh translate 300         # 启动（实例 3，端口 4474/4475）
+```
+
+它刻意使用 1 号卡和 9111/9210/4474/4475 端口，以便与同一宿主上的其他实验并行；交付的 Replay 路径（0 号卡、
+端口 9110）从不被触碰。
+
 ## 启动是怎么实现的
 
 有三件事必须同时成立，研究笔记中记录了每一项的测量依据：
@@ -451,6 +552,8 @@ CPU 软光栅是性能上限，因此下一步是不再让它绘制：客人机�
 | `patches/` | 对移植所做的改动：每个发现对应一个补丁，并附原因 |
 | `tools/qemu/` | 上文所述的启动与操作工具 |
 | `tools/glwire/` | 客人机 GL 线协议：`host_glwire.c`（回放）、`webview.py`（在浏览器中查看该画面） |
+| `host/metalwire/`、`guest/metal-plugin/` | Metal→Vulkan 实验：宿主 Vulkan 翻译器与客人机 Metal 设备 bundle（第 29 阶段，分支 `experiment/metal-translation`） |
+| `tools/metalwire/` | 实验自用的运行树、root 镜像准备与测量工具 |
 | `tools/apfs/` | 无需 Apple 工具即可读写镜像 |
 | `guest/` | 运行在虚拟机内的程序（绘制程序、`netcfg`） |
 | `proto/`、`host/vkbridge/` | GPU 传输层及其宿主侧 Vulkan 后端（子模块） |
@@ -470,6 +573,9 @@ CPU 软光栅是性能上限，因此下一步是不再让它绘制：客人机�
 | [`docs/stage25-multicore.md`](docs/stage25-multicore.md) | 最初的双 vCPU 绑核测量 |
 | [`docs/stage27-multicore.md`](docs/stage27-multicore.md) | 多核问题：假设、测试矩阵、验收标准 |
 | [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md) | 长篇笔记：每一次测量与所犯的错误 |
+| [`docs/stage29-metal-translation.md`](docs/stage29-metal-translation.md) | Metal→Vulkan 实验：测了什么，以及它不能证明什么 |
+| [`docs/research/metal-translation-feasibility.md`](docs/research/metal-translation-feasibility.md) | M1 调研：Metal 可在何处拦截、CA 为何不在 Metal 上、有哪些翻译器 |
+| [`docs/adr/ADR-013-metal-translation.md`](docs/adr/ADR-013-metal-translation.md) | 决策：设备插件、commit 级翻译、按引用传输、宿主 Vulkan |
 | [`docs/architecture.md`](docs/architecture.md) | 各部件如何配合 |
 | [`docs/phases.md`](docs/phases.md) | 里程碑，每个都有一条验收命令 |
 | [`docs/adr/`](docs/adr) | 决策及其依据 |
