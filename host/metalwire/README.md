@@ -201,10 +201,11 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
   missing report) and every tile matches the box/binomial kernel the shaders document to within
   2/255, including its PNG,
-* the double-buffer equivalence (WP-4 D8): the static layers are painted into surface 90 once,
-  then frames draw only the clock into 91/90/91/90 with load action LOAD; every clock frame must
-  still show the static layers (a host that starts from that surface's stale content paints the
-  clock on black -- the boot's black frame),
+* the double-buffer equivalence (WP-4 D8): the full static layers go into surface 90, surface 91
+  only gets a poor quarter, then frames draw only the clock into 91/90/91/90 with load action LOAD.
+  Every clock frame must show the full static layers: a host that copies the previous frame
+  unconditionally lets the poor 91 erase 90's layers (boot wp4-v14's missing Dock/Search), and a
+  host that never copies leaves the clock on black in 91 (boot wp4-v13's flicker),
 * the material semantics (WP-4 D3/D5): a `PBGRABsov_TmuaXfcn_IsrcCcl_Isup` draw with a non-white
   32x32 support texture, white layer colour and fetch=1 over a cleared target; the host must
   specialise it as `texture 1, fetch 1` and the picture must be the support pattern, not opaque
@@ -362,8 +363,11 @@ The execution half:
   frame did not render keeps a stale picture (boot wp4-v13 ended with the status bar and the Dock
   icons only in texture 52 and a black 55, a 2-frame flicker). When a frame's first draw preserves
   its target and the target is a different surface of the same size and format as the previous
-  frame's, the host copies the previous picture in before the draws; a CLEAR first draw needs no
-  copy;
+  frame's, the host copies the previous picture in before the draws -- but only when that source
+  surface's last read-back is at least as rich (non-zero bytes) as the destination's, so a
+  clock-only frame can never drag the full layer set out of the other buffer (boot wp4-v14 lost
+  the Dock and Search that way: 2,779,312/2,512,062 bytes in frames 6/9, 2,385,130 after the
+  clock frames copied over); a CLEAR first draw needs no copy;
 * can write a per-draw diagnostic dump when `MW_DUMP_DRAWS=1` is in the environment (file from
   `MW_DUMP_DRAWS_FILE`, default `/tmp/metalwire-draws.txt`): one grep-able `draw ...` line per
   executed draw with the vertex colour, the fragment uniform's first 16 bytes, the draw's

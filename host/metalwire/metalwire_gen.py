@@ -1178,14 +1178,14 @@ def run_dual_buffer(args):
             client.send(MW_RENDER_DRAW, _draw_payload(6, 928, 93))
             client.send(MW_RENDER_END, struct.pack("<4I", index, 1, 7, 0))
 
-        def static_encoder(index, target, load):
+        def static_encoder(index, target, load, extent=DUAL_SIZE):
             client.send(MW_RENDER_BEGIN,
                         _begin_payload(index, target, DUAL_SIZE, DUAL_SIZE, 80, load, 1,
                                        (0.0, 0.0, 0.0, 0.0)))
             client.send(MW_RENDER_SET_VIEWPORT,
                         struct.pack("<6f", 0.0, 0.0, float(DUAL_SIZE), float(DUAL_SIZE), 0.0, 1.0))
             client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 160, 0))
-            client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 0, 0, DUAL_SIZE, DUAL_SIZE))
+            client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 0, 0, extent, extent))
             client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 93, 1, 0))
             client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 92, 3))
             client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
@@ -1207,15 +1207,19 @@ def run_dual_buffer(args):
         client.send(MW_FRAME_END, struct.pack("<QQIIII", 0, 1, 0, DUAL_SIZE, DUAL_SIZE,
                                               DUAL_SIZE * 4))
         print("dual frame 0 ack", client.recv_ack()[2], flush=True)
-        # Buffer 90 gets the static layers once. Buffer 91 is never painted with them: every later
-        # frame only draws the clock with LOAD, the way CA's incremental rendering works, so a host
-        # that does not make the two display buffers equivalent shows 91 as the black frame.
-        for seq, target, kind, load in ((1, 91, "clock", 1), (2, 90, "clock", 1),
-                                        (3, 91, "clock", 1), (4, 90, "clock", 1),
-                                        (5, 90, "clock", 0)):
+        # The real D8 sequence: frame 0 paints the full static layers into 90; frame 1 only paints a
+        # poor quarter into 91; frames 2..5 repaint the clock with LOAD, exactly CA's incremental
+        # rendering. Copying the previous frame unconditionally would let frame 2's source (the poor
+        # 91) erase 90's layers -- t22's steady state lost the Dock/Search that way. The copy must
+        # only run when the source is at least as rich as the destination.
+        for seq, target, kind, load, extent in ((1, 91, "static", 2, 16),
+                                                (2, 90, "clock", 1, 0),
+                                                (3, 91, "clock", 1, 0),
+                                                (4, 90, "clock", 1, 0),
+                                                (5, 90, "clock", 0, 0)):
             client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, time.monotonic_ns()))
             if kind == "static":
-                static_encoder(0, target, load)
+                static_encoder(0, target, load, extent)
             else:
                 clock_encoder(0, target, load)
             client.send(MW_PRESENT, struct.pack("<II", target, 0))

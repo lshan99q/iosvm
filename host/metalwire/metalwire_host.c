@@ -115,6 +115,10 @@ struct mw_image {
     VkDeviceMemory readback_memory;
     void *readback_mapped;
     int dst_this_frame;
+    /* WP-4 D8: the non-zero byte count of this surface's last read-back picture. The double-buffer
+     * copy may only push content from a surface that is at least as rich, so a partial frame (a
+     * clock-only update) can never overwrite a surface that still has the full layer set. */
+    uint64_t content_nonzero;
     /* WP-3: a texture created from a real IOSurface. bytes_per_row is the surface's stride (it
      * may be larger than width*4); the segments are the guest-physical runs behind it, so the host
      * can write the rendered picture into the surface and read it back by reference. */
@@ -4361,8 +4365,17 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         frame->draws[0].load_action != 2) {
         struct mw_image *previous = mw_image_find(s, s->last_render_target);
 
+        /*
+         * The source must be at least as rich as this surface already is. A frame that only
+         * repaints the clock lowers its own surface's non-zero count; copying that picture into
+         * the other surface would propagate the missing layers (boot wp4-v14: the Dock/Search
+         * layers only appear in frames 6 and 9, 2,779,312 and 2,512,062 bytes, and the clock frames
+         * that followed dragged both surfaces down to 2,385,130). Equal or richer keeps the layers
+         * and still fills a surface that never received them.
+         */
         if (previous != NULL && previous != target && previous->width == target->width &&
-            previous->height == target->height && previous->format == target->format) {
+            previous->height == target->height && previous->format == target->format &&
+            previous->content_nonzero >= target->content_nonzero) {
             VkImageCopy region = {0};
 
             mw_cmd_image_barrier(command, previous->image, previous->layout,
@@ -4393,6 +4406,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
             target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            target->content_nonzero = previous->content_nonzero;
         }
     }
     s->last_render_target = target->id;
@@ -4837,6 +4851,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                 nonzero++;
             }
         }
+        target->content_nonzero = (uint64_t)nonzero;
         mw_log("render frame %" PRIu64 ": executed %" PRIu64 " of %u draw(s) on texture %u "
                "(%ux%u), crc 0x%08x, %zu/%zu non-zero byte(s)",
                frame->seq, result->draws_executed, frame->draw_count, target->id, target->width,

@@ -795,8 +795,13 @@ def run_dual_buffer(env):
         b, g, r, _a = metalwire_gen.DUAL_STATIC[at:at + 4]
         static += bytes((r, g, b))  # premultiplied by alpha 255
 
-    def expected(with_clock):
-        picture = bytearray(static)
+    def expected(with_clock, quarter=False):
+        picture = bytearray(len(static))
+        for y in range(size):
+            for x in range(size):
+                if not quarter or (x < 16 and y < 16):
+                    at = (y * size + x) * 3
+                    picture[at:at + 3] = static[at:at + 3]
         if with_clock:
             for y in range(8, 24):
                 for x in range(8, 24):
@@ -842,24 +847,26 @@ def run_dual_buffer(env):
         require(host.wait(timeout=120) == 0,
                 "dual-buffer host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
         reader.join(timeout=10)
-        for index, with_clock, label in ((0, False, "static"), (1, True, "clock into 91 (never "
-                                              "painted)"), (2, True, "clock into 90"),
-                                         (3, True, "clock into 91"), (4, True, "clock into 90"),
-                                         (5, True, "clock into 90 dont-care")):
+        for index, with_clock, quarter, label in (
+                (0, False, False, "full static into 90"),
+                (1, False, True, "poor quarter into 91"),
+                (2, True, False, "clock into 90 (source poor, must not overwrite)"),
+                (3, True, False, "clock into 91 (source rich, fills the layers)"),
+                (4, True, False, "clock into 90"), (5, True, False, "clock into 90 dont-care")):
             path = os.path.join(out_dir, "frame-%06d.ppm" % index)
             with open(path, "rb") as f:
                 data = f.read()
             header = b"P6\n%d %d\n255\n" % (size, size)
             require(data.startswith(header), "%s: bad P6 header" % path)
             pixels = data[len(header):]
-            want = expected(with_clock)
+            want = expected(with_clock, quarter)
             require(pixels == want,
                     "%s (%s): the picture is not the retained static layers plus the clock "
                     "(first pixel %s, expected %s, non-zero %d)"
                     % (os.path.basename(path), label, tuple(pixels[0:3]), tuple(want[0:3]),
                        sum(1 for byte in pixels if byte)))
-        print("PASS dual-buffer: a LOAD frame on the other display buffer keeps the layers (no "
-              "black frame, D8)")
+        print("PASS dual-buffer: a partial frame never overwrites a rich display buffer and a rich "
+              "source fills the other one (no black/missing-layer frame, D8)")
         ok = True
     except TestFailure:
         with host_lock:
