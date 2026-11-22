@@ -642,7 +642,8 @@ def run_draw_dump(env):
             r"frag_uniform_buffer=(\d+) frag_uniform_offset=(\d+) "
             r"uniform16=([0-9a-f]{32}) uniform16_f32=(-?\d+\.\d{4}),(-?\d+\.\d{4}),"
             r"(-?\d+\.\d{4}),(-?\d+\.\d{4}) "
-            r"bbox=(-?\d+),(-?\d+),(-?\d+),(-?\d+) texture=(\d+) fetch=([01])$")
+            r"bbox=(-?\d+),(-?\d+),(-?\d+),(-?\d+) texture=(\d+) fetch=([01]) "
+            r"target=(\d+) load=(\d+) store=(\d+)$")
         match = pattern.match(lines[0])
         require(match is not None, "the draw line does not match the documented format:\n%s" %
                 lines[0])
@@ -663,6 +664,9 @@ def run_draw_dump(env):
                                                  match.group(17), match.group(18)))
         require(match.group(19) == "90" and match.group(20) == "0",
                 "unexpected texture/fetch %s/%s" % (match.group(19), match.group(20)))
+        require(match.group(21) == "91" and match.group(22) == "2" and match.group(23) == "1",
+                "unexpected target/load/store %s/%s/%s" % (match.group(21), match.group(22),
+                                                           match.group(23)))
 
         off_path = os.path.join(work, "off-draws.txt")
         off_output, off_code = _run_labels_once(env, os.path.join(work, "off"), {
@@ -673,7 +677,8 @@ def run_draw_dump(env):
         require(not os.path.exists(off_path),
                 "the off switch still wrote %s" % off_path)
         print("PASS draw-dump: MW_DUMP_DRAWS=1 writes one documented line per draw "
-              "(pipeline/vertex_color/uniform16/bbox/texture/fetch); off writes nothing")
+              "(pipeline/vertex_color/uniform16/bbox/texture/fetch/target/load/store); off "
+              "writes nothing")
         ok = True
     finally:
         if ok:
@@ -764,6 +769,101 @@ def run_material(env):
     except TestFailure:
         with host_lock:
             print("--- material host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def run_dual_buffer(env):
+    """WP-4 D8: the two display buffers must end up with the same picture.
+
+    CA presents through two surfaces that alternate; each frame repaints only the layers that
+    changed with load action LOAD, and CA never copies one surface's picture into the other (boot
+    wp4-v13: texture 52 carries the status bar and the Dock icons, 55 does not, so the panel
+    flickers every other frame). The fixture paints the static layers into buffer 90 once and then
+    draws only the clock into 91/90/91/90 with LOAD; every clock frame must show the static layers
+    plus the clock. A host that starts a LOAD frame from that buffer's stale content shows the
+    clock on black for buffer 91 -- the D8 black frame.
+    """
+    size = metalwire_gen.DUAL_SIZE
+    static = bytearray()
+    for at in range(0, len(metalwire_gen.DUAL_STATIC), 4):
+        b, g, r, _a = metalwire_gen.DUAL_STATIC[at:at + 4]
+        static += bytes((r, g, b))  # premultiplied by alpha 255
+
+    def expected(with_clock):
+        picture = bytearray(static)
+        if with_clock:
+            for y in range(8, 24):
+                for x in range(8, 24):
+                    at = (y * size + x) * 3
+                    picture[at:at + 3] = b"\x00\xff\x00"
+        return bytes(picture)
+
+    work = tempfile.mkdtemp(prefix="metalwire-dual-")
+    out_dir = os.path.join(work, "frames")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "6", "--shm", "", "--out", out_dir,
+         "--png-every", "1", "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "dual-buffer host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the dual-buffer host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--dual-buffer", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        require(gen.returncode == 0,
+                "dual-buffer generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout,
+                                                               gen.stderr))
+        require(host.wait(timeout=120) == 0,
+                "dual-buffer host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        for index, with_clock, label in ((0, False, "static"), (1, True, "clock into 91 (never "
+                                              "painted)"), (2, True, "clock into 90"),
+                                         (3, True, "clock into 91"), (4, True, "clock into 90"),
+                                         (5, True, "clock into 90 dont-care")):
+            path = os.path.join(out_dir, "frame-%06d.ppm" % index)
+            with open(path, "rb") as f:
+                data = f.read()
+            header = b"P6\n%d %d\n255\n" % (size, size)
+            require(data.startswith(header), "%s: bad P6 header" % path)
+            pixels = data[len(header):]
+            want = expected(with_clock)
+            require(pixels == want,
+                    "%s (%s): the picture is not the retained static layers plus the clock "
+                    "(first pixel %s, expected %s, non-zero %d)"
+                    % (os.path.basename(path), label, tuple(pixels[0:3]), tuple(want[0:3]),
+                       sum(1 for byte in pixels if byte)))
+        print("PASS dual-buffer: a LOAD frame on the other display buffer keeps the layers (no "
+              "black frame, D8)")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- dual-buffer host stderr ---\n%s" % "\n".join(host_lines))
         raise
     finally:
         if host.poll() is None:
@@ -1054,10 +1154,12 @@ def main():
         run_labels(env)
         run_draw_dump(env)
         run_material(env)
+        run_dual_buffer(env)
         run_chain(env)
         run_orientation(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
-              "labels, draw-dump, material, chain, orientation)" % (WIDTH, HEIGHT, FRAMES))
+              "labels, draw-dump, material, dual-buffer, chain, orientation)"
+              % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)

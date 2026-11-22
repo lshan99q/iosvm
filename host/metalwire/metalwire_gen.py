@@ -1090,6 +1090,152 @@ def run_material(args):
     return 0 if failures == 0 else 1
 
 
+
+# WP-4 D8: the double-buffer fixture. CA presents through two render targets that alternate; each
+# buffer receives the static layers once and later frames only repaint the clock with load=LOAD.
+# The host must keep each target's previous content across frames (the load action decides), or the
+# buffer that only gets the clock goes black -- the 2-frame flicker of boot wp4-v13.
+DUAL_SIZE = 64
+DUAL_STATIC = b"".join(bytes(((x * 4) & 0xFF, 0x30, (y * 4) & 0xFF, 255))
+                       for y in range(DUAL_SIZE) for x in range(DUAL_SIZE))
+
+
+def run_dual_buffer(args):
+    """Frame 0: static layer into target 90 (clear). Frame 1: static into 91 (clear).
+    Frame 2: clock into 90 (load). Frame 3: clock into 91 (load). Frame 4: clock into 90 (load)."""
+    wire = bytearray(262144)
+    wire[72] = 1  # Uniform.premultiply
+    mvp = ((2.0 / DUAL_SIZE, 0.0, 0.0, 0.0),
+           (0.0, -2.0 / DUAL_SIZE, 0.0, 0.0),
+           (0.0, 0.0, 0.0, 0.0),
+           (-1.0, 1.0, 0.0, 1.0))
+    for row, values in enumerate(mvp):
+        struct.pack_into("<4f", wire, 240 + 16 * row, *values)
+    for vertex, (x, y) in enumerate(((0.0, 0.0), (DUAL_SIZE, 0.0),
+                                     (DUAL_SIZE, DUAL_SIZE), (0.0, DUAL_SIZE))):
+        at = 336 + vertex * 48
+        struct.pack_into("<4f", wire, at, x, y, 0.0, 1.0)
+        struct.pack_into("<2f", wire, at + 16, x, y)
+        struct.pack_into("<2f", wire, at + 24, 0.0, 0.0)
+        struct.pack_into("<4e", wire, at + 32, 1.0, 1.0, 1.0, 1.0)
+    struct.pack_into("<6H", wire, 528, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<4f", wire, 544, 1.0 / DUAL_SIZE, 1.0 / DUAL_SIZE, 0.0, 0.0)
+    # The clock quad: a 16x16 solid square at (8,8) in the same wire buffer, with its own mvp.
+    clock_mvp = ((2.0 / DUAL_SIZE, 0.0, 0.0, 0.0),
+                 (0.0, -2.0 / DUAL_SIZE, 0.0, 0.0),
+                 (0.0, 0.0, 0.0, 0.0),
+                 (-1.0, 1.0, 0.0, 1.0))
+    for row, values in enumerate(clock_mvp):
+        struct.pack_into("<4f", wire, 640 + 16 * row, *values)
+    for vertex, (x, y) in enumerate(((8.0, 8.0), (24.0, 8.0), (24.0, 24.0), (8.0, 24.0))):
+        at = 736 + vertex * 48
+        struct.pack_into("<4f", wire, at, x, y, 0.0, 1.0)
+        struct.pack_into("<2f", wire, at + 16, 0.0, 0.0)
+        struct.pack_into("<2f", wire, at + 24, 0.0, 0.0)
+        struct.pack_into("<4e", wire, at + 32, 0.0, 1.0, 0.0, 1.0)  # green clock
+    struct.pack_into("<6H", wire, 928, 0, 1, 2, 2, 3, 0)
+    wire = bytes(wire)
+    attributes = [(31, 0, 1), (29, 16, 1), (29, 24, 1), (27, 32, 1)] + [(0, 0, 0)] * 12
+    layouts = [(0, 1, 1), (48, 1, 1)] + [(0, 1, 1)] * 6
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-dual"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 93, 0, len(wire)))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 92, DUAL_SIZE, DUAL_SIZE, 80, 1, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 90, DUAL_SIZE, DUAL_SIZE, 80, 5, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 91, DUAL_SIZE, DUAL_SIZE, 80, 5, 0))
+        client.send(MW_CREATE_SAMPLER, struct.pack("<9I2f2I", 45, 0, 0, 0, 0, 0, 0, 1, 0,
+                                                   0.0, 0.0, 1, 0))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(160,
+                                             "com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(161, "com.apple.coreanimation.draw.PBGRA_Xfc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+
+        def clock_encoder(index, target, load):
+            client.send(MW_RENDER_BEGIN,
+                        _begin_payload(index, target, DUAL_SIZE, DUAL_SIZE, 80, load, 1,
+                                       (0.0, 0.0, 0.0, 0.0)))
+            client.send(MW_RENDER_SET_VIEWPORT,
+                        struct.pack("<6f", 0.0, 0.0, float(DUAL_SIZE), float(DUAL_SIZE), 0.0, 1.0))
+            client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 161, 0))
+            client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 8, 8, 16, 16))
+            client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 93, 1, 0))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 1, 736))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 2, 640))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 3, 544))
+            client.send(MW_RENDER_DRAW, _draw_payload(6, 928, 93))
+            client.send(MW_RENDER_END, struct.pack("<4I", index, 1, 7, 0))
+
+        def static_encoder(index, target, load):
+            client.send(MW_RENDER_BEGIN,
+                        _begin_payload(index, target, DUAL_SIZE, DUAL_SIZE, 80, load, 1,
+                                       (0.0, 0.0, 0.0, 0.0)))
+            client.send(MW_RENDER_SET_VIEWPORT,
+                        struct.pack("<6f", 0.0, 0.0, float(DUAL_SIZE), float(DUAL_SIZE), 0.0, 1.0))
+            client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 160, 0))
+            client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 0, 0, DUAL_SIZE, DUAL_SIZE))
+            client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 93, 1, 0))
+            client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 92, 3))
+            client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 1, 336))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 2, 240))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 3, 544))
+            client.send(MW_RENDER_DRAW, _draw_payload(6, 528, 93))
+            client.send(MW_RENDER_END, struct.pack("<4I", index, 1, 7, 0))
+
+        # Frame 0 carries the uploads and the first full draw of buffer 90 (and presents it), so
+        # the frame counter and the picture index stay in step.
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 0, time.monotonic_ns()))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 93, 0, len(wire), 0) + wire)
+        client.send(MW_TEXTURE_REPLACE_REGION,
+                    struct.pack("<12I", 92, 0, 0, 0, 0, 0, DUAL_SIZE, DUAL_SIZE, 1,
+                                DUAL_SIZE * 4, len(DUAL_STATIC), len(DUAL_STATIC)) + DUAL_STATIC)
+        static_encoder(0, 90, 2)
+        client.send(MW_PRESENT, struct.pack("<II", 90, 0))
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 0, 1, 0, DUAL_SIZE, DUAL_SIZE,
+                                              DUAL_SIZE * 4))
+        print("dual frame 0 ack", client.recv_ack()[2], flush=True)
+        # Buffer 90 gets the static layers once. Buffer 91 is never painted with them: every later
+        # frame only draws the clock with LOAD, the way CA's incremental rendering works, so a host
+        # that does not make the two display buffers equivalent shows 91 as the black frame.
+        for seq, target, kind, load in ((1, 91, "clock", 1), (2, 90, "clock", 1),
+                                        (3, 91, "clock", 1), (4, 90, "clock", 1),
+                                        (5, 90, "clock", 0)):
+            client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, time.monotonic_ns()))
+            if kind == "static":
+                static_encoder(0, target, load)
+            else:
+                clock_encoder(0, target, load)
+            client.send(MW_PRESENT, struct.pack("<II", target, 0))
+            client.send(MW_FRAME_END, struct.pack("<QQIIII", seq, 1, 0, DUAL_SIZE, DUAL_SIZE,
+                                                  DUAL_SIZE * 4))
+            ack = client.recv_ack()
+            if ack[2] != MW_STATUS_OK or ack[3] != seq:
+                failures += 1
+                print("dual frame %d: host status %d seq %d" % (seq, ack[2], ack[3]), flush=True)
+            else:
+                print("dual frame %d: ack status=ok" % seq, flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 # WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
 # top at NDC y=+1; Vulkan's viewport maps y down. The host compensates with a negative viewport
 # height, so framebuffer row y must come out as the source row y -- in the present read-back, the
@@ -1305,6 +1451,9 @@ def main(argv):
                         help="send one seed frame and three render frames through the "
                              "downsample_4 / narrow_blur_23 / narrow_blur_15 pipelines, the "
                              "WP-4 1.2 regression")
+    parser.add_argument("--dual-buffer", action="store_true",
+                        help="two alternating targets, static layer drawn once each, later frames "
+                             "repaint only the clock with load=LOAD, the WP-4 D8 regression")
     parser.add_argument("--material", action="store_true",
                         help="draw a Tmua material pipeline (support texture + fetch) over a "
                              "cleared target, the WP-4 D3/D5 material semantics regression")
@@ -1325,6 +1474,8 @@ def main(argv):
         return run_rgba16f_ramp(args)
     if args.blur_pipelines:
         return run_blur_pipelines(args)
+    if args.dual_buffer:
+        return run_dual_buffer(args)
     if args.material:
         return run_material(args)
     if args.render_chain:

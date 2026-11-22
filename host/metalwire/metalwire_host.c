@@ -389,6 +389,9 @@ struct mw_server {
     struct mw_render_vk render;
     uint64_t render_frames_seen;
     uint64_t render_draws_logged;
+    /* WP-4 D8: the display surface the previous render frame presented, so a partial (LOAD) frame
+     * on the other one can start from the picture the panel just showed. */
+    uint32_t last_render_target;
 
     int listen_fd;
     int client_fd;
@@ -3158,7 +3161,7 @@ static void mw_dump_draw(const struct mw_server *s, uint64_t frame_seq, uint64_t
     fprintf(draw_dump,
             "draw seq=%" PRIu64 " frame=%" PRIu64 " pipeline=\"%s\" vertex_color=%.4f,%.4f,%.4f,%.4f "
             "frag_uniform_buffer=%u frag_uniform_offset=%" PRIu64 " uniform16=%s uniform16_f32=%s "
-            "bbox=%d,%d,%d,%d texture=%u fetch=%d\n",
+            "bbox=%d,%d,%d,%d texture=%u fetch=%d target=%u load=%u store=%u\n",
             frame_seq, frame_index, pipeline->name, (double)colour[0], (double)colour[1],
             (double)colour[2], (double)colour[3],
             draw->fragment_buffer_id[1], draw->fragment_buffer_offset[1], uniform_hex,
@@ -3166,7 +3169,8 @@ static void mw_dump_draw(const struct mw_server *s, uint64_t frame_seq, uint64_t
             have_bbox ? (int)floorf(min_x) : -1, have_bbox ? (int)floorf(min_y) : -1,
             have_bbox ? (int)(ceilf(max_x) - floorf(min_x)) : 0,
             have_bbox ? (int)(ceilf(max_y) - floorf(min_y)) : 0,
-            draw->texture_id[3], mw_pipeline_fetches(pipeline));
+            draw->texture_id[3], mw_pipeline_fetches(pipeline), draw_target->id,
+            draw->load_action, draw->store_action);
 }
 
 static void mw_cmd_image_barrier(VkCommandBuffer command, VkImage image, VkImageLayout old_layout,
@@ -4341,6 +4345,57 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         mw_frame_fail(s, MW_STATUS_VULKAN, "cannot upload the queued texture content");
         status = MW_STATUS_VULKAN;
     }
+    /*
+     * WP-4 D8: CA presents through two display surfaces that alternate frame by frame, and each
+     * frame only repaints the layers that changed -- it never copies one surface's picture into
+     * the other. A partial update (load action LOAD/DONT_CARE) that lands on the surface the
+     * previous frame did not render therefore starts from that surface's stale content: boot
+     * wp4-v13 ends up with the status bar and the Dock icons only in texture 52, while 55 keeps a
+     * picture without them, and the panel flickers every other frame. Make the buffers equivalent:
+     * when this frame's first draw preserves its target and that target is a different surface of
+     * the same size and format as the previous frame's, copy the previous picture in first and let
+     * the frame's draws land on top. A CLEAR first draw discards the content by definition, so it
+     * needs no copy.
+     */
+    if (s->last_render_target != 0 && s->last_render_target != target->id &&
+        frame->draws[0].load_action != 2) {
+        struct mw_image *previous = mw_image_find(s, s->last_render_target);
+
+        if (previous != NULL && previous != target && previous->width == target->width &&
+            previous->height == target->height && previous->format == target->format) {
+            VkImageCopy region = {0};
+
+            mw_cmd_image_barrier(command, previous->image, previous->layout,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+            previous->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            mw_cmd_image_barrier(command, target->image, target->layout,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+            target->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.srcSubresource.layerCount = 1;
+            region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.dstSubresource.layerCount = 1;
+            region.extent.width = target->width;
+            region.extent.height = target->height;
+            region.extent.depth = 1;
+            vkCmdCopyImage(command, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           target->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            mw_cmd_image_barrier(command, target->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_ACCESS_TRANSFER_WRITE_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+    }
+    s->last_render_target = target->id;
 
     {
         uint32_t written[MW_RENDER_MAX_TARGETS];
