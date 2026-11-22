@@ -25,7 +25,7 @@ BUILD   := build
 VKBRIDGE := $(BUILD)/host/vkbridge/vkbridge
 PROBE   := $(BUILD)/guest/iosvm-probe
 
-.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check proto components metalwire-host metalwire-test metalwire-guest metalwire-image metalwire-worktree
+.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check proto components metalwire-host metalwire-test metalwire-guest metalwire-image metalwire-worktree ca-inject ca-inject-install
 
 help: ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -98,6 +98,12 @@ metalwire-worktree: ## make the experiment's private guest run tree (~90 MB, sud
 
 metalwire-image: ## install the translated Metal client's root image (sudo; needs metalwire-guest)
 	HAKIOS_DIR="$(HAKIOS)" tools/metalwire/prepare-guest.sh translate
+
+ca-inject: ## build the CA-on-Metal boot instrumentation (guest/ca-metal-inject)
+	guest/ca-metal-inject/build.sh
+
+ca-inject-install: ca-inject ## install it into the private guest run tree (sudo; needs metalwire-worktree)
+	guest/ca-metal-inject/install.sh on
 
 # ---------------------------------------------------------------------------
 # Guest side (needs the iPhoneOS SDK, so: a Mac — see ADR-009)

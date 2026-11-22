@@ -50,6 +50,16 @@
  * plus this experiment's own metal_frame/metal_probe), and the socket is made lazily, on the first
  * frame, with a bounded connect: if the host is not there the frame becomes a no-op that reports an
  * error, every 5 s a reconnect is tried, and the process runs on.
+ *
+ * Deliberate dealloc limitation
+ * -----------------------------
+ * An object whose class is built on one of Metal's private base classes (_MTLDevice,
+ * _MTLCommandBuffer, _MTLLibrary, ...) never has the base's -dealloc called: Apple's implementation
+ * dereferences dispatch state that a plain -init never sets up, which killed the ca-metal3-shim1
+ * boot inside libdispatch (x1 = @selector(dealloc), x0 = NULL). The instance is freed with
+ * object_dispose() after the plug-in's own state, so whatever the base's -init allocated is leaked;
+ * this is small (a command buffer is a few KB) and is a deliberate limitation of the stub. The
+ * class -> base pairs are logged once at registration ("its _MTLx -dealloc is skipped ...").
  */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -111,12 +121,24 @@ static Class gCommandBufferClass;     /* HakiosMetalCommandBuffer, a _MTLCommand
 static Class gBlitEncoderClass;       /* HakiosMetalBlitEncoder, a _MTLCommandEncoder */
 static Class gBufferClass;            /* HakiosMetalBuffer, a _MTLResource */
 static Class gTextureClass;           /* HakiosMetalTexture, a _MTLResource or NSObject */
+static Class gLibraryClass;           /* HakiosMetalLibrary, a _MTLLibrary or NSObject */
+static Class gFunctionClass;          /* HakiosMetalFunction, a _MTLFunction or NSObject */
+static Class gPipelineStateClass;     /* HakiosMetalRenderPipelineState, a _MTLRenderPipelineState */
+static Class gDepthStencilStateClass; /* HakiosMetalDepthStencilState, a _MTLDepthStencilState */
+static Class gSamplerStateClass;      /* HakiosMetalSamplerState, a _MTLSamplerState */
+static Class gPipelineLibraryClass;   /* HakiosMetalPipelineLibrary, a _MTLPipelineLibrary */
+static Class gRenderEncoderClass;     /* HakiosMetalRenderCommandEncoder, a _MTLRenderCommandEncoder */
 static id gDevice;                    /* the one device, once made */
 static unsigned int gAcceleratorPort; /* the IOAcceleratorES service it was made for */
 
 #define MW_MAX_PROTOCOLS 96
 static Protocol *gProtocols[MW_MAX_PROTOCOLS];
 static unsigned gProtocolCount;
+
+/* /redwood/etc/metal-census: when the image carries that file, every method our classes inherit
+ * from Metal's private base classes is replaced by a forwarding trampoline, so the first inherited
+ * method CoreAnimation calls is named in the serial log instead of dying inside Apple's code. */
+static int gCensusEnabled;
 
 /* wire state */
 static struct mw_conn gWire;
@@ -203,17 +225,162 @@ struct mw_command_buffer_state {
     int op_count;
     struct mw_op ops[8];
     const char *local_error; /* a static string, or NULL */
+    /* The CoreAnimation render path is record-only: it counts what CA records and never enters the
+     * ops array (the wire path stays the synthetic client's, byte for byte). */
+    int render_encoder_count;
+    uint64_t render_draw_count;
+    int profiling_enabled;
 };
 
 struct mw_encoder_state {
     id command_buffer; /* not retained: the encoder dies before its command buffer */
     int ended;
     id label;
+    /* CoreAnimation's texture-level blits: counted, never sent (record-only, like the render
+     * path; the wire's v1 subset has no texture-to-texture command). */
+    uint64_t texture_copy_count;
+    uint64_t mipmap_count;
+};
+
+/*
+ * The placeholder objects of the library/pipeline phase (CoreAnimation's renderer). None of them
+ * carries anything Metal could execute: a library knows the name it was asked for and the function
+ * names it has been asked about, a function knows its name and the vertex/fragment guess, and the
+ * pipeline/depth-stencil/sampler states hold only the label their descriptor had.
+ */
+struct mw_library_state {
+    uint32_t stub_id;
+    id install_name;       /* NSString from the URL/file, retained; nil when unknown */
+    id label;              /* NSString, retained */
+    NSMutableArray *names; /* the function names asked for, retained */
+};
+
+struct mw_function_state {
+    id name;           /* NSString, retained */
+    id label;          /* NSString, retained */
+    int function_type; /* MTLFunctionType, guessed from the name */
+};
+
+struct mw_stub_state {
+    id label; /* NSString, retained; the descriptor's label, if it had one */
+};
+
+/* The pipeline library CoreAnimation builds from QuartzCore.framework/default.pipelinelib. It is a
+ * placeholder: the file path is logged, the file is never opened, and the pipeline states it hands
+ * out by name are this experiment's placeholders. */
+struct mw_pipeline_library_state {
+    uint32_t stub_id;
+    id file_path; /* NSString, retained; nil when unknown */
+    id label;     /* NSString, retained */
+    int disable_run_time_compilation; /* -setDisableRunTimeCompilation: */
+};
+
+/* The render command encoder records what CoreAnimation records and executes nothing. The first
+ * MW_RENDER_MAX_DRAWS draws keep their details; the rest are counted only. */
+#define MW_RENDER_MAX_DRAWS 64
+
+struct mw_render_draw {
+    id pipeline_label; /* NSString copy, retained */
+    unsigned long primitive_type;
+    unsigned long vertex_count;
+    unsigned long index_count;
+    unsigned long instance_count;
+    int indexed;
+};
+
+struct mw_render_encoder_state {
+    id command_buffer; /* not retained: the encoder dies before its command buffer */
+    int ended;
+    id label;
+    id pipeline; /* not retained: the client keeps it alive while it binds it */
+    uint64_t set_count;
+    uint64_t draw_count;
+    struct mw_render_draw draws[MW_RENDER_MAX_DRAWS];
 };
 
 static uint32_t mw_next_object_id(void)
 {
     return __atomic_add_fetch(&gNextObjectId, 1, __ATOMIC_RELAXED);
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Shared plumbing for the placeholder objects (libraries, functions, pipelines, pipeline
+ * libraries, the record-only render encoder). One lock guards the log-once sets below and the
+ * function-name lists; the helpers read foreign objects (descriptors, pipeline states) defensively
+ * because the arguments come from CoreAnimation, not from this experiment.
+ * ---------------------------------------------------------------------------------------------- */
+
+static pthread_mutex_t gStubLock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t gNextStubId;
+
+static uint32_t mw_next_stub_id(void)
+{
+    return __atomic_add_fetch(&gNextStubId, 1, __ATOMIC_RELAXED);
+}
+
+/* A C string for the log: "(nil)" for nil, and only NSStrings are read (an object whose
+ * -description might touch Apple's private state is not). */
+static const char *mw_text(id object)
+{
+    if (object != nil && [object isKindOfClass:[NSString class]]) {
+        const char *text = [(NSString *)object UTF8String];
+
+        if (text != NULL) {
+            return text;
+        }
+    }
+    return "(nil)";
+}
+
+static void mw_clear_error(NSError **error)
+{
+    if (error != NULL) {
+        *error = nil;
+    }
+}
+
+static NSError *mw_nserror(const char *description)
+{
+    NSString *text = [[NSString alloc] initWithFormat:@"metalwire: %s", description];
+    NSError *error = [NSError errorWithDomain:@"com.iosvm.metalwire"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey : text}];
+
+    [text release];
+    return error;
+}
+
+/* The descriptor's label, read defensively: a foreign descriptor may raise where a real Metal
+ * descriptor would not, and a label is only wanted for the log. */
+static id mw_safe_label(id object)
+{
+    if (object == nil) {
+        return nil;
+    }
+    @try {
+        if ([object respondsToSelector:@selector(label)]) {
+            return ((id(*)(id, SEL))objc_msgSend)(object, @selector(label));
+        }
+    } @catch (NSException *exception) {
+        mw_log("could not read a descriptor's label (%s)", mw_text([exception reason]));
+    }
+    return nil;
+}
+
+/* The function's name, same defensive read: the target is CoreAnimation's argument, not ours. */
+static id mw_safe_function_name(id function)
+{
+    if (function == nil) {
+        return nil;
+    }
+    @try {
+        if ([function respondsToSelector:@selector(name)]) {
+            return ((id(*)(id, SEL))objc_msgSend)(function, @selector(name));
+        }
+    } @catch (NSException *exception) {
+        mw_log("could not read a pipeline function's name (%s)", mw_text([exception reason]));
+    }
+    return nil;
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -237,10 +404,16 @@ static void mw_free_buffer(struct mw_buffer_state *state);
 static void mw_free_texture(struct mw_texture_state *state);
 static void mw_free_command_buffer(struct mw_command_buffer_state *state);
 static void mw_free_encoder(struct mw_encoder_state *state);
+static void mw_free_library(struct mw_library_state *state);
+static void mw_free_function(struct mw_function_state *state);
+static void mw_free_stub(struct mw_stub_state *state);
+static void mw_free_pipeline_library(struct mw_pipeline_library_state *state);
+static void mw_free_render_encoder(struct mw_render_encoder_state *state);
 
 static void mw_object_dealloc(id self, SEL _cmd)
 {
     Class cls = object_getClass(self);
+    Class base = class_getSuperclass(cls);
     void **slot = mw_slot(self, cls);
 
     if (slot != NULL && *slot != NULL) {
@@ -252,12 +425,34 @@ static void mw_object_dealloc(id self, SEL _cmd)
             mw_free_command_buffer(*slot);
         } else if (cls == gBlitEncoderClass) {
             mw_free_encoder(*slot);
+        } else if (cls == gLibraryClass) {
+            mw_free_library(*slot);
+        } else if (cls == gFunctionClass) {
+            mw_free_function(*slot);
+        } else if (cls == gPipelineStateClass || cls == gDepthStencilStateClass ||
+                   cls == gSamplerStateClass) {
+            mw_free_stub(*slot);
+        } else if (cls == gPipelineLibraryClass) {
+            mw_free_pipeline_library(*slot);
+        } else if (cls == gRenderEncoderClass) {
+            mw_free_render_encoder(*slot);
         }
         *slot = NULL;
     }
-    struct objc_super super = {self, class_getSuperclass(cls)};
+    if (base != Nil && strncmp(class_getName(base), "_MTL", 4) == 0) {
+        /* Apple's private -dealloc assumes the concrete class behind the base initialized the
+         * base's internal dispatch objects; these stubs are made with a plain -init, so that
+         * dealloc is the null-libdispatch fault ca-metal3-shim1 died in (x1 = @selector(dealloc),
+         * pc = libdispatch, x0 = NULL). Free the instance ourselves and never call it; the rule
+         * and the leak are logged once at registration (mw_make_class). */
+        object_dispose(self);
+        return;
+    }
+    {
+        struct objc_super super = {self, base};
 
-    ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&super, _cmd);
+        ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&super, _cmd);
+    }
 }
 
 static NSMethodSignature *mw_signature_from_protocols(SEL selector)
@@ -346,13 +541,38 @@ static void mw_forward_invocation(id self, SEL _cmd, NSInvocation *invocation)
     const char *return_type = [signature methodReturnType];
     NSString *name = NSStringFromSelector(selector);
 
-    (void)self;
     (void)_cmd;
     pthread_mutex_lock(&lock);
     if (seen == nil) {
         seen = [[NSMutableSet alloc] init];
     }
-    if (![seen containsObject:name]) {
+    if (gCensusEnabled) {
+        /* census mode: every inherited Apple-base method this plug-in does not implement itself is
+         * installed as a forwarding trampoline, and its first call says which class/selector it
+         * was. Keys are class+selector so a selector trapped on two classes is logged twice. */
+        NSString *key = [[NSString alloc] initWithFormat:@"%s/%s",
+                                                         class_getName(object_getClass(self)),
+                                                         sel_getName(selector)];
+
+        if (![seen containsObject:key]) {
+            Class cls = object_getClass(self);
+            Class declarer = Nil;
+
+            [seen addObject:key];
+            for (Class candidate = class_getSuperclass(cls);
+                 candidate != Nil && candidate != objc_getClass("NSObject");
+                 candidate = class_getSuperclass(candidate)) {
+                if (class_getInstanceMethod(candidate, selector) != NULL) {
+                    declarer = candidate;
+                    break;
+                }
+            }
+            mw_log("census: -[%s %s] (inherited from %s; answered zero)", class_getName(cls),
+                   sel_getName(selector),
+                   declarer != Nil ? class_getName(declarer) : "an Apple base");
+        }
+        [key release];
+    } else if (![seen containsObject:name]) {
         [seen addObject:name];
         mw_log("asked and not implemented: -%s (returns %lu bytes, type %s; answered with zero)",
                sel_getName(selector), (unsigned long)length,
@@ -458,6 +678,15 @@ static Class mw_make_class(const char *name, const char *base_name, int slot)
     if (cls == Nil) {
         mw_log("could not make the class %s", name);
         return Nil;
+    }
+    if (base != Nil && strncmp(class_getName(base), "_MTL", 4) == 0) {
+        /* The dealloc rule, said once at registration: Apple's private -dealloc dereferences
+         * dispatch state a plain -init never creates (the ca-metal3-shim1 fault), so
+         * mw_object_dealloc frees the instance itself and never calls the base's dealloc. The
+         * base allocation is leaked: a deliberate limitation of the stub. */
+        mw_log("%s: its %s -dealloc is skipped and the base allocation is leaked (deliberate: the "
+               "private dealloc dereferences state a plain -init never sets up)",
+               name, class_getName(base));
     }
     if (slot != 0 &&
         !class_addIvar(cls, "_mw", sizeof(void *), sizeof(void *) == 8 ? 3 : 2, "^v")) {
@@ -1019,6 +1248,12 @@ static void mw_cb_commit(id self, SEL _cmd)
         mw_note_timing(state->encoded_ns, 0);
         return;
     }
+    /* CoreAnimation's render path is record-only: say what this command buffer recorded, then let
+     * the empty-buffer completion below stand (nothing enters the ops array, nothing is sent). */
+    if (state->render_encoder_count != 0 || state->render_draw_count != 0) {
+        mw_log("CA frame: %d render encoders, %llu draws (record only; not on the wire)",
+               state->render_encoder_count, (unsigned long long)state->render_draw_count);
+    }
     if (state->op_count == 0) {
         /* Metal allows an empty command buffer; there is nothing for a host to execute */
         state->status = MTLCommandBufferStatusCompleted;
@@ -1180,9 +1415,18 @@ static void mw_cb_present(id self, SEL _cmd, id drawable)
     if ([drawable respondsToSelector:@selector(texture)]) {
         texture = ((id(*)(id, SEL))objc_msgSend)(drawable, @selector(texture));
     }
-    if (mw_texture_state_of(texture) == NULL) {
-        state->local_error = "presentDrawable: the drawable does not hold a metalwire texture";
-        mw_log("%s", state->local_error);
+    if (texture == nil || mw_texture_state_of(texture) == NULL) {
+        /* CoreAnimation's renderer presents a drawable that is not this experiment's (its texture
+         * is Apple's, not a HakiosMetalTexture). There is nothing to send on the wire for it, and
+         * failing the frame would make the renderer churn on empty frames, so the present is a
+         * no-op success: no local_error, no op, and an all-render command buffer still commits as
+         * the empty buffer Metal allows. Logged once. */
+        static int logged;
+
+        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+            mw_log("presentDrawable: the drawable's texture is not a metalwire texture; treating "
+                   "the present as a no-op (logged once)");
+        }
         return;
     }
     if (state->op_count >= (int)(sizeof(state->ops) / sizeof(state->ops[0]))) {
@@ -1201,6 +1445,34 @@ static double mw_cb_no_time(id self, SEL _cmd)
     (void)self;
     (void)_cmd;
     return 0.0;
+}
+
+/* The rest of the command-buffer surface CoreAnimation touched or may touch next. Every one of
+ * these is answered here so no _MTLCommandBuffer implementation runs on this object (Apple's
+ * scheduled/completed paths use libdispatch state a plain -init never creates). */
+static BOOL mw_cb_profiling_enabled(id self, SEL _cmd)
+{
+    struct mw_command_buffer_state *state = mw_command_buffer_state_of(self);
+
+    (void)_cmd;
+    return state != NULL && state->profiling_enabled != 0;
+}
+
+static void mw_cb_set_profiling_enabled(id self, SEL _cmd, BOOL enabled)
+{
+    struct mw_command_buffer_state *state = mw_command_buffer_state_of(self);
+
+    (void)_cmd;
+    if (state != NULL) {
+        state->profiling_enabled = enabled ? 1 : 0;
+    }
+}
+
+static BOOL mw_cb_retained_references(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return YES; /* the plain -commandBuffer path Metal clients use */
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1258,6 +1530,16 @@ static void mw_blit_copy_to_texture(id self, SEL _cmd, id source_buffer, NSUInte
     if (texture == NULL) {
         state->local_error = "copyFromBuffer: the destination is not a metalwire texture";
         mw_log("%s", state->local_error);
+        return;
+    }
+    if (texture->texture_type != (uint32_t)MTLTextureType2D ||
+        (texture->pixel_format != (uint32_t)MTLPixelFormatBGRA8Unorm &&
+         texture->pixel_format != (uint32_t)MTLPixelFormatRGBA8Unorm)) {
+        /* placeholder textures (sRGB, depth, float, arrays) exist for CoreAnimation's render path,
+         * not for the wire: a blit into one stays the error it was when they could not be made */
+        state->local_error = "copyFromBuffer: the destination is not a 2D BGRA8/RGBA8 texture";
+        mw_log("%s (format %u type %u)", state->local_error, texture->pixel_format,
+               texture->texture_type);
         return;
     }
     if (source_size.width == 0 || source_size.height == 0) {
@@ -1326,6 +1608,52 @@ static void mw_blit_copy_to_texture_options(id self, SEL _cmd, id source_buffer,
                             origin);
 }
 
+/* The two texture-level blits CoreAnimation already used: explicit no-ops so they are counted by
+ * the encoder rather than logged once by the generic "asked and not implemented" path. */
+static void mw_blit_copy_texture_to_texture(id self, SEL _cmd, id source_texture,
+                                            NSUInteger source_slice, NSUInteger source_level,
+                                            MTLOrigin source_origin, MTLSize source_size,
+                                            id destination_texture, NSUInteger destination_slice,
+                                            NSUInteger destination_level, MTLOrigin destination_origin)
+{
+    struct mw_encoder_state *encoder = mw_encoder_state_of(self);
+    static int logged;
+
+    (void)_cmd;
+    (void)source_texture;
+    (void)source_slice;
+    (void)source_level;
+    (void)source_origin;
+    (void)source_size;
+    (void)destination_texture;
+    (void)destination_slice;
+    (void)destination_level;
+    (void)destination_origin;
+    if (encoder != NULL && !encoder->ended) {
+        encoder->texture_copy_count++;
+    }
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("blit encoder: copyFromTexture:...toTexture:... is a record-only no-op (a Stage C "
+               "gap: the v1 wire has no texture-to-texture command)");
+    }
+}
+
+static void mw_blit_generate_mipmaps(id self, SEL _cmd, id texture)
+{
+    struct mw_encoder_state *encoder = mw_encoder_state_of(self);
+    static int logged;
+
+    (void)_cmd;
+    (void)texture;
+    if (encoder != NULL && !encoder->ended) {
+        encoder->mipmap_count++;
+    }
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("blit encoder: generateMipmapsForTexture: is a record-only no-op (a Stage C gap: "
+               "no mipmap generation in the v1 wire)");
+    }
+}
+
 static void mw_blit_not_in_v1(id self, SEL _cmd)
 {
     struct mw_encoder_state *encoder = mw_encoder_state_of(self);
@@ -1346,6 +1674,11 @@ static void mw_blit_end(id self, SEL _cmd)
     (void)_cmd;
     if (encoder != NULL) {
         encoder->ended = 1;
+        if (encoder->texture_copy_count != 0 || encoder->mipmap_count != 0) {
+            mw_log("CA blit encoder: %llu texture copies, %llu mipmap passes (record only)",
+                   (unsigned long long)encoder->texture_copy_count,
+                   (unsigned long long)encoder->mipmap_count);
+        }
     }
 }
 
@@ -1859,7 +2192,75 @@ static id mw_device_new_buffer_bytes(id self, SEL _cmd, const void *bytes, NSUIn
     return buffer;
 }
 
-static id mw_device_new_texture(id self, SEL _cmd, id descriptor)
+/* The v1 wire path can carry exactly one texture shape: 2D, BGRA8Unorm/RGBA8Unorm. Until
+ * CoreAnimation arrived, everything else was refused; now a descriptor outside that shape still
+ * gets a placeholder texture (metadata only, no pixels, never sent on the wire), and only the first
+ * use of each (type, format) pair is logged. */
+static NSMutableSet *gLoggedTextureFormats; /* NSString "type/format", under gStubLock */
+
+static BOOL mw_note_texture_format(unsigned long texture_type, unsigned long pixel_format)
+{
+    NSString *key = [[NSString alloc] initWithFormat:@"%lu/%lu", texture_type, pixel_format];
+    BOOL first = NO;
+
+    pthread_mutex_lock(&gStubLock);
+    if (gLoggedTextureFormats == nil) {
+        gLoggedTextureFormats = [[NSMutableSet alloc] init];
+    }
+    if (![gLoggedTextureFormats containsObject:key]) {
+        [gLoggedTextureFormats addObject:key];
+        first = YES;
+    }
+    pthread_mutex_unlock(&gStubLock);
+    [key release];
+    return first;
+}
+
+/* IOSurfaceGetID, looked up rather than linked: the bundle links Foundation/Metal/libobjc only,
+ * and the id is wanted for the log, not for anything functional. */
+static uint32_t mw_iosurface_id(void *surface)
+{
+    typedef uint32_t (*mw_iosurface_get_id_fn)(void *);
+    static mw_iosurface_get_id_fn get_id;
+    static int resolved;
+
+    if (!resolved) {
+        void *symbol = dlsym(RTLD_DEFAULT, "IOSurfaceGetID");
+
+        memcpy(&get_id, &symbol, sizeof(get_id));
+        resolved = 1;
+    }
+    return surface != NULL && get_id != NULL ? get_id(surface) : 0;
+}
+
+/* IOSurface-backed textures are the Stage C gap (the pixels live in an IOSurface the host cannot
+ * read yet); the first MW_IOSURFACE_LOG_LIMIT distinct surfaces are logged once each, then the
+ * placeholder is made silently. */
+#define MW_IOSURFACE_LOG_LIMIT 64
+static NSMutableSet *gLoggedIosurfaces; /* NSString "pointers", under gStubLock */
+
+static BOOL mw_note_iosurface(void *surface)
+{
+    NSString *key = [[NSString alloc] initWithFormat:@"%p", surface];
+    BOOL first = NO;
+
+    pthread_mutex_lock(&gStubLock);
+    if (gLoggedIosurfaces == nil) {
+        gLoggedIosurfaces = [[NSMutableSet alloc] init];
+    }
+    if (![gLoggedIosurfaces containsObject:key] &&
+        [gLoggedIosurfaces count] < MW_IOSURFACE_LOG_LIMIT) {
+        [gLoggedIosurfaces addObject:key];
+        first = YES;
+    }
+    pthread_mutex_unlock(&gStubLock);
+    [key release];
+    return first;
+}
+
+/* The texture object for a descriptor; selector_name only shapes the log line, so the wire-path
+ * line keeps the exact "newTextureWithDescriptor: texture N (...)" wording the first boots have. */
+static id mw_texture_object(id descriptor, const char *selector_name)
 {
     MTLTextureDescriptor *texture_descriptor = (MTLTextureDescriptor *)descriptor;
     struct mw_texture_state *state;
@@ -1868,13 +2269,12 @@ static id mw_device_new_texture(id self, SEL _cmd, id descriptor)
     MTLTextureType texture_type;
     MTLTextureUsage usage;
     MTLStorageMode storage_mode;
+    int wire_format;
     id texture;
     void **slot;
 
-    (void)self;
-    (void)_cmd;
     if (texture_descriptor == nil) {
-        mw_log("newTextureWithDescriptor: nil descriptor");
+        mw_log("%s: nil descriptor", selector_name);
         return nil;
     }
     width = [texture_descriptor width];
@@ -1887,18 +2287,15 @@ static id mw_device_new_texture(id self, SEL _cmd, id descriptor)
     texture_type = [texture_descriptor textureType];
     usage = [texture_descriptor usage];
     storage_mode = [texture_descriptor storageMode];
-    if (texture_type != MTLTextureType2D || width == 0 || height == 0 || depth > 1) {
-        mw_log("newTextureWithDescriptor: only a 2D width x height texture is in v1 (type %lu "
-               "%lux%lux%lu)",
-               (unsigned long)texture_type, (unsigned long)width, (unsigned long)height,
-               (unsigned long)depth);
-        return nil;
-    }
-    if (pixel_format != MTLPixelFormatBGRA8Unorm && pixel_format != MTLPixelFormatRGBA8Unorm) {
-        mw_log("newTextureWithDescriptor: pixel format %lu is not in v1 (80 BGRA8Unorm or 70 "
-               "RGBA8Unorm)",
-               (unsigned long)pixel_format);
-        return nil;
+    wire_format = texture_type == MTLTextureType2D && width != 0 && height != 0 && depth <= 1 &&
+                  (pixel_format == MTLPixelFormatBGRA8Unorm ||
+                   pixel_format == MTLPixelFormatRGBA8Unorm);
+    if (!wire_format &&
+        mw_note_texture_format((unsigned long)texture_type, (unsigned long)pixel_format)) {
+        mw_log("%s: placeholder texture for format %lu type %lu (%lux%lux%lu; not in the v1 wire "
+               "path, which carries only BGRA8Unorm/RGBA8Unorm 2D)",
+               selector_name, (unsigned long)pixel_format, (unsigned long)texture_type,
+               (unsigned long)width, (unsigned long)height, (unsigned long)depth);
     }
     texture = mw_alloc_init(gTextureClass, "texture");
     if (texture == nil) {
@@ -1923,11 +2320,41 @@ static id mw_device_new_texture(id self, SEL _cmd, id descriptor)
     state->usage = (unsigned long)usage;
     state->storage_mode = (unsigned long)storage_mode;
     *slot = state;
-    mw_log(
-        "newTextureWithDescriptor: texture %u (%lux%lu format %lu usage 0x%lx; pixels on the host)",
-        state->remote_id, (unsigned long)width, (unsigned long)height, (unsigned long)pixel_format,
-        (unsigned long)usage);
+    if (wire_format) {
+        mw_log(
+            "%s: texture %u (%lux%lu format %lu usage 0x%lx; pixels on the host)", selector_name,
+            state->remote_id, (unsigned long)width, (unsigned long)height,
+            (unsigned long)pixel_format, (unsigned long)usage);
+    }
     return texture; /* +1, as a Metal "new" method */
+}
+
+static id mw_device_new_texture(id self, SEL _cmd, id descriptor)
+{
+    (void)self;
+    (void)_cmd;
+    return mw_texture_object(descriptor, "newTextureWithDescriptor:");
+}
+
+static id mw_device_new_texture_iosurface(id self, SEL _cmd, id descriptor, void *surface,
+                                          NSUInteger plane)
+{
+    uint32_t surface_id = mw_iosurface_id(surface);
+    id texture;
+
+    (void)self;
+    (void)_cmd;
+    texture = mw_texture_object(descriptor, "newTextureWithDescriptor:iosurface:plane:");
+    if (texture != nil && mw_note_iosurface(surface)) {
+        struct mw_texture_state *state = mw_texture_state_of(texture);
+
+        mw_log("newTextureWithDescriptor:iosurface:plane: IOSurface %u (%p) plane %lu -> placeholder "
+               "texture %u (%lux%lu; the surface is ignored, the Stage C gap)",
+               surface_id, surface, (unsigned long)plane, state != NULL ? state->remote_id : 0,
+               state != NULL ? (unsigned long)state->width : 0,
+               state != NULL ? (unsigned long)state->height : 0);
+    }
+    return texture;
 }
 
 static id mw_device_new_drawable(id self, SEL _cmd, id texture)
@@ -1939,6 +2366,1537 @@ static id mw_device_new_drawable(id self, SEL _cmd, id texture)
         return nil;
     }
     return [[MWDrawable alloc] initWithTexture:texture]; /* +1, as a "new" method */
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Libraries, functions and pipeline states: CoreAnimation's library wall.
+ *
+ * CoreAnimation's Metal renderer loads QuartzCore.framework/default.metallib through the device's
+ * -newLibraryWithURL:error:. Apple's implementation of that method lives on _MTLDevice itself, so a
+ * subclass that does not override it runs Apple's code on a file that is not a real metallib and
+ * kills the process ("[Metal] Metal failed to load library: Invalid library file"). This experiment
+ * measures the channel, not shader translation, so the premise here is that the library is a
+ * placeholder: the URL is logged and its bytes are never read. A library accepts any function name,
+ * a function is the vertex/fragment guess that name implies (logged), and the pipeline,
+ * depth-stencil and sampler states are empty objects that let CoreAnimation walk past the library
+ * phase. Nothing is compiled and nothing is sent on the wire.
+ * ---------------------------------------------------------------------------------------------- */
+
+static NSMutableSet *gLoggedFunctionNames; /* NSString, under gStubLock: each name logged once */
+
+static struct mw_library_state *mw_library_state_of(id object)
+{
+    void **slot;
+
+    if (object == nil || gLibraryClass == Nil || object_getClass(object) != gLibraryClass) {
+        return NULL;
+    }
+    slot = mw_slot(object, gLibraryClass);
+    return slot != NULL ? *slot : NULL;
+}
+
+static struct mw_function_state *mw_function_state_of(id object)
+{
+    void **slot;
+
+    if (object == nil || gFunctionClass == Nil || object_getClass(object) != gFunctionClass) {
+        return NULL;
+    }
+    slot = mw_slot(object, gFunctionClass);
+    return slot != NULL ? *slot : NULL;
+}
+
+static struct mw_stub_state *mw_stub_state_of(id object, Class cls)
+{
+    void **slot;
+
+    if (object == nil || cls == Nil || object_getClass(object) != cls) {
+        return NULL;
+    }
+    slot = mw_slot(object, cls);
+    return slot != NULL ? *slot : NULL;
+}
+
+static struct mw_stub_state *mw_stub_state_of_object(id object)
+{
+    Class cls = object_getClass(object);
+
+    if (cls != gPipelineStateClass && cls != gDepthStencilStateClass && cls != gSamplerStateClass) {
+        return NULL;
+    }
+    return mw_stub_state_of(object, cls);
+}
+
+static void mw_free_library(struct mw_library_state *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    [state->install_name release];
+    [state->label release];
+    [state->names release];
+    free(state);
+}
+
+static void mw_free_function(struct mw_function_state *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    [state->name release];
+    [state->label release];
+    free(state);
+}
+
+static void mw_free_stub(struct mw_stub_state *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    [state->label release];
+    free(state);
+}
+
+/* The object shells. Each is +1 (a Metal "new" method's convention), carries one _mw state, and
+ * the class is the run-time class the constructor registered. */
+static id mw_library_object(const char *selector_name, id what, id install_name)
+{
+    struct mw_library_state *state;
+    id library;
+    void **slot;
+
+    if (gLibraryClass == Nil) {
+        mw_log("%s: no library class is registered", selector_name);
+        return nil;
+    }
+    library = mw_alloc_init(gLibraryClass, "library");
+    if (library == nil) {
+        return nil;
+    }
+    state = calloc(1, sizeof(*state));
+    slot = mw_slot(library, gLibraryClass);
+    if (state == NULL || slot == NULL) {
+        free(state);
+        [library release];
+        return nil;
+    }
+    state->stub_id = mw_next_stub_id();
+    state->install_name = [install_name copy];
+    state->names = [[NSMutableArray alloc] init];
+    *slot = state;
+    mw_log("%s: %s -> placeholder library %u (install name %s; the library bytes are never read)",
+           selector_name, mw_text(what), state->stub_id, mw_text(install_name));
+    return library;
+}
+
+static id mw_function_object(NSString *name)
+{
+    struct mw_function_state *state;
+    id function;
+    void **slot;
+
+    if (gFunctionClass == Nil) {
+        mw_log("newFunctionWithName: no function class is registered");
+        return nil;
+    }
+    function = mw_alloc_init(gFunctionClass, "function");
+    if (function == nil) {
+        return nil;
+    }
+    state = calloc(1, sizeof(*state));
+    slot = mw_slot(function, gFunctionClass);
+    if (state == NULL || slot == NULL) {
+        free(state);
+        [function release];
+        return nil;
+    }
+    state->name = [name copy];
+    state->function_type = ([name rangeOfString:@".vert."].location != NSNotFound ||
+                            [name rangeOfString:@"Vertex"].location != NSNotFound)
+                               ? MTLFunctionTypeVertex
+                               : MTLFunctionTypeFragment;
+    *slot = state;
+    return function;
+}
+
+static id mw_stub_object(Class cls, const char *what, id label)
+{
+    struct mw_stub_state *state;
+    id object;
+    void **slot;
+
+    if (cls == Nil) {
+        mw_log("%s: no class is registered", what);
+        return nil;
+    }
+    object = mw_alloc_init(cls, what);
+    if (object == nil) {
+        return nil;
+    }
+    state = calloc(1, sizeof(*state));
+    slot = mw_slot(object, cls);
+    if (state == NULL || slot == NULL) {
+        free(state);
+        [object release];
+        return nil;
+    }
+    state->label = [label copy];
+    *slot = state;
+    return object;
+}
+
+/* -newFunctionWithName:... on a library: any name is accepted, the first ask for a name is logged,
+ * and every name a library was asked about ends up in its -functionNames. */
+static id mw_library_make_function(id self, const char *selector_name, id name)
+{
+    struct mw_library_state *library = mw_library_state_of(self);
+    struct mw_function_state *function_state;
+    BOOL first = NO;
+    id function;
+
+    if (name == nil || ![name isKindOfClass:[NSString class]]) {
+        mw_log("%s: the function name is nil or not a string; nil", selector_name);
+        return nil;
+    }
+    pthread_mutex_lock(&gStubLock);
+    if (gLoggedFunctionNames == nil) {
+        gLoggedFunctionNames = [[NSMutableSet alloc] init];
+    }
+    if (![gLoggedFunctionNames containsObject:name]) {
+        [gLoggedFunctionNames addObject:name];
+        first = YES;
+    }
+    if (library != NULL && library->names != nil && ![library->names containsObject:name]) {
+        [library->names addObject:name];
+    }
+    pthread_mutex_unlock(&gStubLock);
+    function = mw_function_object((NSString *)name);
+    function_state = mw_function_state_of(function);
+    if (function != nil && first) {
+        mw_log("%s: %s -> placeholder %s function (guessed from the name; no shader is compiled)",
+               selector_name, mw_text(name),
+               function_state != NULL && function_state->function_type == MTLFunctionTypeVertex
+                   ? "vertex"
+                   : "fragment");
+    }
+    return function;
+}
+
+/* Library. */
+static id mw_library_function_names(id self, SEL _cmd)
+{
+    struct mw_library_state *state = mw_library_state_of(self);
+    NSArray *names = @[];
+
+    (void)_cmd;
+    if (state != NULL) {
+        pthread_mutex_lock(&gStubLock);
+        names = state->names != nil ? [NSArray arrayWithArray:state->names] : @[];
+        pthread_mutex_unlock(&gStubLock);
+    }
+    return names;
+}
+
+static id mw_library_new_function(id self, SEL _cmd, id name)
+{
+    (void)_cmd;
+    return mw_library_make_function(self, "newFunctionWithName:", name);
+}
+
+static id mw_library_new_function_constants(id self, SEL _cmd, id name, id constant_values,
+                                            NSError **error)
+{
+    (void)_cmd;
+    (void)constant_values;
+    mw_clear_error(error);
+    return mw_library_make_function(self, "newFunctionWithName:constantValues:error:", name);
+}
+
+/* The completion-handler form of the same call (public MTLibrary API): answer synchronously with a
+ * placeholder function, no compiler and no dispatch queue involved. */
+static void mw_library_new_function_completion(id self, SEL _cmd, id name, id constant_values,
+                                               id handler)
+{
+    id function;
+
+    (void)_cmd;
+    (void)constant_values;
+    function = mw_library_make_function(self, "newFunctionWithName:constantValues:completionHandler:",
+                                        name);
+    if (handler != nil) {
+        ((void (^)(id, NSError *))handler)(function, nil);
+    }
+    [function autorelease];
+}
+
+static id mw_library_label(id self, SEL _cmd)
+{
+    struct mw_library_state *state = mw_library_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->label : nil;
+}
+
+static void mw_library_set_label(id self, SEL _cmd, id label)
+{
+    struct mw_library_state *state = mw_library_state_of(self);
+
+    (void)_cmd;
+    if (state != NULL && state->label != label) {
+        [state->label release];
+        state->label = [label copy];
+    }
+}
+
+static id mw_library_device(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return gDevice;
+}
+
+static NSInteger mw_library_type(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return (NSInteger)MTLLibraryTypeExecutable;
+}
+
+static id mw_library_install_name(id self, SEL _cmd)
+{
+    struct mw_library_state *state = mw_library_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->install_name : nil;
+}
+
+/* Function: the name and the vertex/fragment guess; no attributes, no constants. */
+static id mw_function_name(id self, SEL _cmd)
+{
+    struct mw_function_state *state = mw_function_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->name : nil;
+}
+
+static NSUInteger mw_function_type(id self, SEL _cmd)
+{
+    struct mw_function_state *state = mw_function_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? (NSUInteger)state->function_type : MTLFunctionTypeFragment;
+}
+
+static id mw_function_empty_array(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return @[];
+}
+
+static id mw_function_empty_dictionary(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return @{};
+}
+
+static id mw_function_device(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return gDevice;
+}
+
+static id mw_function_label(id self, SEL _cmd)
+{
+    struct mw_function_state *state = mw_function_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->label : nil;
+}
+
+static void mw_function_set_label(id self, SEL _cmd, id label)
+{
+    struct mw_function_state *state = mw_function_state_of(self);
+
+    (void)_cmd;
+    if (state != NULL && state->label != label) {
+        [state->label release];
+        state->label = [label copy];
+    }
+}
+
+/* A placeholder that keeps the base function's name and type: runtime specialisation never
+ * compiles anything here, it only has to hand CoreAnimation an object of the right shape. */
+static id mw_function_specialized_copy(id self)
+{
+    struct mw_function_state *base_state = mw_function_state_of(self);
+    struct mw_function_state *specialized_state;
+    id specialized;
+
+    if (base_state == NULL || base_state->name == nil) {
+        return nil;
+    }
+    specialized = mw_function_object((NSString *)base_state->name);
+    specialized_state = mw_function_state_of(specialized);
+    if (specialized_state != NULL) {
+        specialized_state->function_type = base_state->function_type;
+        [specialized_state->label release];
+        specialized_state->label = [base_state->label copy];
+    }
+    return specialized; /* +1, as a Metal "new" method */
+}
+
+/* The wall of ca-metal3-dealloc1: CoreAnimation loads the fixed_* base functions from the
+ * placeholder library and specialises them with constants. Apple's _MTLFunction implementation
+ * dereferences Metal's real function object, so this answers a placeholder instead and logs what
+ * was asked: the base function's name and the descriptor's function-constants dictionary. */
+static id mw_function_new_specialized(id self, SEL _cmd, id descriptor, id destination_archive,
+                                      id function_cache, NSError **error)
+{
+    struct mw_function_state *base_state = mw_function_state_of(self);
+    id constants = nil;
+    id constants_text = nil;
+    id specialized;
+
+    (void)_cmd;
+    (void)destination_archive;
+    (void)function_cache;
+    mw_clear_error(error);
+    @try {
+        if (descriptor != nil) {
+            if ([descriptor respondsToSelector:@selector(functionConstantsDictionary)]) {
+                constants = ((id(*)(id, SEL))objc_msgSend)(
+                    descriptor, @selector(functionConstantsDictionary));
+            }
+            if (constants != nil && [constants respondsToSelector:@selector(description)]) {
+                constants_text = ((id(*)(id, SEL))objc_msgSend)(constants, @selector(description));
+            }
+        }
+    } @catch (NSException *exception) {
+        mw_log("newSpecializedFunction: reading the descriptor's constants raised %s; nil",
+               mw_text([exception reason]));
+        constants = nil;
+        constants_text = nil;
+    }
+    mw_log("newSpecializedFunctionWithDescriptor:destinationArchive:functionCache:error: %s + %s "
+           "(placeholder specialized function; no shader is compiled)",
+           mw_text(base_state != NULL ? base_state->name : nil), mw_text(constants_text));
+    specialized = mw_function_specialized_copy(self);
+    if (specialized == nil && error != NULL) {
+        *error = mw_nserror("the base function has no name to specialize");
+    }
+    return specialized;
+}
+
+/* The shorter private spelling (some Metal builds carry it): same answer. */
+static id mw_function_new_specialized_descriptor(id self, SEL _cmd, id descriptor, NSError **error)
+{
+    return mw_function_new_specialized(self, _cmd, descriptor, nil, nil, error);
+}
+
+static void mw_function_new_specialized_sync(id self, SEL _cmd, id descriptor,
+                                             id destination_archive, id function_cache, BOOL sync,
+                                             id handler)
+{
+    id specialized = mw_function_new_specialized(self, _cmd, descriptor, destination_archive,
+                                                 function_cache, NULL);
+
+    (void)sync;
+    if (handler != nil) {
+        ((void (^)(id, NSError *))handler)(specialized, nil);
+    }
+    [specialized autorelease];
+}
+
+static id mw_function_new_specialized_name(id self, SEL _cmd, id name, id constants)
+{
+    struct mw_function_state *state = mw_function_state_of(self);
+    static int logged;
+    id function_name = nil;
+    id specialized;
+
+    (void)_cmd;
+    (void)constants;
+    if (name != nil && [name isKindOfClass:[NSString class]]) {
+        function_name = name;
+    } else if (state != NULL) {
+        function_name = state->name;
+    }
+    if (function_name == nil) {
+        return nil;
+    }
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("newSpecializedFunctionWithName:constants: %s -> placeholder function "
+               "(no shader is compiled)",
+               mw_text(function_name));
+    }
+    specialized = mw_function_object((NSString *)function_name);
+    if (specialized != nil && state != NULL) {
+        struct mw_function_state *specialized_state = mw_function_state_of(specialized);
+
+        if (specialized_state != NULL) {
+            specialized_state->function_type = state->function_type;
+        }
+    }
+    return specialized;
+}
+
+/* The three empty states (render pipeline, depth-stencil, sampler): a label and the device. */
+static id mw_stub_label(id self, SEL _cmd)
+{
+    struct mw_stub_state *state = mw_stub_state_of_object(self);
+
+    (void)_cmd;
+    return state != NULL ? state->label : nil;
+}
+
+static void mw_stub_set_label(id self, SEL _cmd, id label)
+{
+    struct mw_stub_state *state = mw_stub_state_of_object(self);
+
+    (void)_cmd;
+    if (state != NULL && state->label != label) {
+        [state->label release];
+        state->label = [label copy];
+    }
+}
+
+static id mw_stub_device(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return gDevice;
+}
+
+/* Device: the library phase. For URL/data/file the premise is that the library is a placeholder, so
+ * the call always succeeds; only source cannot be honoured, because the guest has no Metal
+ * compiler. */
+static id mw_device_new_library_url(id self, SEL _cmd, NSURL *url, NSError **error)
+{
+    id text = nil;
+    id path = nil;
+    id library;
+
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    if (url != nil) {
+        text = [url absoluteString];
+        path = [url path];
+    }
+    library = mw_library_object("newLibraryWithURL:error:", text, path);
+    if (library == nil && error != NULL) {
+        *error = mw_nserror("the placeholder library object could not be made");
+    }
+    return library;
+}
+
+static id mw_device_new_library_data(id self, SEL _cmd, dispatch_data_t data, NSError **error)
+{
+    id library;
+
+    (void)self;
+    (void)_cmd;
+    (void)data;
+    mw_clear_error(error);
+    library = mw_library_object("newLibraryWithData:error:", @"in-memory data", nil);
+    if (library == nil && error != NULL) {
+        *error = mw_nserror("the placeholder library object could not be made");
+    }
+    return library;
+}
+
+static id mw_device_new_library_file(id self, SEL _cmd, NSString *path, NSError **error)
+{
+    id library;
+
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    library = mw_library_object("newLibraryWithFile:error:", path, path);
+    if (library == nil && error != NULL) {
+        *error = mw_nserror("the placeholder library object could not be made");
+    }
+    return library;
+}
+
+static id mw_device_new_library_source(id self, SEL _cmd, NSString *source, id options,
+                                       NSError **error)
+{
+    unsigned long length = 0;
+
+    (void)self;
+    (void)_cmd;
+    (void)options;
+    if (source != nil && [source isKindOfClass:[NSString class]]) {
+        length = (unsigned long)[source length];
+    }
+    mw_log("newLibraryWithSource:options:error: %lu characters of source are not compiled (the "
+           "guest has no Metal compiler); nil",
+           length);
+    if (error != NULL) {
+        *error = mw_nserror("newLibraryWithSource:options:error: is not supported: there is no "
+                            "Metal shader compiler in the guest; this experiment provides "
+                            "placeholder libraries only");
+    }
+    return nil;
+}
+
+static id mw_device_new_default_library(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return mw_library_object("newDefaultLibrary", @"the framework's default library", nil);
+}
+
+static id mw_device_new_default_library_bundle(id self, SEL _cmd, NSBundle *bundle,
+                                               NSError **error)
+{
+    id text = nil;
+    id library;
+
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    if (bundle != nil && [bundle isKindOfClass:[NSBundle class]]) {
+        text = [bundle bundlePath];
+    }
+    library = mw_library_object("newDefaultLibraryWithBundle:error:", text, nil);
+    if (library == nil && error != NULL) {
+        *error = mw_nserror("the placeholder library object could not be made");
+    }
+    return library;
+}
+
+/* Device: the pipeline phase. The descriptor is read for its vertex and fragment function names
+ * (defensively: it is CoreAnimation's object, and @try is the contract here), then a placeholder
+ * state is answered. Nothing is compiled. */
+static id mw_render_pipeline_object(const char *selector_name, id descriptor, NSUInteger options,
+                                    id *reflection, NSError **error)
+{
+    id vertex = nil;
+    id fragment = nil;
+    id label = nil;
+    id pipeline;
+
+    mw_clear_error(error);
+    if (reflection != NULL) {
+        *reflection = nil;
+    }
+    @try {
+        if (descriptor != nil) {
+            if ([descriptor respondsToSelector:@selector(vertexFunction)]) {
+                vertex = ((id(*)(id, SEL))objc_msgSend)(descriptor, @selector(vertexFunction));
+            }
+            if ([descriptor respondsToSelector:@selector(fragmentFunction)]) {
+                fragment = ((id(*)(id, SEL))objc_msgSend)(descriptor, @selector(fragmentFunction));
+            }
+            label = mw_safe_label(descriptor);
+        }
+    } @catch (NSException *exception) {
+        mw_log("%s: reading the descriptor's functions raised %s; both are logged as nil",
+               selector_name, mw_text([exception reason]));
+        vertex = nil;
+        fragment = nil;
+    }
+    mw_log("%s: vertex %s, fragment %s, options 0x%lx (placeholder render pipeline; no shader is "
+           "compiled)",
+           selector_name, mw_text(mw_safe_function_name(vertex)),
+           mw_text(mw_safe_function_name(fragment)), (unsigned long)options);
+    pipeline = mw_stub_object(gPipelineStateClass, "render pipeline state", label);
+    if (pipeline == nil && error != NULL) {
+        *error = mw_nserror("the placeholder render pipeline state could not be made");
+    }
+    return pipeline;
+}
+
+static id mw_device_new_render_pipeline(id self, SEL _cmd, id descriptor, NSError **error)
+{
+    (void)self;
+    (void)_cmd;
+    return mw_render_pipeline_object("newRenderPipelineStateWithDescriptor:error:", descriptor, 0,
+                                     NULL, error);
+}
+
+static id mw_device_new_render_pipeline_options(id self, SEL _cmd, id descriptor,
+                                                NSUInteger options, NSError **error)
+{
+    (void)self;
+    (void)_cmd;
+    return mw_render_pipeline_object("newRenderPipelineStateWithDescriptor:options:error:",
+                                     descriptor, options, NULL, error);
+}
+
+static id mw_device_new_render_pipeline_reflection(id self, SEL _cmd, id descriptor,
+                                                   NSUInteger options, id *reflection,
+                                                   NSError **error)
+{
+    (void)self;
+    (void)_cmd;
+    return mw_render_pipeline_object(
+        "newRenderPipelineStateWithDescriptor:options:reflection:error:", descriptor, options,
+        reflection, error);
+}
+
+/* The SPI path CoreAnimation actually uses (16.5): the selector carries a completion handler and
+ * Apple's _MTLDevice implementation hands the descriptor to MTLCompilerService. That service
+ * inspects the placeholder functions -- and kills the process. This override answers the handler
+ * synchronously with a placeholder state and never creates a compiler request. The state is
+ * handed over with its +1 reference; CoreAnimation's handler retains it, and if it does not, the
+ * leak is one state object per pipeline. */
+static void mw_device_new_render_pipeline_internal(id self, SEL _cmd, id descriptor,
+                                                   NSUInteger options, id *reflection,
+                                                   id destination_archive, NSError **error,
+                                                   id handler)
+{
+    id pipeline;
+
+    (void)self;
+    (void)_cmd;
+    (void)destination_archive;
+    pipeline = mw_render_pipeline_object(
+        "newRenderPipelineStateWithDescriptorInternal:options:reflection:destinationBinaryArchive:"
+        "error:completionHandler:",
+        descriptor, options, reflection, error);
+    if (handler != nil) {
+        ((void (^)(id, id, id))handler)(pipeline, nil, nil);
+    } else {
+        mw_log("newRenderPipelineStateWithDescriptorInternal: no completion handler: the "
+               "placeholder state is dropped");
+    }
+}
+
+static void mw_device_new_compute_pipeline_internal(id self, SEL _cmd, id descriptor,
+                                                    NSUInteger options, id pipeline_cache,
+                                                    id destination_archive, id *reflection,
+                                                    NSError **error, id handler)
+{
+    NSError *failure = mw_nserror("compute pipeline creation is not part of this experiment");
+
+    (void)self;
+    (void)_cmd;
+    (void)descriptor;
+    (void)options;
+    (void)pipeline_cache;
+    (void)destination_archive;
+    if (reflection != NULL) {
+        *reflection = nil;
+    }
+    if (error != NULL) {
+        *error = failure;
+    }
+    mw_log("newComputePipelineStateWithDescriptorInternal:options:pipelineCache:"
+           "destinationBinaryArchive:reflection:error:completionHandler: (nil; not in this "
+           "experiment)");
+    if (handler != nil) {
+        ((void (^)(id, id, id))handler)(nil, nil, failure);
+    }
+}
+
+/* Compute pipelines are not part of what CoreAnimation's renderer asks for; this override exists so
+ * Apple's inherited implementation cannot run, and it says so instead of compiling. */
+static id mw_device_new_compute_pipeline(id self, SEL _cmd, id function, NSError **error)
+{
+    (void)self;
+    (void)_cmd;
+    mw_log("newComputePipelineStateWithFunction:error: %s is not made in this experiment (nil)",
+           mw_text(mw_safe_function_name(function)));
+    if (error != NULL) {
+        *error = mw_nserror("compute pipelines are not part of the metalwire placeholder object "
+                            "graph");
+    }
+    return nil;
+}
+
+/* Device: the depth-stencil and sampler states are empty placeholders (the label is kept so the
+ * object can tell CoreAnimation which descriptor it came from). */
+static id mw_device_new_depth_stencil_state(id self, SEL _cmd, id descriptor)
+{
+    id label = mw_safe_label(descriptor);
+    id state;
+
+    (void)self;
+    (void)_cmd;
+    state = mw_stub_object(gDepthStencilStateClass, "depth stencil state", label);
+    mw_log("newDepthStencilStateWithDescriptor: label %s -> placeholder depth-stencil state",
+           mw_text(label));
+    return state;
+}
+
+static id mw_device_new_sampler_state(id self, SEL _cmd, id descriptor)
+{
+    id label = mw_safe_label(descriptor);
+    id state;
+
+    (void)self;
+    (void)_cmd;
+    state = mw_stub_object(gSamplerStateClass, "sampler state", label);
+    mw_log("newSamplerStateWithDescriptor: label %s -> placeholder sampler state", mw_text(label));
+    return state;
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * The pipeline library: CoreAnimation builds one from QuartzCore.framework/default.pipelinelib and
+ * asks it for render pipeline states by name. The selector lives on Metal's private
+ * _MTLPipelineLibrary, and the inherited _MTLDevice implementation deserializes the file and
+ * SIGSEGVs on a path that is not a real pipelinelib; the device override below answers a
+ * placeholder instead, so the path is logged and the file is never opened. The pipeline names
+ * CoreAnimation asks for are a result of this phase: the first MW_PIPELINE_NAME_LOG_LIMIT distinct
+ * names are printed, once each.
+ *
+ * MTLPipelineLibrary has no public SDK header on iOS 16; this declaration makes the compiled
+ * protocol reference the runtime may need (the framework's own object is still preferred by name
+ * when it is realized).
+ * ---------------------------------------------------------------------------------------------- */
+
+@protocol MTLPipelineLibrary <NSObject>
+@property(nullable, copy, nonatomic) NSString *label;
+@property(readonly) id<MTLDevice> device;
+@end
+
+#define MW_PIPELINE_NAME_LOG_LIMIT 128
+static NSMutableSet *gLoggedPipelineNames; /* NSString, under gStubLock */
+static unsigned gLoggedPipelineNameCount;
+static int gPipelineNameCapLogged;
+
+static struct mw_pipeline_library_state *mw_pipeline_library_state_of(id object)
+{
+    void **slot;
+
+    if (object == nil || gPipelineLibraryClass == Nil ||
+        object_getClass(object) != gPipelineLibraryClass) {
+        return NULL;
+    }
+    slot = mw_slot(object, gPipelineLibraryClass);
+    return slot != NULL ? *slot : NULL;
+}
+
+static void mw_free_pipeline_library(struct mw_pipeline_library_state *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    [state->file_path release];
+    [state->label release];
+    free(state);
+}
+
+static id mw_pipeline_library_object(const char *selector_name, id file_path)
+{
+    struct mw_pipeline_library_state *state;
+    id library;
+    void **slot;
+
+    if (gPipelineLibraryClass == Nil) {
+        mw_log("%s: no pipeline library class is registered", selector_name);
+        return nil;
+    }
+    library = mw_alloc_init(gPipelineLibraryClass, "pipeline library");
+    if (library == nil) {
+        return nil;
+    }
+    state = calloc(1, sizeof(*state));
+    slot = mw_slot(library, gPipelineLibraryClass);
+    if (state == NULL || slot == NULL) {
+        free(state);
+        [library release];
+        return nil;
+    }
+    state->stub_id = mw_next_stub_id();
+    state->file_path = [file_path copy];
+    *slot = state;
+    mw_log("%s: %s -> placeholder pipeline library %u (the pipelinelib file is never read)",
+           selector_name, mw_text(file_path), state->stub_id);
+    return library; /* +1, as a Metal "new" method */
+}
+
+/* The names CoreAnimation asks a pipeline library for: one line each up to the cap, then one line
+ * saying the cap was reached. */
+static void mw_note_pipeline_name(id name, const char *kind, NSUInteger options)
+{
+    BOOL log_first = NO;
+    BOOL log_cap = NO;
+
+    if (name == nil) {
+        return;
+    }
+    pthread_mutex_lock(&gStubLock);
+    if (gLoggedPipelineNames == nil) {
+        gLoggedPipelineNames = [[NSMutableSet alloc] init];
+    }
+    if (![gLoggedPipelineNames containsObject:name]) {
+        [gLoggedPipelineNames addObject:name];
+        if (gLoggedPipelineNameCount < MW_PIPELINE_NAME_LOG_LIMIT) {
+            gLoggedPipelineNameCount++;
+            log_first = YES;
+        } else if (!gPipelineNameCapLogged) {
+            gPipelineNameCapLogged = 1;
+            log_cap = YES;
+        }
+    }
+    pthread_mutex_unlock(&gStubLock);
+    if (log_first) {
+        mw_log("CA pipeline name: %s (%s, options 0x%lx)", mw_text(name), kind,
+               (unsigned long)options);
+    } else if (log_cap) {
+        mw_log("CA pipeline name: the cap of %d distinct names is reached; further names are not "
+               "logged",
+               MW_PIPELINE_NAME_LOG_LIMIT);
+    }
+}
+
+static id mw_pipeline_library_label(id self, SEL _cmd)
+{
+    struct mw_pipeline_library_state *state = mw_pipeline_library_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->label : nil;
+}
+
+static void mw_pipeline_library_set_label(id self, SEL _cmd, id label)
+{
+    struct mw_pipeline_library_state *state = mw_pipeline_library_state_of(self);
+
+    (void)_cmd;
+    if (state != NULL && state->label != label) {
+        [state->label release];
+        state->label = [label copy];
+    }
+    mw_log("pipeline library: setLabel:%s", mw_text(label));
+}
+
+/* The method the last boot faulted in: Apple's inherited implementation dereferences Metal's
+ * internal pipeline-library object and dies at 0x10. Here it is one stored bit, logged once. */
+static void mw_pipeline_library_set_disable_rtc(id self, SEL _cmd, BOOL disabled)
+{
+    struct mw_pipeline_library_state *state = mw_pipeline_library_state_of(self);
+    static int logged;
+
+    (void)_cmd;
+    if (state != NULL) {
+        state->disable_run_time_compilation = disabled ? 1 : 0;
+    }
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("pipeline library: setDisableRunTimeCompilation:%d", disabled ? 1 : 0);
+    }
+}
+
+static BOOL mw_pipeline_library_disable_rtc(id self, SEL _cmd)
+{
+    struct mw_pipeline_library_state *state = mw_pipeline_library_state_of(self);
+
+    (void)_cmd;
+    return state != NULL && state->disable_run_time_compilation != 0;
+}
+
+/* -serialize (a private pipeline-library selector): nothing to serialize here; nil is a legal
+ * answer for an object-returning method and 0 is also NO for a BOOL-returning one. */
+static id mw_pipeline_library_serialize(id self, SEL _cmd)
+{
+    static int logged;
+
+    (void)self;
+    (void)_cmd;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("pipeline library: serialize is a placeholder (nil; nothing is serialized)");
+    }
+    return nil;
+}
+
+/* Any -newSerializedRenderPipelineStateWithName... method the running base has: nil, logged. */
+static id mw_pipeline_library_serialized_factory(id self, SEL _cmd)
+{
+    static int logged;
+
+    (void)self;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("pipeline library: -%s is not made in this experiment (nil)", sel_getName(_cmd));
+    }
+    return nil;
+}
+
+
+static id mw_pipeline_library_device(id self, SEL _cmd)
+{
+    (void)self;
+    (void)_cmd;
+    return gDevice;
+}
+
+static id mw_pipeline_library_render_pipeline(id self, SEL _cmd, id name, NSUInteger options,
+                                              id *reflection, NSError **error)
+{
+    id pipeline;
+
+    (void)_cmd;
+    mw_clear_error(error);
+    if (reflection != NULL) {
+        *reflection = nil;
+    }
+    if (name == nil || ![name isKindOfClass:[NSString class]]) {
+        mw_log("newRenderPipelineStateWithName:options:reflection:error: the name is nil or not a "
+               "string; nil");
+        if (error != NULL) {
+            *error = mw_nserror("the pipeline name is nil or not a string");
+        }
+        return nil;
+    }
+    mw_note_pipeline_name(name, "render", options);
+    /* the name becomes the state's label, so the render encoder's record says which CA pipeline
+     * a draw used */
+    pipeline = mw_stub_object(gPipelineStateClass, "render pipeline state", name);
+    if (pipeline == nil && error != NULL) {
+        *error = mw_nserror("the placeholder render pipeline state could not be made");
+    }
+    return pipeline; /* +1, as a Metal "new" method */
+}
+
+static id mw_pipeline_library_compute_pipeline(id self, SEL _cmd, id name, NSUInteger options,
+                                               id *reflection, NSError **error)
+{
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    if (reflection != NULL) {
+        *reflection = nil;
+    }
+    if (name != nil && [name isKindOfClass:[NSString class]]) {
+        mw_note_pipeline_name(name, "compute", options);
+    }
+    mw_log("newComputePipelineStateWithName:options:reflection:error: %s is not made in this "
+           "experiment (nil)",
+           mw_text(name));
+    if (error != NULL) {
+        *error = mw_nserror("compute pipeline states are not part of the metalwire placeholder "
+                            "object graph");
+    }
+    return nil;
+}
+
+/* Whether a private class of the running Metal.framework implements a selector. The by-name
+ * descriptor factories are private (no SDK header): they are only overridden when the base class
+ * really has them, exactly as the device's SPI methods are treated. */
+static BOOL mw_private_class_implements(const char *class_name, const char *selector_name)
+{
+    Class cls = objc_getClass(class_name);
+
+    if (cls == Nil) {
+        return NO;
+    }
+    return class_getInstanceMethod(cls, sel_registerName(selector_name)) != NULL;
+}
+
+static const char *mw_presence(const char *class_name, const char *selector_name)
+{
+    return mw_private_class_implements(class_name, selector_name) ? "yes" : "no";
+}
+
+/* The by-name serialized render-pipeline-state factory has changed spelling between Metal
+ * versions; the running base's own method list decides whether there is one to shadow, and the
+ * shadow answers nil (logged once) instead of dereferencing the placeholder library. */
+static void mw_pipeline_library_override_serialized_factory(Class cls)
+{
+    static const char prefix[] = "newSerializedRenderPipelineStateWithName";
+    Class base = objc_getClass("_MTLPipelineLibrary");
+    Method *methods;
+    unsigned count = 0;
+    int installed = 0;
+
+    if (base == Nil) {
+        return;
+    }
+    methods = class_copyMethodList(base, &count);
+    for (unsigned i = 0; i < count; i++) {
+        SEL selector = method_getName(methods[i]);
+        const char *name = sel_getName(selector);
+        const char *types = method_getTypeEncoding(methods[i]);
+
+        if (name == NULL || types == NULL || strncmp(name, prefix, sizeof(prefix) - 1) != 0) {
+            continue;
+        }
+        if (class_addMethod(cls, selector, (IMP)mw_pipeline_library_serialized_factory, types)) {
+            mw_log("the _MTLPipelineLibrary base implements -%s; overridden to return nil", name);
+            installed++;
+        }
+    }
+    free(methods);
+    if (installed == 0) {
+        mw_log("the _MTLPipelineLibrary base has no newSerializedRenderPipelineStateWithName... "
+               "selector; not overridden");
+    }
+}
+
+static id mw_pipeline_library_render_descriptor(id self, SEL _cmd, id name, NSError **error)
+{
+    static int logged;
+    MTLRenderPipelineDescriptor *descriptor;
+
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    if (name != nil && [name isKindOfClass:[NSString class]]) {
+        mw_note_pipeline_name(name, "render-descriptor", 0);
+    }
+    descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    if (descriptor == nil) {
+        if (error != NULL) {
+            *error = mw_nserror("the placeholder render pipeline descriptor could not be made");
+        }
+        return nil;
+    }
+    if (name != nil && [name isKindOfClass:[NSString class]]) {
+        descriptor.label = (NSString *)name;
+    }
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+        mw_log("newRenderPipelineDescriptorWithName:error: answers a real MTLRenderPipelineDescriptor "
+               "with no functions (the pipeline library is a placeholder)");
+    }
+    return descriptor; /* +1, as a Metal "new" method */
+}
+
+static id mw_pipeline_library_compute_descriptor(id self, SEL _cmd, id name, NSError **error)
+{
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    if (name != nil && [name isKindOfClass:[NSString class]]) {
+        mw_note_pipeline_name(name, "compute-descriptor", 0);
+    }
+    mw_log("newComputePipelineDescriptorWithName:error: %s is not made in this experiment (nil)",
+           mw_text(name));
+    if (error != NULL) {
+        *error = mw_nserror("compute pipeline descriptors are not part of the metalwire placeholder "
+                            "object graph");
+    }
+    return nil;
+}
+
+static id mw_device_new_pipeline_library_file(id self, SEL _cmd, id file_path, NSError **error)
+{
+    id text = file_path;
+    id library;
+
+    (void)self;
+    (void)_cmd;
+    mw_clear_error(error);
+    if (file_path != nil && [file_path isKindOfClass:[NSURL class]]) {
+        text = [(NSURL *)file_path path];
+    }
+    library = mw_pipeline_library_object("newPipelineLibraryWithFilePath:error:", text);
+    if (library == nil && error != NULL) {
+        *error = mw_nserror("the placeholder pipeline library object could not be made");
+    }
+    return library;
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * The render command encoder: CoreAnimation's render path, recorded and never executed.
+ *
+ * -[HakiosMetalCommandBuffer renderCommandEncoderWithDescriptor:] answers this object instead of
+ * letting Apple's _MTLCommandBuffer implementation run. The encoder keeps counters and the first
+ * MW_RENDER_MAX_DRAWS draws, logs each unique (pipeline label, primitive type) once, and logs a
+ * summary at -endEncoding; the command buffer logs its totals at -commit. Nothing enters the
+ * wire's ops array, so the synthetic metal_frame path stays byte-identical.
+ * ---------------------------------------------------------------------------------------------- */
+
+#define MW_DRAW_LOG_LIMIT 256
+static NSMutableSet *gLoggedDrawCombinations; /* NSString "pipeline/primitive", under gStubLock */
+
+static struct mw_render_encoder_state *mw_render_encoder_state_of(id object)
+{
+    void **slot;
+
+    if (object == nil || gRenderEncoderClass == Nil ||
+        object_getClass(object) != gRenderEncoderClass) {
+        return NULL;
+    }
+    slot = mw_slot(object, gRenderEncoderClass);
+    return slot != NULL ? *slot : NULL;
+}
+
+static void mw_free_render_encoder(struct mw_render_encoder_state *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    for (int i = 0; i < MW_RENDER_MAX_DRAWS; i++) {
+        [state->draws[i].pipeline_label release];
+    }
+    [state->label release];
+    free(state);
+}
+
+static id mw_cb_render_encoder(id self, SEL _cmd, id descriptor)
+{
+    struct mw_command_buffer_state *state = mw_command_buffer_state_of(self);
+    struct mw_render_encoder_state *encoder_state;
+    id encoder;
+    void **slot;
+
+    (void)_cmd;
+    (void)descriptor;
+    if (state == NULL || state->committed) {
+        mw_log("renderCommandEncoderWithDescriptor: no command buffer or already committed; nil");
+        return nil;
+    }
+    if (gRenderEncoderClass == Nil) {
+        mw_log("renderCommandEncoderWithDescriptor: no render encoder class is registered; nil");
+        return nil;
+    }
+    encoder = mw_alloc_init(gRenderEncoderClass, "render command encoder");
+    if (encoder == nil) {
+        return nil;
+    }
+    encoder_state = calloc(1, sizeof(*encoder_state));
+    slot = mw_slot(encoder, gRenderEncoderClass);
+    if (encoder_state == NULL || slot == NULL) {
+        free(encoder_state);
+        [encoder release];
+        return nil;
+    }
+    encoder_state->command_buffer = self;
+    *slot = encoder_state;
+    state->render_encoder_count++;
+    return [encoder autorelease];
+}
+
+static void mw_render_note_set(struct mw_render_encoder_state *state)
+{
+    if (state != NULL) {
+        state->set_count++;
+    }
+}
+
+static void mw_render_record_draw(id self, unsigned long primitive_type,
+                                  unsigned long vertex_count, unsigned long index_count,
+                                  unsigned long instance_count, int indexed)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_command_buffer_state *command_buffer;
+    id pipeline_label;
+    NSString *key;
+    BOOL first = NO;
+
+    if (state == NULL || state->ended) {
+        return;
+    }
+    command_buffer = mw_command_buffer_state_of(state->command_buffer);
+    pipeline_label = mw_safe_label(state->pipeline);
+    state->draw_count++;
+    if (command_buffer != NULL) {
+        command_buffer->render_draw_count++;
+    }
+    if (state->draw_count <= MW_RENDER_MAX_DRAWS) {
+        struct mw_render_draw *draw = &state->draws[state->draw_count - 1];
+
+        draw->pipeline_label = [pipeline_label copy];
+        draw->primitive_type = primitive_type;
+        draw->vertex_count = vertex_count;
+        draw->index_count = index_count;
+        draw->instance_count = instance_count;
+        draw->indexed = indexed;
+    }
+    key = [[NSString alloc] initWithFormat:@"%s/%lu", mw_text(pipeline_label), primitive_type];
+    pthread_mutex_lock(&gStubLock);
+    if (gLoggedDrawCombinations == nil) {
+        gLoggedDrawCombinations = [[NSMutableSet alloc] init];
+    }
+    if (![gLoggedDrawCombinations containsObject:key] &&
+        [gLoggedDrawCombinations count] < MW_DRAW_LOG_LIMIT) {
+        [gLoggedDrawCombinations addObject:key];
+        first = YES;
+    }
+    pthread_mutex_unlock(&gStubLock);
+    [key release];
+    if (first) {
+        mw_log("CA draw: pipeline %s prim %lu %s (vertices %lu, indices %lu, instances %lu; "
+               "record only)",
+               mw_text(pipeline_label), primitive_type, indexed ? "indexed" : "non-indexed",
+               vertex_count, index_count, instance_count);
+    }
+}
+
+static void mw_render_end_encoding(id self, SEL _cmd)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    id pipeline_label;
+
+    (void)_cmd;
+    if (state == NULL || state->ended) {
+        return;
+    }
+    state->ended = 1;
+    pipeline_label = mw_safe_label(state->pipeline);
+    if (state->draw_count != 0) {
+        struct mw_render_draw *first = &state->draws[0];
+
+        mw_log("CA render encoder: %llu draws, %llu sets, pipeline %s (first: prim %lu, %lu "
+               "vertices, %lu indices, %lu instances; record only)",
+               (unsigned long long)state->draw_count, (unsigned long long)state->set_count,
+               mw_text(pipeline_label), first->primitive_type, first->vertex_count,
+               first->index_count, first->instance_count);
+    } else {
+        mw_log("CA render encoder: 0 draws, %llu sets, pipeline %s (record only)",
+               (unsigned long long)state->set_count, mw_text(pipeline_label));
+    }
+}
+
+static id mw_render_label(id self, SEL _cmd)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->label : nil;
+}
+
+static void mw_render_set_label(id self, SEL _cmd, id label)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+
+    (void)_cmd;
+    if (state != NULL && state->label != label) {
+        [state->label release];
+        state->label = [label copy];
+    }
+}
+
+static void mw_render_set_pipeline(id self, SEL _cmd, id pipeline)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+
+    (void)_cmd;
+    if (state != NULL) {
+        state->pipeline = pipeline; /* not retained: the client keeps it alive while encoding */
+        mw_render_note_set(state);
+    }
+}
+
+static void mw_render_set_depth_stencil(id self, SEL _cmd, id depth_stencil)
+{
+    (void)_cmd;
+    (void)depth_stencil;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_cull_mode(id self, SEL _cmd, NSUInteger cull_mode)
+{
+    (void)_cmd;
+    (void)cull_mode;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_winding(id self, SEL _cmd, NSUInteger winding)
+{
+    (void)_cmd;
+    (void)winding;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_fill_mode(id self, SEL _cmd, NSUInteger fill_mode)
+{
+    (void)_cmd;
+    (void)fill_mode;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_viewport(id self, SEL _cmd, MTLViewport viewport)
+{
+    (void)_cmd;
+    (void)viewport;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_scissor(id self, SEL _cmd, MTLScissorRect rect)
+{
+    (void)_cmd;
+    (void)rect;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_blend_color(id self, SEL _cmd, float red, float green, float blue,
+                                      float alpha)
+{
+    (void)_cmd;
+    (void)red;
+    (void)green;
+    (void)blue;
+    (void)alpha;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_stencil_reference(id self, SEL _cmd, uint32_t reference)
+{
+    (void)_cmd;
+    (void)reference;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_vertex_buffer(id self, SEL _cmd, id buffer, NSUInteger offset,
+                                        NSUInteger index)
+{
+    (void)_cmd;
+    (void)buffer;
+    (void)offset;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_vertex_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
+                                       NSUInteger index)
+{
+    (void)_cmd;
+    (void)bytes;
+    (void)length;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_vertex_texture(id self, SEL _cmd, id texture, NSUInteger index)
+{
+    (void)_cmd;
+    (void)texture;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_vertex_sampler(id self, SEL _cmd, id sampler, NSUInteger index)
+{
+    (void)_cmd;
+    (void)sampler;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_vertex_sampler_lod(id self, SEL _cmd, id sampler, float lod_min,
+                                             float lod_max, NSUInteger index)
+{
+    (void)_cmd;
+    (void)sampler;
+    (void)lod_min;
+    (void)lod_max;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_fragment_buffer(id self, SEL _cmd, id buffer, NSUInteger offset,
+                                          NSUInteger index)
+{
+    (void)_cmd;
+    (void)buffer;
+    (void)offset;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_fragment_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
+                                         NSUInteger index)
+{
+    (void)_cmd;
+    (void)bytes;
+    (void)length;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_fragment_texture(id self, SEL _cmd, id texture, NSUInteger index)
+{
+    (void)_cmd;
+    (void)texture;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_fragment_sampler(id self, SEL _cmd, id sampler, NSUInteger index)
+{
+    (void)_cmd;
+    (void)sampler;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_set_fragment_sampler_lod(id self, SEL _cmd, id sampler, float lod_min,
+                                               float lod_max, NSUInteger index)
+{
+    (void)_cmd;
+    (void)sampler;
+    (void)lod_min;
+    (void)lod_max;
+    (void)index;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_push_debug_group(id self, SEL _cmd, id name)
+{
+    (void)_cmd;
+    (void)name;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_pop_debug_group(id self, SEL _cmd)
+{
+    (void)_cmd;
+    mw_render_note_set(mw_render_encoder_state_of(self));
+}
+
+static void mw_render_draw_primitives(id self, SEL _cmd, NSUInteger primitive_type,
+                                      NSUInteger vertex_start, NSUInteger vertex_count)
+{
+    (void)_cmd;
+    (void)vertex_start;
+    mw_render_record_draw(self, (unsigned long)primitive_type, (unsigned long)vertex_count, 0, 1,
+                          0);
+}
+
+static void mw_render_draw_primitives_instanced(id self, SEL _cmd, NSUInteger primitive_type,
+                                                NSUInteger vertex_start, NSUInteger vertex_count,
+                                                NSUInteger instance_count)
+{
+    (void)_cmd;
+    (void)vertex_start;
+    mw_render_record_draw(self, (unsigned long)primitive_type, (unsigned long)vertex_count, 0,
+                          (unsigned long)instance_count, 0);
+}
+
+static void mw_render_draw_indexed(id self, SEL _cmd, NSUInteger primitive_type,
+                                   NSUInteger index_count, NSUInteger index_type, id index_buffer,
+                                   NSUInteger index_buffer_offset)
+{
+    (void)_cmd;
+    (void)index_type;
+    (void)index_buffer;
+    (void)index_buffer_offset;
+    mw_render_record_draw(self, (unsigned long)primitive_type, 0, (unsigned long)index_count, 1, 1);
+}
+
+static void mw_render_draw_indexed_instanced(id self, SEL _cmd, NSUInteger primitive_type,
+                                             NSUInteger index_count, NSUInteger index_type,
+                                             id index_buffer, NSUInteger index_buffer_offset,
+                                             NSUInteger instance_count)
+{
+    (void)_cmd;
+    (void)index_type;
+    (void)index_buffer;
+    (void)index_buffer_offset;
+    mw_render_record_draw(self, (unsigned long)primitive_type, 0, (unsigned long)index_count,
+                          (unsigned long)instance_count, 1);
+}
+
+static void mw_render_draw_indexed_base(id self, SEL _cmd, NSUInteger primitive_type,
+                                        NSUInteger index_count, NSUInteger index_type,
+                                        id index_buffer, NSUInteger index_buffer_offset,
+                                        NSUInteger instance_count, NSInteger base_vertex,
+                                        NSUInteger base_instance)
+{
+    (void)_cmd;
+    (void)index_type;
+    (void)index_buffer;
+    (void)index_buffer_offset;
+    (void)base_vertex;
+    (void)base_instance;
+    mw_render_record_draw(self, (unsigned long)primitive_type, 0, (unsigned long)index_count,
+                          (unsigned long)instance_count, 1);
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -2026,6 +3984,403 @@ static void mw_register_texture_class(void)
                                                : "NSObject: this system has no _MTLTexture");
 }
 
+/* The descriptor-based function API of Metal 16.5. CoreAnimation builds an MTLFunctionDescriptor
+ * (name + constant values) and sends -newFunctionWithDescriptor:error: to the library. Apple's
+ * _MTLLibrary implementation looks the base function up and stores the answer in its own
+ * _cacheEntry ivar; that ivar is nil on this stub, so the real implementation faults at 0x10
+ * (ca-metal3-int1: pc 0x181aec43c, Metal _MTLLibrary, x8 = nil). Answer the descriptor's name with
+ * a placeholder function instead. */
+static id mw_descriptor_function_name(id descriptor)
+{
+    id name = nil;
+
+    @try {
+        if (descriptor != nil && [descriptor respondsToSelector:@selector(name)]) {
+            name = ((id(*)(id, SEL))objc_msgSend)(descriptor, @selector(name));
+        }
+    } @catch (NSException *exception) {
+        mw_log("function descriptor: reading -name raised %s; nil", mw_text([exception reason]));
+        name = nil;
+    }
+    return [name isKindOfClass:[NSString class]] ? name : nil;
+}
+
+static id mw_library_function_for_descriptor(id self, const char *selector_name, id descriptor,
+                                             NSError **error)
+{
+    id name = mw_descriptor_function_name(descriptor);
+    id function;
+
+    (void)self;
+    mw_clear_error(error);
+    if (name == nil) {
+        function = mw_function_object(@"com.apple.coreanimation.frag.unnamed");
+    } else {
+        function = mw_function_object(name);
+    }
+    mw_log("%s: %s -> placeholder function (the descriptor's function is not compiled)", selector_name,
+           mw_text(name != nil ? name : @"(no name)"));
+    return function;
+}
+
+static id mw_library_new_function_descriptor(id self, SEL _cmd, id descriptor, NSError **error)
+{
+    (void)_cmd;
+    return mw_library_function_for_descriptor(self, "newFunctionWithDescriptor:error:", descriptor,
+                                              error);
+}
+
+static id mw_library_new_specialized_internal(id self, SEL _cmd, id descriptor, id archive,
+                                              id function_cache, NSError **error)
+{
+    (void)_cmd;
+    (void)archive;
+    (void)function_cache;
+    return mw_library_function_for_descriptor(
+        self, "newSpecializedFunctionWithDescriptorInternal:destinationArchive:functionCache:error:",
+        descriptor, error);
+}
+
+static id mw_library_new_specialized_descriptor(id self, SEL _cmd, id descriptor, id archive,
+                                                id function_cache, NSError **error)
+{
+    (void)_cmd;
+    (void)archive;
+    (void)function_cache;
+    return mw_library_function_for_descriptor(
+        self, "newSpecializedFunctionWithDescriptor:destinationArchive:functionCache:error:", descriptor,
+        error);
+}
+
+static void mw_register_library_class(void)
+{
+    gLibraryClass = mw_make_class("HakiosMetalLibrary", "_MTLLibrary", 1);
+    if (gLibraryClass == Nil) {
+        return;
+    }
+    mw_add_public_protocol(gLibraryClass, @protocol(MTLLibrary), "MTLLibrary");
+    mw_add_protocol_family(gLibraryClass, "MTLLibrary");
+    class_addMethod(gLibraryClass, sel_registerName("functionNames"),
+                    (IMP)mw_library_function_names, "@@:");
+    class_addMethod(gLibraryClass, sel_registerName("newFunctionWithName:"),
+                    (IMP)mw_library_new_function, "@@:@");
+    class_addMethod(gLibraryClass, sel_registerName("newFunctionWithName:constantValues:error:"),
+                    (IMP)mw_library_new_function_constants, "@@:@@^@");
+    class_addMethod(gLibraryClass,
+                    sel_registerName("newFunctionWithName:constantValues:completionHandler:"),
+                    (IMP)mw_library_new_function_completion, "v@:@@@?");
+    class_addMethod(gLibraryClass, sel_registerName("newFunctionWithDescriptor:error:"),
+                    (IMP)mw_library_new_function_descriptor, "@@:@^@");
+    class_addMethod(gLibraryClass,
+                    sel_registerName("newSpecializedFunctionWithDescriptorInternal:destinationArchive:"
+                                     "functionCache:error:"),
+                    (IMP)mw_library_new_specialized_internal, "@@:@@@^@");
+    class_addMethod(gLibraryClass,
+                    sel_registerName("newSpecializedFunctionWithDescriptor:destinationArchive:"
+                                     "functionCache:error:"),
+                    (IMP)mw_library_new_specialized_descriptor, "@@:@@@^@");
+    class_addMethod(gLibraryClass, sel_registerName("label"), (IMP)mw_library_label, "@@:");
+    class_addMethod(gLibraryClass, sel_registerName("setLabel:"), (IMP)mw_library_set_label,
+                    "v@:@");
+    class_addMethod(gLibraryClass, sel_registerName("device"), (IMP)mw_library_device, "@@:");
+    class_addMethod(gLibraryClass, sel_registerName("type"), (IMP)mw_library_type, "q@:");
+    class_addMethod(gLibraryClass, sel_registerName("installName"), (IMP)mw_library_install_name,
+                    "@@:");
+    objc_registerClassPair(gLibraryClass);
+    mw_log("the class HakiosMetalLibrary is registered (a subclass of %s)",
+           objc_getClass("_MTLLibrary") != Nil ? "_MTLLibrary"
+                                               : "NSObject: this system has no _MTLLibrary");
+}
+
+static void mw_register_function_class(void)
+{
+    gFunctionClass = mw_make_class("HakiosMetalFunction", "_MTLFunction", 1);
+    if (gFunctionClass == Nil) {
+        return;
+    }
+    mw_add_public_protocol(gFunctionClass, @protocol(MTLFunction), "MTLFunction");
+    mw_add_protocol_family(gFunctionClass, "MTLFunction");
+    class_addMethod(gFunctionClass, sel_registerName("name"), (IMP)mw_function_name, "@@:");
+    class_addMethod(gFunctionClass, sel_registerName("functionType"), (IMP)mw_function_type,
+                    "Q@:");
+    class_addMethod(gFunctionClass, sel_registerName("vertexAttributes"),
+                    (IMP)mw_function_empty_array, "@@:");
+    class_addMethod(gFunctionClass, sel_registerName("stageInputAttributes"),
+                    (IMP)mw_function_empty_array, "@@:");
+    class_addMethod(gFunctionClass, sel_registerName("functionConstantsDictionary"),
+                    (IMP)mw_function_empty_dictionary, "@@:");
+    class_addMethod(gFunctionClass, sel_registerName("device"), (IMP)mw_function_device, "@@:");
+    class_addMethod(gFunctionClass, sel_registerName("label"), (IMP)mw_function_label, "@@:");
+    class_addMethod(gFunctionClass, sel_registerName("setLabel:"), (IMP)mw_function_set_label,
+                    "v@:@");
+    /* Runtime specialisation, the ca-metal3-dealloc1 wall: never let _MTLFunction's real
+     * implementation run on a placeholder. The long selector is the one CoreAnimation sends; the
+     * shorter spellings are added only where the running base has them. */
+    class_addMethod(gFunctionClass,
+                    sel_registerName("newSpecializedFunctionWithDescriptor:destinationArchive:"
+                                     "functionCache:error:"),
+                    (IMP)mw_function_new_specialized, "@@:@@@^@");
+    /* the exact spelling CoreAnimation reaches through the library wrapper */
+    class_addMethod(gFunctionClass,
+                    sel_registerName("newSpecializedFunctionWithDescriptorInternal:destinationArchive:"
+                                     "functionCache:error:"),
+                    (IMP)mw_function_new_specialized, "@@:@@@^@");
+    if (mw_private_class_implements("_MTLFunction", "newSpecializedFunctionWithDescriptor:error:")) {
+        class_addMethod(gFunctionClass,
+                        sel_registerName("newSpecializedFunctionWithDescriptor:error:"),
+                        (IMP)mw_function_new_specialized_descriptor, "@@:@^@");
+    } else {
+        mw_log("the _MTLFunction base does not implement "
+               "-newSpecializedFunctionWithDescriptor:error:; not overridden");
+    }
+    if (mw_private_class_implements("_MTLFunction",
+                                    "newSpecializedFunctionWithDescriptor:destinationArchive:"
+                                    "functionCache:sync:completionHandler:")) {
+        class_addMethod(gFunctionClass,
+                        sel_registerName("newSpecializedFunctionWithDescriptor:destinationArchive:"
+                                         "functionCache:sync:completionHandler:"),
+                        (IMP)mw_function_new_specialized_sync, "v@:@@@B@?");
+    } else {
+        mw_log("the _MTLFunction base does not implement the sync/completionHandler specialised "
+               "factory; not overridden");
+    }
+    if (mw_private_class_implements("_MTLFunction", "newSpecializedFunctionWithName:constants:")) {
+        class_addMethod(gFunctionClass,
+                        sel_registerName("newSpecializedFunctionWithName:constants:"),
+                        (IMP)mw_function_new_specialized_name, "@@:@@");
+    } else {
+        mw_log("the _MTLFunction base does not implement -newSpecializedFunctionWithName:constants:; "
+               "not overridden");
+    }
+    mw_log("the _MTLFunction base specialised factories: long:%s short:%s sync:%s by-name:%s "
+           "(the long one is overridden unconditionally; the others only where present)",
+           mw_presence("_MTLFunction", "newSpecializedFunctionWithDescriptor:destinationArchive:"
+                                       "functionCache:error:"),
+           mw_presence("_MTLFunction", "newSpecializedFunctionWithDescriptor:error:"),
+           mw_presence("_MTLFunction", "newSpecializedFunctionWithDescriptor:destinationArchive:"
+                                       "functionCache:sync:completionHandler:"),
+           mw_presence("_MTLFunction", "newSpecializedFunctionWithName:constants:"));
+    objc_registerClassPair(gFunctionClass);
+    mw_log("the class HakiosMetalFunction is registered (a subclass of %s)",
+           objc_getClass("_MTLFunction") != Nil ? "_MTLFunction"
+                                                : "NSObject: this system has no _MTLFunction");
+}
+
+static void mw_register_render_pipeline_state_class(void)
+{
+    gPipelineStateClass =
+        mw_make_class("HakiosMetalRenderPipelineState", "_MTLRenderPipelineState", 1);
+    if (gPipelineStateClass == Nil) {
+        return;
+    }
+    mw_add_public_protocol(gPipelineStateClass, @protocol(MTLRenderPipelineState),
+                           "MTLRenderPipelineState");
+    mw_add_protocol_family(gPipelineStateClass, "MTLRenderPipelineState");
+    class_addMethod(gPipelineStateClass, sel_registerName("label"), (IMP)mw_stub_label, "@@:");
+    class_addMethod(gPipelineStateClass, sel_registerName("setLabel:"), (IMP)mw_stub_set_label,
+                    "v@:@");
+    class_addMethod(gPipelineStateClass, sel_registerName("device"), (IMP)mw_stub_device, "@@:");
+    objc_registerClassPair(gPipelineStateClass);
+    mw_log("the class HakiosMetalRenderPipelineState is registered (a subclass of %s)",
+           objc_getClass("_MTLRenderPipelineState") != Nil
+               ? "_MTLRenderPipelineState"
+               : "NSObject: this system has no _MTLRenderPipelineState");
+}
+
+static void mw_register_depth_stencil_state_class(void)
+{
+    gDepthStencilStateClass =
+        mw_make_class("HakiosMetalDepthStencilState", "_MTLDepthStencilState", 1);
+    if (gDepthStencilStateClass == Nil) {
+        return;
+    }
+    mw_add_public_protocol(gDepthStencilStateClass, @protocol(MTLDepthStencilState),
+                           "MTLDepthStencilState");
+    mw_add_protocol_family(gDepthStencilStateClass, "MTLDepthStencilState");
+    class_addMethod(gDepthStencilStateClass, sel_registerName("label"), (IMP)mw_stub_label, "@@:");
+    class_addMethod(gDepthStencilStateClass, sel_registerName("setLabel:"),
+                    (IMP)mw_stub_set_label, "v@:@");
+    class_addMethod(gDepthStencilStateClass, sel_registerName("device"), (IMP)mw_stub_device,
+                    "@@:");
+    objc_registerClassPair(gDepthStencilStateClass);
+    mw_log("the class HakiosMetalDepthStencilState is registered (a subclass of %s)",
+           objc_getClass("_MTLDepthStencilState") != Nil
+               ? "_MTLDepthStencilState"
+               : "NSObject: this system has no _MTLDepthStencilState");
+}
+
+static void mw_register_sampler_state_class(void)
+{
+    gSamplerStateClass = mw_make_class("HakiosMetalSamplerState", "_MTLSamplerState", 1);
+    if (gSamplerStateClass == Nil) {
+        return;
+    }
+    mw_add_public_protocol(gSamplerStateClass, @protocol(MTLSamplerState), "MTLSamplerState");
+    mw_add_protocol_family(gSamplerStateClass, "MTLSamplerState");
+    class_addMethod(gSamplerStateClass, sel_registerName("label"), (IMP)mw_stub_label, "@@:");
+    class_addMethod(gSamplerStateClass, sel_registerName("setLabel:"), (IMP)mw_stub_set_label,
+                    "v@:@");
+    class_addMethod(gSamplerStateClass, sel_registerName("device"), (IMP)mw_stub_device, "@@:");
+    objc_registerClassPair(gSamplerStateClass);
+    mw_log("the class HakiosMetalSamplerState is registered (a subclass of %s)",
+           objc_getClass("_MTLSamplerState") != Nil
+               ? "_MTLSamplerState"
+               : "NSObject: this system has no _MTLSamplerState");
+}
+
+static void mw_register_pipeline_library_class(void)
+{
+    gPipelineLibraryClass = mw_make_class("HakiosMetalPipelineLibrary", "_MTLPipelineLibrary", 1);
+    if (gPipelineLibraryClass == Nil) {
+        return;
+    }
+    /* MTLPipelineLibrary is private (no SDK header): @protocol() below makes the compiled
+     * reference, and objc_getProtocol() prefers the framework's own object when it has one. */
+    mw_add_public_protocol(gPipelineLibraryClass, @protocol(MTLPipelineLibrary),
+                           "MTLPipelineLibrary");
+    mw_add_private_protocol(gPipelineLibraryClass, "MTLPipelineLibrarySPI");
+    mw_add_protocol_family(gPipelineLibraryClass, "MTLPipelineLibrary");
+    class_addMethod(gPipelineLibraryClass, sel_registerName("label"), (IMP)mw_pipeline_library_label,
+                    "@@:");
+    class_addMethod(gPipelineLibraryClass, sel_registerName("setLabel:"),
+                    (IMP)mw_pipeline_library_set_label, "v@:@");
+    class_addMethod(gPipelineLibraryClass, sel_registerName("device"),
+                    (IMP)mw_pipeline_library_device, "@@:");
+    /* The fault of the last boot: Apple's -setDisableRunTimeCompilation: on _MTLPipelineLibrary
+     * dereferences Metal's internal object; this override stores one bit instead. */
+    class_addMethod(gPipelineLibraryClass, sel_registerName("setDisableRunTimeCompilation:"),
+                    (IMP)mw_pipeline_library_set_disable_rtc, "v@:B");
+    class_addMethod(gPipelineLibraryClass, sel_registerName("disableRunTimeCompilation"),
+                    (IMP)mw_pipeline_library_disable_rtc, "B@:");
+    class_addMethod(gPipelineLibraryClass, sel_registerName("isRunTimeCompilationDisabled"),
+                    (IMP)mw_pipeline_library_disable_rtc, "B@:");
+    class_addMethod(gPipelineLibraryClass,
+                    sel_registerName("newRenderPipelineStateWithName:options:reflection:error:"),
+                    (IMP)mw_pipeline_library_render_pipeline, "@@:@Q^@^@");
+    class_addMethod(gPipelineLibraryClass,
+                    sel_registerName("newComputePipelineStateWithName:options:reflection:error:"),
+                    (IMP)mw_pipeline_library_compute_pipeline, "@@:@Q^@^@");
+    /* The two private descriptor factories are added only when the running _MTLPipelineLibrary
+     * really implements them (the selectors are not in the SDK header). */
+    if (mw_private_class_implements("_MTLPipelineLibrary",
+                                    "newRenderPipelineDescriptorWithName:error:")) {
+        class_addMethod(gPipelineLibraryClass,
+                        sel_registerName("newRenderPipelineDescriptorWithName:error:"),
+                        (IMP)mw_pipeline_library_render_descriptor, "@@:@^@");
+    } else {
+        mw_log("the _MTLPipelineLibrary base does not implement "
+               "-newRenderPipelineDescriptorWithName:error:; not overridden");
+    }
+    if (mw_private_class_implements("_MTLPipelineLibrary",
+                                    "newComputePipelineDescriptorWithName:error:")) {
+        class_addMethod(gPipelineLibraryClass,
+                        sel_registerName("newComputePipelineDescriptorWithName:error:"),
+                        (IMP)mw_pipeline_library_compute_descriptor, "@@:@^@");
+    } else {
+        mw_log("the _MTLPipelineLibrary base does not implement "
+               "-newComputePipelineDescriptorWithName:error:; not overridden");
+    }
+    /* -serialize and the serialized by-name factory, same rule: shadow only what the base has. */
+    if (mw_private_class_implements("_MTLPipelineLibrary", "serialize")) {
+        class_addMethod(gPipelineLibraryClass, sel_registerName("serialize"),
+                        (IMP)mw_pipeline_library_serialize, "@@:");
+    } else {
+        mw_log("the _MTLPipelineLibrary base does not implement -serialize; not overridden");
+    }
+    mw_pipeline_library_override_serialized_factory(gPipelineLibraryClass);
+    objc_registerClassPair(gPipelineLibraryClass);
+    mw_log("the class HakiosMetalPipelineLibrary is registered (a subclass of %s)",
+           objc_getClass("_MTLPipelineLibrary") != Nil
+               ? "_MTLPipelineLibrary"
+               : "NSObject: this system has no _MTLPipelineLibrary");
+}
+
+static void mw_register_render_encoder_class(void)
+{
+    gRenderEncoderClass =
+        mw_make_class("HakiosMetalRenderCommandEncoder", "_MTLRenderCommandEncoder", 1);
+    if (gRenderEncoderClass == Nil) {
+        return;
+    }
+    mw_add_public_protocol(gRenderEncoderClass, @protocol(MTLRenderCommandEncoder),
+                           "MTLRenderCommandEncoder");
+    mw_add_protocol_family(gRenderEncoderClass, "MTLRenderCommandEncoder");
+    mw_add_public_protocol(gRenderEncoderClass, @protocol(MTLCommandEncoder), "MTLCommandEncoder");
+    class_addMethod(gRenderEncoderClass, sel_registerName("endEncoding"),
+                    (IMP)mw_render_end_encoding, "v@:");
+    class_addMethod(gRenderEncoderClass, sel_registerName("label"), (IMP)mw_render_label, "@@:");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setLabel:"), (IMP)mw_render_set_label,
+                    "v@:@");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setRenderPipelineState:"),
+                    (IMP)mw_render_set_pipeline, "v@:@");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setDepthStencilState:"),
+                    (IMP)mw_render_set_depth_stencil, "v@:@");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setCullMode:"), (IMP)mw_render_set_cull_mode,
+                    "v@:Q");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setFrontFacingWinding:"),
+                    (IMP)mw_render_set_winding, "v@:Q");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setTriangleFillMode:"),
+                    (IMP)mw_render_set_fill_mode, "v@:Q");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setViewport:"),
+                    (IMP)mw_render_set_viewport, "v@:{MTLViewport=dddddd}");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setScissorRect:"),
+                    (IMP)mw_render_set_scissor, "v@:{MTLScissorRect=QQQQ}");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setBlendColorRed:green:blue:alpha:"),
+                    (IMP)mw_render_set_blend_color, "v@:ffff");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setStencilReferenceValue:"),
+                    (IMP)mw_render_set_stencil_reference, "v@:I");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setVertexBuffer:offset:atIndex:"),
+                    (IMP)mw_render_set_vertex_buffer, "v@:@QQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setVertexBytes:length:atIndex:"),
+                    (IMP)mw_render_set_vertex_bytes, "v@:r^vQQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setVertexTexture:atIndex:"),
+                    (IMP)mw_render_set_vertex_texture, "v@:@Q");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setVertexSamplerState:atIndex:"),
+                    (IMP)mw_render_set_vertex_sampler, "v@:@Q");
+    class_addMethod(
+        gRenderEncoderClass,
+        sel_registerName("setVertexSamplerState:lodMinClamp:lodMaxClamp:atIndex:"),
+        (IMP)mw_render_set_vertex_sampler_lod, "v@:@ffQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentBuffer:offset:atIndex:"),
+                    (IMP)mw_render_set_fragment_buffer, "v@:@QQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentBytes:length:atIndex:"),
+                    (IMP)mw_render_set_fragment_bytes, "v@:r^vQQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentTexture:atIndex:"),
+                    (IMP)mw_render_set_fragment_texture, "v@:@Q");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentSamplerState:atIndex:"),
+                    (IMP)mw_render_set_fragment_sampler, "v@:@Q");
+    class_addMethod(
+        gRenderEncoderClass,
+        sel_registerName("setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:"),
+        (IMP)mw_render_set_fragment_sampler_lod, "v@:@ffQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("pushDebugGroup:"),
+                    (IMP)mw_render_push_debug_group, "v@:@");
+    class_addMethod(gRenderEncoderClass, sel_registerName("popDebugGroup"),
+                    (IMP)mw_render_pop_debug_group, "v@:");
+    class_addMethod(gRenderEncoderClass, sel_registerName("drawPrimitives:vertexStart:vertexCount:"),
+                    (IMP)mw_render_draw_primitives, "v@:QQQ");
+    class_addMethod(gRenderEncoderClass,
+                    sel_registerName("drawPrimitives:vertexStart:vertexCount:instanceCount:"),
+                    (IMP)mw_render_draw_primitives_instanced, "v@:QQQQ");
+    class_addMethod(
+        gRenderEncoderClass,
+        sel_registerName("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"),
+        (IMP)mw_render_draw_indexed, "v@:QQQ@Q");
+    class_addMethod(gRenderEncoderClass,
+                    sel_registerName("drawIndexedPrimitives:indexCount:indexType:indexBuffer:"
+                                     "indexBufferOffset:instanceCount:"),
+                    (IMP)mw_render_draw_indexed_instanced, "v@:QQQ@QQ");
+    class_addMethod(gRenderEncoderClass,
+                    sel_registerName("drawIndexedPrimitives:indexCount:indexType:indexBuffer:"
+                                     "indexBufferOffset:instanceCount:baseVertex:baseInstance:"),
+                    (IMP)mw_render_draw_indexed_base, "v@:QQQ@QQqQ");
+    objc_registerClassPair(gRenderEncoderClass);
+    mw_log("the class HakiosMetalRenderCommandEncoder is registered (a subclass of %s)",
+           objc_getClass("_MTLRenderCommandEncoder") != Nil
+               ? "_MTLRenderCommandEncoder"
+               : "NSObject: this system has no _MTLRenderCommandEncoder");
+}
+
 static void mw_free_encoder(struct mw_encoder_state *state)
 {
     if (state == NULL) {
@@ -2066,6 +4421,10 @@ static void mw_register_command_buffer_class(void)
     class_addMethod(gCommandBufferClass, sel_registerName("commandQueue"), (IMP)mw_cb_queue, "@@:");
     class_addMethod(gCommandBufferClass, sel_registerName("blitCommandEncoder"),
                     (IMP)mw_cb_blit_encoder, "@@:");
+    /* CoreAnimation's render path: answered by this plug-in (record-only), never by Apple's
+     * _MTLCommandBuffer implementation. */
+    class_addMethod(gCommandBufferClass, sel_registerName("renderCommandEncoderWithDescriptor:"),
+                    (IMP)mw_cb_render_encoder, "@@:@");
     class_addMethod(gCommandBufferClass, sel_registerName("presentDrawable:"), (IMP)mw_cb_present,
                     "v@:@");
     class_addMethod(gCommandBufferClass, sel_registerName("presentDrawable:atTime:"),
@@ -2079,6 +4438,12 @@ static void mw_register_command_buffer_class(void)
     class_addMethod(gCommandBufferClass, sel_registerName("GPUStartTime"), (IMP)mw_cb_no_time,
                     "d@:");
     class_addMethod(gCommandBufferClass, sel_registerName("GPUEndTime"), (IMP)mw_cb_no_time, "d@:");
+    class_addMethod(gCommandBufferClass, sel_registerName("isProfilingEnabled"),
+                    (IMP)mw_cb_profiling_enabled, "B@:");
+    class_addMethod(gCommandBufferClass, sel_registerName("setProfilingEnabled:"),
+                    (IMP)mw_cb_set_profiling_enabled, "v@:B");
+    class_addMethod(gCommandBufferClass, sel_registerName("retainedReferences"),
+                    (IMP)mw_cb_retained_references, "B@:");
     class_addMethod(gCommandBufferClass, sel_registerName("label"), (IMP)mw_cb_label, "@@:");
     class_addMethod(gCommandBufferClass, sel_registerName("setLabel:"), (IMP)mw_cb_label_set,
                     "v@:@");
@@ -2087,6 +4452,20 @@ static void mw_register_command_buffer_class(void)
            objc_getClass("_MTLCommandBuffer") != Nil
                ? "_MTLCommandBuffer"
                : "NSObject: this system has no _MTLCommandBuffer");
+    if (objc_getClass("_MTLCommandBuffer") != Nil) {
+        mw_log("the _MTLCommandBuffer base implements waitUntilScheduled:%s enqueue:%s "
+               "addScheduledHandler:%s isProfilingEnabled:%s setProfilingEnabled:%s "
+               "retainedReferences:%s (all overridden by the plug-in)",
+               mw_presence("_MTLCommandBuffer", "waitUntilScheduled"),
+               mw_presence("_MTLCommandBuffer", "enqueue"),
+               mw_presence("_MTLCommandBuffer", "addScheduledHandler:"),
+               mw_presence("_MTLCommandBuffer", "isProfilingEnabled"),
+               mw_presence("_MTLCommandBuffer", "setProfilingEnabled:"),
+               mw_presence("_MTLCommandBuffer", "retainedReferences"));
+    } else {
+        mw_log("this system has no _MTLCommandBuffer base; the command buffer has no inherited "
+               "Apple methods to report");
+    }
 }
 
 static void mw_register_blit_encoder_class(void)
@@ -2117,6 +4496,15 @@ static void mw_register_blit_encoder_class(void)
         (IMP)mw_blit_not_in_v1, "v@:@Q@QQ");
     class_addMethod(gBlitEncoderClass, sel_registerName("fillBuffer:range:value:"),
                     (IMP)mw_blit_not_in_v1, "v@:@{_NSRange=QQ}C");
+    /* CoreAnimation's two texture-level blits: explicit record-only no-ops, counted. */
+    class_addMethod(
+        gBlitEncoderClass,
+        sel_registerName("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:"
+                         "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
+        (IMP)mw_blit_copy_texture_to_texture,
+        "v@:@QQ{MTLOrigin=QQQ}{MTLSize=QQQ}@QQ{MTLOrigin=QQQ}");
+    class_addMethod(gBlitEncoderClass, sel_registerName("generateMipmapsForTexture:"),
+                    (IMP)mw_blit_generate_mipmaps, "v@:@");
     class_addMethod(gBlitEncoderClass, sel_registerName("endEncoding"), (IMP)mw_blit_end, "v@:");
     class_addMethod(gBlitEncoderClass, sel_registerName("synchronizeResource:"),
                     (IMP)mw_blit_synchronize, "v@:@");
@@ -2189,8 +4577,74 @@ static void mw_register_device_class(void)
                     (IMP)mw_device_new_buffer_bytes, "@@:r^vQQ");
     class_addMethod(device, @selector(newTextureWithDescriptor:), (IMP)mw_device_new_texture,
                     "@@:@");
+    class_addMethod(device, sel_registerName("newTextureWithDescriptor:iosurface:plane:"),
+                    (IMP)mw_device_new_texture_iosurface, "@@:@^vQ");
     class_addMethod(device, sel_registerName("newDrawableWithTexture:"),
                     (IMP)mw_device_new_drawable, "@@:@");
+    /* The library phase: these overrides are what keeps Apple's _MTLDevice implementation (which
+     * aborts on a file that is not a real metallib) from ever running for this device. */
+    class_addMethod(device, @selector(newLibraryWithURL:error:), (IMP)mw_device_new_library_url,
+                    "@@:@^@");
+    class_addMethod(device, sel_registerName("newLibraryWithData:error:"),
+                    (IMP)mw_device_new_library_data, "@@:@^@");
+    class_addMethod(device, sel_registerName("newLibraryWithFile:error:"),
+                    (IMP)mw_device_new_library_file, "@@:@^@");
+    class_addMethod(device, sel_registerName("newLibraryWithSource:options:error:"),
+                    (IMP)mw_device_new_library_source, "@@:@@^@");
+    class_addMethod(device, sel_registerName("newDefaultLibrary"),
+                    (IMP)mw_device_new_default_library, "@@:");
+    class_addMethod(device, sel_registerName("newDefaultLibraryWithBundle:error:"),
+                    (IMP)mw_device_new_default_library_bundle, "@@:@^@");
+    /* The pipeline phase: placeholder states, read from the descriptor where CoreAnimation's
+     * descriptor can be read. */
+    class_addMethod(device, @selector(newDepthStencilStateWithDescriptor:),
+                    (IMP)mw_device_new_depth_stencil_state, "@@:@");
+    class_addMethod(device, @selector(newSamplerStateWithDescriptor:),
+                    (IMP)mw_device_new_sampler_state, "@@:@");
+    class_addMethod(device, @selector(newRenderPipelineStateWithDescriptor:error:),
+                    (IMP)mw_device_new_render_pipeline, "@@:@^@");
+    class_addMethod(device, sel_registerName("newRenderPipelineStateWithDescriptor:options:error:"),
+                    (IMP)mw_device_new_render_pipeline_options, "@@:@Q^@");
+    class_addMethod(
+        device,
+        sel_registerName("newRenderPipelineStateWithDescriptor:options:reflection:error:"),
+        (IMP)mw_device_new_render_pipeline_reflection, "@@:@Q^@^@");
+    class_addMethod(device, @selector(newComputePipelineStateWithFunction:error:),
+                    (IMP)mw_device_new_compute_pipeline, "@@:@^@");
+    {
+        /* The SPI selectors Metal 306.6.4 uses for the completion-handler path. Added with the
+         * base class's own type encoding so the argument order cannot drift from the system. */
+        static const struct {
+            const char *selector;
+            IMP implementation;
+        } internal[] = {
+            { "newRenderPipelineStateWithDescriptorInternal:options:reflection:"
+              "destinationBinaryArchive:error:completionHandler:",
+              (IMP)mw_device_new_render_pipeline_internal },
+            { "newComputePipelineStateWithDescriptorInternal:options:pipelineCache:"
+              "destinationBinaryArchive:reflection:error:completionHandler:",
+              (IMP)mw_device_new_compute_pipeline_internal },
+        };
+
+        for (unsigned i = 0; i < sizeof(internal) / sizeof(internal[0]); i++) {
+            Method base = class_getInstanceMethod(gDeviceBase, sel_registerName(internal[i].selector));
+
+            if (base == NULL) {
+                mw_log("the _MTLDevice base does not implement -%s; not overridden",
+                       internal[i].selector);
+                continue;
+            }
+            class_addMethod(device, sel_registerName(internal[i].selector), internal[i].implementation,
+                            method_getTypeEncoding(base));
+            mw_log("the device overrides -%s (type %s)", internal[i].selector,
+                   method_getTypeEncoding(base));
+        }
+    }
+    /* The pipeline library CoreAnimation builds from QuartzCore's default.pipelinelib: the
+     * inherited _MTLDevice implementation deserializes the file and crashes, this one logs the
+     * path and answers a placeholder. */
+    class_addMethod(device, sel_registerName("newPipelineLibraryWithFilePath:error:"),
+                    (IMP)mw_device_new_pipeline_library_file, "@@:@^@");
     objc_registerClassPair(device);
     mw_log("the class HakiosMetalDevice is registered (a subclass of _MTLDevice; declares "
            "MTLDevice and MTLDeviceSPI)");
@@ -2327,6 +4781,148 @@ static void mw_atexit_summary(void)
            (unsigned long long)(gStats.wait_max / 1000), gWire.target);
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * Census mode (/redwood/etc/metal-census).
+ *
+ * The experiment's walls are Apple private-base methods a subclass inherits: when one of them
+ * crashes inside Metal.framework the serial log has a backtrace but no selector. With the census
+ * file present, every method the private base implements and our class does not is replaced on our
+ * class by _objc_msgForward; the existing methodSignatureForSelector:/forwardInvocation: machinery
+ * then logs `census: -[<class> <selector>] (inherited from <base>; answered zero)` once and
+ * answers zero, so the next wall names itself instead of taking the process down. metal_frame and
+ * metal_probe are excluded: their path stays byte-identical even when the file exists.
+ * ---------------------------------------------------------------------------------------------- */
+
+static BOOL mw_census_prefix_excluded(const char *name)
+{
+    static const char *prefixes[] = {
+        "init",      "dealloc",   "class",           "superclass",  "self",
+        "isKind",    "isMember",  "respondsTo",      "conformsTo",  "methodSignature",
+        "forwardInvocation",      "description",     "debugDescription",
+        "retain",    "release",   "autorelease",     "retainCount", "zone",
+        "hash",      "isEqual",   "copy",            "mutableCopy", "alloc",
+    };
+
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        size_t length = strlen(prefixes[i]);
+
+        if (strncmp(name, prefixes[i], length) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void mw_census_trap_base_methods(Class cls, IMP forward_imp)
+{
+    Class base = class_getSuperclass(cls);
+    Method *methods;
+    unsigned count = 0;
+    unsigned trapped = 0;
+    unsigned implemented = 0;
+    unsigned excluded = 0;
+    unsigned untrapped = 0;
+
+    methods = class_copyMethodList(base, &count);
+    if (methods == NULL) {
+        mw_log("census: %s: %s has no method list", class_getName(cls), class_getName(base));
+        return;
+    }
+    for (unsigned i = 0; i < count; i++) {
+        SEL selector = method_getName(methods[i]);
+        const char *name = sel_getName(selector);
+        const char *types = method_getTypeEncoding(methods[i]);
+
+        if (name == NULL || types == NULL) {
+            untrapped++;
+            continue;
+        }
+        if (mw_census_prefix_excluded(name)) {
+            excluded++;
+            continue;
+        }
+        /* the class's own implementation (not the inherited one) must win */
+        if (class_getInstanceMethod(cls, selector) != class_getInstanceMethod(base, selector)) {
+            implemented++;
+            continue;
+        }
+        if (class_addMethod(cls, selector, forward_imp, types)) {
+            trapped++;
+        } else {
+            untrapped++;
+        }
+    }
+    free(methods);
+    mw_log("census: %s (from %s): %u trapped, %u already implemented, %u excluded, %u not trapped",
+           class_getName(cls), class_getName(base), trapped, implemented, excluded, untrapped);
+}
+
+static void mw_census_install_if_requested(void)
+{
+    const char *program = getprogname();
+    void *symbol;
+    IMP forward_imp = NULL;
+    Class *classes;
+    int total;
+    unsigned walked = 0;
+
+    if (program != NULL &&
+        (strcmp(program, "metal_frame") == 0 || strcmp(program, "metal_probe") == 0)) {
+        return; /* the experiment's own clients must keep their byte-identical path */
+    }
+    if (access("/redwood/etc/metal-census", F_OK) != 0) {
+        return;
+    }
+    symbol = dlsym(RTLD_DEFAULT, "_objc_msgForward");
+    if (symbol == NULL) {
+        mw_log("census: /redwood/etc/metal-census is present but _objc_msgForward is not in the "
+               "process; census is off");
+        return;
+    }
+    memcpy(&forward_imp, &symbol, sizeof(forward_imp));
+    gCensusEnabled = 1;
+    mw_log("census: /redwood/etc/metal-census is present: methods inherited from Metal's private "
+           "base classes are trapped; each first call is logged once and answered zero. "
+           "HakiosMetalDevice and HakiosMetalQueue are excluded: trapping Metal's own device "
+           "methods broke its registration (the census boot crashed in CAMetalContextCreate)");
+    total = objc_getClassList(NULL, 0);
+    if (total <= 0) {
+        return;
+    }
+    classes = malloc(sizeof(Class) * (size_t)total);
+    if (classes == NULL) {
+        return;
+    }
+    total = objc_getClassList(classes, total);
+    for (int i = 0; i < total; i++) {
+        Class cls = classes[i];
+        Class base;
+        const char *name = class_getName(cls);
+
+        if (name == NULL || strncmp(name, "HakiosMetal", 11) != 0) {
+            continue;
+        }
+        if (strcmp(name, "HakiosMetalDevice") == 0 || strcmp(name, "HakiosMetalQueue") == 0) {
+            /* Metal's own device registration (MTLAddDevice/CAMetalContextCreate) and the window
+             * server's queue probing depend on the base implementations here; trapping them made
+             * the census boot crash before any CoreAnimation line. */
+            mw_log("census: %s is excluded from trapping", name);
+            continue;
+        }
+        base = class_getSuperclass(cls);
+        if (base == Nil || base == objc_getClass("NSObject")) {
+            continue; /* the NSObject fallback classes have no Apple private base to trap */
+        }
+        if (strncmp(class_getName(base), "_MTL", 4) != 0) {
+            continue;
+        }
+        mw_census_trap_base_methods(cls, forward_imp);
+        walked++;
+    }
+    free(classes);
+    mw_log("census: %u classes on Metal private bases walked (device and queue excluded)", walked);
+}
+
 __attribute__((constructor)) static void mw_plugin_load(void)
 {
     if (!mw_process_allowed()) {
@@ -2350,6 +4946,14 @@ __attribute__((constructor)) static void mw_plugin_load(void)
     mw_register_blit_encoder_class();
     mw_register_texture_class();
     mw_register_buffer_class();
+    mw_register_library_class();
+    mw_register_function_class();
+    mw_register_render_pipeline_state_class();
+    mw_register_depth_stencil_state_class();
+    mw_register_sampler_state_class();
+    mw_register_pipeline_library_class();
+    mw_register_render_encoder_class();
+    mw_census_install_if_requested();
     atexit(mw_atexit_summary);
     mw_log("the plug-in is ready: object graph device -> queue -> command buffer -> blit encoder, "
            "buffers and textures; every other Metal object answers nil and is logged once");

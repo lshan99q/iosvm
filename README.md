@@ -93,6 +93,7 @@ Dates are commit dates on `main`. The repository has about 700 commits from 2026
 | 2026-11-18 | Stage 26 — `fb_hz=15` cuts CPU per frame from 69 ms to 51 ms with an identical picture | `cc17734`, `730e0f7` |
 | 2026-11-18 | Stage 27 — multi-core reopened as a must-solve item; single-threaded TCG runs SMP=2 for 30 minutes with no panic, which points at parallel vCPUs | `b5bd190`, `6df855c` |
 | 2026-11-22 | Stage 29 (experiment branch) — a Metal client's commands are recorded in the guest, translated to Vulkan on the host and shown in a browser: 2,000/2,000 frames byte-exact, 58.3 fps median for the synthetic 750×1624 client; CoreAnimation still draws through GL | [`experiment/metal-translation`](docs/stage29-metal-translation.md) |
+| 2026-11-22 | Stage 30 (experiment branch) — CoreAnimation's Metal renderer is reached: the `metallib` assert and six Apple-implementation walls are answered, and it **records its own indexed draws** (three triangles a frame, `com.apple.coreanimation.draw.*`); no picture yet (no AIR→SPIR-V, no render wire) | [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) |
 
 ## Performance over time
 
@@ -121,7 +122,7 @@ The development dashboard, and how it is regenerated:
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
 | animation smoothness | ~4–7 fps on the CPU rasteriser; **13.9 fps with the host drawing the frame** (one vCPU, the delivered setting); two pinned vCPUs reach ~15.9 fps but are not yet stable — [open problem](#multi-core-an-open-problem-stage-27) | [stage 25](docs/stage25-multicore.md), [stage 27](docs/stage27-multicore.md) |
 | complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
-| Metal calls translated to the host's Vulkan (experiment, separate branch) | **partly** — a Metal client's blit/present is recorded in the guest, executed on the host's Vulkan GPU (device 1) and served in a browser; CoreAnimation is **not** on Metal yet (no renderer library / AIR compiler) | [stage 29](docs/stage29-metal-translation.md) |
+| Metal calls translated to the host's Vulkan (experiment, separate branch) | **partly** — a Metal client's blit/present is recorded in the guest, executed on the host's Vulkan GPU and served in a browser; separately, CoreAnimation's Metal renderer is reached and its draw calls are **recorded** (stage 30 — no picture yet: no AIR→SPIR-V, no render wire) | [stage 29](docs/stage29-metal-translation.md), [stage 30](docs/stage30-ca-metal.md) |
 | watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
 `docs/state-of-the-port.md` is the one-page handover view of the same table.
@@ -251,6 +252,15 @@ the self-corrections are in [stage 29](docs/stage29-metal-translation.md); the d
 [ADR-013](docs/adr/ADR-013-metal-translation.md); the research note is
 [the feasibility report](docs/research/metal-translation-feasibility.md).
 
+Stage 30 then asked how far CoreAnimation itself gets when the window server *is* shown the device.
+The answer is in [stage 30](docs/stage30-ca-metal.md): past the `metallib_url` assert, past Apple's
+own `_MTLDevice`/`_MTLLibrary`/`_MTLFunction`/`_MTLPipelineLibrary` implementations that a stub
+subclass inherits, to its first recorded indexed draws — three triangles a frame, pipelines named
+`com.apple.coreanimation.draw.*`, from the `fixed_*` base functions the missing metallib would have
+carried. It is a recording, not a picture: no shader is compiled, the display's IOSurface is not
+wrapped, and no render command is on the wire. The static analysis behind every wall is
+[`docs/research/ca-metallib-url.md`](docs/research/ca-metallib-url.md).
+
 How to run it (the branch owns the tooling; nothing here changes main's build):
 
 ```sh
@@ -314,6 +324,8 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
 | [`docs/stage27-multicore.md`](docs/stage27-multicore.md) | the multi-core problem: hypotheses, test matrix, acceptance |
 | [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md) | the long note: every measurement, and the mistakes |
 | [`docs/stage29-metal-translation.md`](docs/stage29-metal-translation.md) | the Metal→Vulkan experiment: what was measured, and what it does not prove |
+| [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) | CoreAnimation's Metal renderer: the walls, the first recorded draws, and why there is no picture yet |
+| [`docs/research/ca-metallib-url.md`](docs/research/ca-metallib-url.md) | the static analysis: the NSBundle lookup, the 451-module AIR corpus, the pipeline database, every fault address |
 | [`docs/research/metal-translation-feasibility.md`](docs/research/metal-translation-feasibility.md) | the M1 note: where Metal can be intercepted, why CA is not on it, which translator exists |
 | [`docs/adr/ADR-013-metal-translation.md`](docs/adr/ADR-013-metal-translation.md) | the decision: device plug-in, commit-level translation, by-reference transport, host Vulkan |
 | [`docs/architecture.md`](docs/architecture.md) | how the pieces fit |
@@ -394,6 +406,7 @@ MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
 | 2026-11-18 | 第 26 阶段——`fb_hz=15` 使每帧 CPU 从 69 ms 降至 51 ms，画面完全一致 | `cc17734`、`730e0f7` |
 | 2026-11-18 | 第 27 阶段——多核重新列为必须解决的问题；单线程 TCG 下 SMP=2 运行 30 分钟无 panic，指向并行 vCPU | `b5bd190`、`6df855c` |
 | 2026-11-22 | 第 29 阶段（实验分支）——客人机 Metal 客户端的命令被翻译为宿主 Vulkan 并显示在浏览器中：2000/2000 帧逐字节一致，合成 750×1624 客户端中位 58.3 fps；CoreAnimation 仍走 GL | [`experiment/metal-translation`](docs/stage29-metal-translation.md) |
+| 2026-11-22 | 第 30 阶段（实验分支）——CoreAnimation 的 Metal 渲染器被打通：越过 `metallib` 断言与六道 Apple 实现墙，**记录到它自己的索引绘制**（每帧三个三角形，`com.apple.coreanimation.draw.*`）；尚无画面（缺 AIR→SPIR-V 与渲染命令传输） | [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) |
 
 ## 当前能力
 
@@ -411,7 +424,7 @@ MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
 | GPU 加速 | 否——本机只有 CPU 软光栅 | — |
 | 动画流畅度 | CPU 软光栅约 4–7 fps；**宿主绘制时 13.9 fps**（单 vCPU，交付配置）；双 vCPU 绑核约 15.9 fps，但尚不稳定——见[开放问题](#多核未解决的问题第-27-阶段) | [第 25 阶段](docs/stage25-multicore.md)、[第 27 阶段](docs/stage27-multicore.md) |
 | 宿主绘制完整画面 | **是**——客人机的 CoreAnimation 调用在宿主 GL 上回放，所见即结果 | [第 23 阶段结论](docs/stage23-verdict.md) |
-| Metal 调用翻译到宿主 Vulkan（实验，独立分支） | **部分**——客人机 Metal 客户端的 blit/present 被记录、在宿主 Vulkan GPU（1 号卡）上执行并在浏览器中可见；CoreAnimation 尚未走 Metal（缺渲染库与 AIR 编译器） | [第 29 阶段](docs/stage29-metal-translation.md) |
+| Metal 调用翻译到宿主 Vulkan（实验，独立分支） | **部分**——客人机 Metal 客户端的 blit/present 被记录、在宿主 Vulkan GPU 上执行并在浏览器中可见；另外，CoreAnimation 的 Metal 渲染器已被打通、其绘制调用被**记录**（第 30 阶段——仍无画面：缺 AIR→SPIR-V 与渲染命令传输） | [第 29 阶段](docs/stage29-metal-translation.md)、[第 30 阶段](docs/stage30-ca-metal.md) |
 | 在浏览器中观看该画面 | **是**——`tools/glwire/webview.py`，JPEG 流，点击经 QMP 回传 | `tools/glwire/webview.html` |
 
 `docs/state-of-the-port.md` 是同一张表的一页式交接视图。
@@ -520,6 +533,14 @@ Vulkan 设备（第二块 V100，1 号卡）上执行；画面被读回、CRC �
 死胡同和自我修正都在[第 29 阶段](docs/stage29-metal-translation.md)；决策在
 [ADR-013](docs/adr/ADR-013-metal-translation.md)；调研在
 [可行性报告](docs/research/metal-translation-feasibility.md)。
+
+第 30 阶段接着问：当窗口服务器**真的**被展示 Metal 设备时，CoreAnimation 自己能走多远。答案在
+[第 30 阶段](docs/stage30-ca-metal.md)：越过 `metallib_url` 断言、越过桩子类会继承的
+`_MTLDevice`/`_MTLLibrary`/`_MTLFunction`/`_MTLPipelineLibrary` 的 Apple 实现，直到记录到它自己的
+第一批索引绘制——每帧三个三角形，管线名为 `com.apple.coreanimation.draw.*`，来自缺失的 metallib 本该
+提供的 `fixed_*` 基础函数。这是**记录**而不是画面：没有编译任何着色器，显示器的 IOSurface 没有被包装，
+渲染命令也不在传输协议里。每道墙背后的静态分析在
+[`docs/research/ca-metallib-url.md`](docs/research/ca-metallib-url.md)。
 
 运行方式（工具在实验分支；不改变 main 的构建）：
 

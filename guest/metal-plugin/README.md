@@ -9,7 +9,9 @@ for the host's Vulkan translator (`host/metalwire/`). The wire contract is
 The device is a stand-in, not an emulator: it executes nothing. Buffers are guest memory, textures
 are descriptors (the pixels are the host's), and a frame's picture leaves the guest as the bytes of
 one buffer plus one blit command. That is the whole translation this experiment measures; the
-shaders, render encoders and CoreAnimation path are not here (see "Deliberately unimplemented").
+shaders are not compiled and nothing is drawn with them; since stage 30 a render encoder is here
+that records CoreAnimation's draws (see "CoreAnimation on this device" and "Deliberately
+unimplemented").
 
 ## Files
 
@@ -116,6 +118,16 @@ HakiosMetalBlitEncoder   subclass of _MTLCommandEncoder MTLBlitCommandEncoder, M
 HakiosMetalBuffer        subclass of _MTLResource   MTLBuffer, MTLResource (+ SPI)
 HakiosMetalTexture       subclass of _MTLResource when this system has one, else NSObject
                          MTLTexture, MTLResource (+ SPI)
+HakiosMetalLibrary       subclass of _MTLLibrary    MTLLibrary (+ SPI)
+HakiosMetalFunction      subclass of _MTLFunction   MTLFunction (+ SPI)
+ └─ newSpecializedFunctionWithDescriptor:...          placeholders, constants logged
+HakiosMetalPipelineLibrary subclass of _MTLPipelineLibrary  MTLPipelineLibrary (+ SPI)
+ └─ newRenderPipelineStateWithName:options:reflection:error:   placeholder, name logged
+HakiosMetalRenderPipelineState  subclass of _MTLRenderPipelineState  MTLRenderPipelineState
+HakiosMetalDepthStencilState    subclass of _MTLDepthStencilState
+HakiosMetalSamplerState         subclass of _MTLSamplerState
+HakiosMetalRenderCommandEncoder subclass of _MTLRenderCommandEncoder when present, else NSObject
+ └─ drawPrimitives:/drawIndexedPrimitives:           record only, counted and logged
 MWDrawable               plain NSObject  MTLDrawable + MWRemoteDrawable (the extension)
 ```
 
@@ -145,6 +157,30 @@ Implemented (anything else a real Metal runtime asks is logged once and answered
   `isFramebufferOnly` (NO), `isShareable` (NO), `device`, `label`/`setLabel:`.
 - drawable: `present`, `presentAtTime:`, `presentAfterMinimumDuration:`, `addPresentedHandler:`,
   `presentedTime` (0), `drawableID`, `texture` (ours).
+- libraries/functions (stage 30): `newLibraryWithURL:/Data:/File:`, `newDefaultLibrary`,
+  `newFunctionWithName:`, `newFunctionWithDescriptor:error:` (the descriptor API CoreAnimation
+  uses), `newSpecializedFunctionWithDescriptor:...` including the `…DescriptorInternal:…` spelling,
+  `functionNames`, `name`, `functionType`, `type`, `installName`, labels.
+- pipeline library (stage 30): `newPipelineLibraryWithFilePath:error:` (the file is never read),
+  `setDisableRunTimeCompilation:` (stored), `newRenderPipelineStateWithName:options:reflection:error:`
+  (every name accepted and logged, one placeholder state per name).
+- pipeline states (stage 30): `newRenderPipelineStateWithDescriptor:error:` and its options/
+  reflection variants; every descriptor is answered with a placeholder, the vertex/fragment
+  function names are logged. `newDepthStencilStateWithDescriptor:` and
+  `newSamplerStateWithDescriptor:` are placeholders too.
+- render encoder (stage 30): `renderCommandEncoderWithDescriptor:`, 29 setters (`setRenderPipelineState:`,
+  `setVertexBuffer:offset:atIndex:`, `setFragmentTexture:atIndex:`, `setViewport:`, …),
+  `drawPrimitives:…`, `drawIndexedPrimitives:…`, `endEncoding`. **Record only:** the encoder
+  counts draws and sets, logs the first 64 draws and one line per unique (pipeline, primitive), and
+  the command buffer logs one `CA frame: N render encoders, M draws` line at commit. Nothing is
+  executed or sent on the wire.
+- dealloc: classes whose superclass is a Metal private base free their own state and skip the
+  base's `-dealloc` (it dereferences dispatch objects these stubs never created — `_MTLCommandQueue`
+  `_submittedGroup`, `_MTLLibrary` `_cacheEntry`); that base allocation is deliberately leaked.
+- census (`/redwood/etc/metal-census` in the root image): every method the stub classes inherit
+  from their private base is trapped and logged once, answered with zero; the device and the queue
+  are excluded, because trapping `_MTLDevice` breaks Metal's own device registration. Diagnostic
+  only, off by default.
 
 Limits on purpose: one 2D BGRA8Unorm/RGBA8Unorm texture per frame, one buffer→texture copy per
 frame, one present per frame, byte-for-byte `copyFromBuffer:...toTexture:` only. A second copy, a
@@ -234,17 +270,34 @@ drawable; `-newDrawableWithTexture:` is ours, not Metal's.
 
 ## Deliberately unimplemented
 
-- Render/compute encoders, libraries, functions, pipeline states, heaps, events, fences, samplers,
-  depth-stencil states, argument buffers, indirect command buffers — asked for, they are nil and a
-  logged "asked and not implemented" line. This is why CoreAnimation cannot use this device: it
-  needs a Metal render pipeline and `QuartzCore.framework/default.metallib`, which this image does
-  not have (ADR-002's "second pivot point").
+- **Compilation and execution.** Libraries, functions and pipeline states are placeholders: no
+  AIR module is read and no shader exists on the host. Compute encoders, heaps, events, fences,
+  argument buffers and indirect command buffers are not made. A render encoder records but does not
+  translate; the metalwire protocol has no render command.
+- **A real render target.** `newTextureWithDescriptor:iosurface:plane:` accepts the display's
+  IOSurface and returns a placeholder texture that does not wrap it; pixel formats other than
+  2D BGRA8Unorm/RGBA8Unorm are metadata. This is why CoreAnimation's Metal frames contain no
+  pixels yet (stage 30, §6.3).
+- **Async/completion-handler variants** of the library/function/pipeline APIs beyond the ones listed
+  above.
+- **The base-dealloc leak** described above: correct enough for a recording experiment, not for a
+  long-running renderer.
 - `newBufferWithBytesNoCopy:length:options:deallocator:`, IOSurface-backed textures, texture
   read/write (`getBytes:`/`replaceRegion:`) — nil.
 - Buffers are plain anonymous memory; there is no GPU address and no guest-side GPU work.
 - One connection, one frame in flight; no pipelining across frames.
 - No swapchain/surface: the host publishes the read-back picture in the glwire shm format and
   `tools/glwire/webview.py` serves it.
+
+## CoreAnimation on this device (stage 30)
+
+`docs/stage30-ca-metal.md` is the record: with CoreAnimation's Metal renderer shown the device, the
+plug-in now gets past the renderer-library assert (the URL is answered by the injected library in
+`guest/ca-metal-inject/`), past the inherited `_MTLDevice`/`_MTLFunction`/`_MTLPipelineLibrary`
+implementations, and **records CoreAnimation's own draw calls**: three indexed triangles per frame,
+`CA draw: pipeline com.apple.coreanimation.draw.PBGRA_Xfc …`, from the `fixed_*` base functions and
+the pipeline names this boot asks for. It is a recording, not a picture: no shader is compiled, the
+IOSurface is not wrapped, and no render command goes on the wire.
 
 ## The test client and its picture
 
