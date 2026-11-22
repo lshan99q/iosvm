@@ -42,7 +42,14 @@ switch (opcode) {
 	case 5: {
 		/* glClear */
 		GLuint a0 = wire_get_u32(r);
-		glClear(a0);
+		/* GLWIRE_SKIP_CLEAR=1: the guest clears the drawable and then redraws only the damaged
+		 * rectangles, which on a real display leaves the rest of the panel as it was -- but a
+		 * replayed clear wipes the host's framebuffer and every undrawn area turns black (the
+		 * black blocks and the flicker around the clock).  With this set a colour clear is not
+		 * replayed: frames accumulate on the picture, which is what the panel would show. */
+		if (!(host_skip_clear && (a0 & GL_COLOR_BUFFER_BIT))) {
+			glClear(a0);
+		}
 		g->drawn_framebuffer = g->bound_framebuffer;
 		host_fbo_draw(g);
 		break;
@@ -139,6 +146,14 @@ switch (opcode) {
 		g->drawn_framebuffer = g->bound_framebuffer;
 		host_fbo_draw(g);
 		host_note_draw(g, "arrays", a0, a2);
+		/* GLWIRE_SKIP_THIN_LINES=1: a full-width 1-2 px quad is how the label underline band is
+		 * drawn here; skipping those draws is the experiment. */
+		if (host_skip_thin_lines && text_snap.scissor_on && text_snap.scissor[3] <= 2 &&
+		    text_snap.scissor[2] >= 200) {
+			names_attribs_release(g);
+			GLWIRE_AFTER_DRAW(g);
+			break;
+		}
 		glDrawArrays(a0, a1, a2);
 		names_attribs_release(g);
 		GLWIRE_AFTER_DRAW(g);
@@ -159,6 +174,13 @@ switch (opcode) {
 		g->drawn_framebuffer = g->bound_framebuffer;
 		host_fbo_draw(g);
 		host_note_draw(g, "elements", a0, a1);
+		if (host_skip_thin_lines && text_snap.scissor_on && text_snap.scissor[3] <= 2 &&
+		    text_snap.scissor[2] >= 200) {
+			names_attribs_release(g);
+			GLWIRE_AFTER_DRAW(g);
+			free(p3);
+			break;
+		}
 		{
 			GLint restore = host_label_begin(g);
 
@@ -295,6 +317,15 @@ switch (opcode) {
 		GLenum a0 = wire_get_u32(r);
 		GLenum a1 = wire_get_u32(r);
 		GLint a2 = wire_get_i32(r);
+		/* GLWIRE_FORCE_LINEAR=1: the 750-wide picture is assembled by sampling 750x200 scratch
+		 * surfaces; with NEAREST a solid 3 px underline is sampled into dashes.  An experiment:
+		 * run the sampler linearly and see whether the dashed band under the icon labels goes. */
+		if (host_force_linear &&
+		    (a1 == GL_TEXTURE_MIN_FILTER || a1 == GL_TEXTURE_MAG_FILTER) &&
+		    (a2 == GL_NEAREST || a2 == GL_NEAREST_MIPMAP_NEAREST ||
+		    a2 == GL_NEAREST_MIPMAP_LINEAR)) {
+			a2 = (a1 == GL_TEXTURE_MIN_FILTER) ? GL_LINEAR : GL_LINEAR;
+		}
 		glTexParameteri(a0, a1, a2);
 		break;
 	}

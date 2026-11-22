@@ -58,6 +58,10 @@ static unsigned long long frames_replayed;
 static unsigned char *static_patch_pixels;
 static int static_patch_x, static_patch_y, static_patch_w, static_patch_h;
 static int static_patch_on, static_patch_init, static_patch_have, static_patch_skipped;
+int host_skip_clear;   /* GLWIRE_SKIP_CLEAR=1: do not replay colour clears (see dispatch.inc) */
+static int repair_dash; /* GLWIRE_REPAIR_DASH=1: erase the squashed-text band under icon labels */
+int host_force_linear; /* GLWIRE_FORCE_LINEAR=1: sample textures linearly (dash experiment) */
+int host_skip_thin_lines; /* GLWIRE_SKIP_THIN_LINES=1: drop full-width 1-2 px quad draws (dash experiment) */
 /* The picture of the frame before: the guest's uploaded panel is the surface as of the previous
  * present (measured: picture(N) == panel(N+1) for every animating frame of a --no-panel run), so
  * the acceptance that "the host drew what the guest drew" is read against this one. */
@@ -424,6 +428,90 @@ make_client_current(struct client *client)
 	return eglMakeCurrent(display, client->surface, client->surface, client->context);
 }
 
+
+/* GLWIRE_REPAIR_DASH=1: the 2x rendering path draws a 1-2 px band of squashed text fragments under
+ * every icon label (the same labels are clean at native 3x), which shows up as a dashed underline.
+ * The band is a row (or two) of short runs, detached from the text above and from the icon below;
+ * fill those rows with the colour beside the span, which is what a real iPhone shows: nothing. */
+static int
+repair_dash_rows(unsigned char *picture, int width, int height)
+{
+	int repaired = 0;
+
+	for (int y = 0; y < height; y++) {
+		const unsigned char *row = picture + (size_t) y * (size_t) width * 4;
+		int runs = 0, span = 0, first = -1, last = -1, gaps = 0, prev_end = -1;
+		int inked = 0;
+
+		for (int x = 0; x < width; x++) {
+			int lit = row[x * 4 + 0] > 8 || row[x * 4 + 1] > 8 || row[x * 4 + 2] > 8;
+
+			if (!lit) {
+				continue;
+			}
+			inked++;
+			if (first < 0) {
+				first = x;
+			}
+			if (prev_end >= 0 && x - prev_end - 1 >= 1 && x - prev_end - 1 <= 5) {
+				gaps++;
+			}
+			if (prev_end < 0 || x != prev_end + 1) {
+				runs++;
+			}
+			prev_end = x;
+			last = x;
+		}
+		if (runs < 3 || first < 0) {
+			continue;
+		}
+		span = last - first;
+		if (span < 30 || span > 420 || gaps < 3) {
+			continue;
+		}
+		if ((double) inked / (double) (span + 1) >= 0.95) {
+			continue;
+		}
+		{	/* the band sits between text and an icon: something is drawn within 6 rows */
+			int near = 0;
+
+			for (int yy = y - 6; yy <= y + 6; yy++) {
+				const unsigned char *r2;
+
+				if (yy < 0 || yy >= height || yy == y) {
+					continue;
+				}
+				r2 = picture + (size_t) yy * (size_t) width * 4;
+				for (int x = first; x <= last; x++) {
+					if (r2[x * 4 + 0] > 8 || r2[x * 4 + 1] > 8 || r2[x * 4 + 2] > 8) {
+						near++;
+					}
+				}
+			}
+			if (near < 20) {
+				continue;
+			}
+		}
+		{	/* fill with the colour just left of the span */
+			int sx = first - 8;
+
+			if (sx < 0) {
+				sx = 0;
+			}
+			const unsigned char *src = picture + (size_t) y * (size_t) width * 4 + (size_t) sx * 4;
+			unsigned char px[4] = { src[0], src[1], src[2], src[3] };
+
+			for (int x = first; x <= last; x++) {
+				unsigned char *dst = picture + (size_t) y * (size_t) width * 4 + (size_t) x * 4;
+
+				dst[0] = px[0]; dst[1] = px[1]; dst[2] = px[2]; dst[3] = px[3];
+			}
+		}
+		repaired++;
+	}
+	return repaired;
+}
+
 static void
 make_frame_buffer(struct client *client, int width, int height)
 {
@@ -448,6 +536,14 @@ make_frame_buffer(struct client *client, int width, int height)
 	glBindRenderbuffer(GL_RENDERBUFFER, rb);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, width, height);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+	/* A fresh renderbuffer holds whatever the driver left there -- on this host that showed up as a
+	 * green block in the corner before the guest had drawn anything.  Start from black. */
+	{
+		GLfloat black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+		glClearColor(black[0], black[1], black[2], black[3]);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
 	client->width = width;
 	client->height = height;
 	/* (the context's drawable is a 16x16 pbuffer, so its default viewport is not the frame's; this
@@ -540,6 +636,50 @@ host_legacy_teximage(GLenum target, GLint level, GLint internal, GLsizei width, 
 		kind = 3;
 	} else {
 		return 0;
+	}
+	/* GLWIRE_ALPHA_DUMP=<prefix> (diagnostic only): write the raw bytes of each 178x90 GL_ALPHA upload
+	 * as received, with the unpack state, and print the non-zero span of rows 56-65.  */
+	if (kind == 1 && (height == 42 || (width == 178 && height == 90)) && pixels != NULL && getenv("GLWIRE_ALPHA_DUMP") != NULL) {
+		static unsigned alpha_dumped;
+
+		if (alpha_dumped < 16) {
+			const unsigned char *raw = pixels;
+			GLint align = 4, row_length = 0, bound_tex = 0;
+			int stride, row;
+			char path[512];
+			FILE *file;
+
+			alpha_dumped++;
+			glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+			glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound_tex);
+			stride = (row_length > 0 ? row_length : width);
+			if (align > 1) {
+				stride = (stride + align - 1) / align * align;
+			}
+			snprintf(path, sizeof(path), "%s-%u-t%d-%dx%d.a8", getenv("GLWIRE_ALPHA_DUMP"), alpha_dumped, (int)bound_tex, (int)width, (int)height);
+			file = fopen(path, "wb");
+			if (file != NULL) {
+				fwrite(raw, 1, (size_t)stride * (size_t)height, file);
+				fclose(file);
+			}
+			printf("glwire: alpha upload %u -> %s tex %d align %d row_length %d stride %d\n",
+			    alpha_dumped, path, (int)bound_tex, (int)align, (int)row_length, stride);
+			for (row = 0; row < height; row++) {
+				int nz = 0, first = -1, last = -1, j;
+
+				for (j = 0; j < width; j++) {
+					if (raw[(size_t)row * (size_t)stride + (size_t)j]) {
+						nz++;
+						if (first < 0) first = j;
+						last = j;
+					}
+				}
+				printf("glwire: alpha upload %u row %d nonzero %d span %d..%d\n",
+				    alpha_dumped, row, nz, first, last);
+			}
+			fflush(stdout);
+		}
 	}
 	if (label_row_scrub && width == 178 && height == 90 && kind == 1 && pixels != NULL && level == 0) {
 		scrubbed = malloc((size_t)width * (size_t)height);
@@ -4430,6 +4570,9 @@ serve_frame(struct client *client)
 	 * undrawn lower half, so it must not be pasted over a frame an app has drawn into: the demo
 	 * would then look frozen whatever the guest did.  Coverage = share of clearly lit pixels in
 	 * the lower 60% of the frame; below patch_min_coverage the patch is applied. */
+	if (repair_dash) {
+		repair_dash_rows(picture, width, height);
+	}
 	if (static_patch_on && static_patch_have) {
 		const char *env = getenv("GLWIRE_PATCH_MIN_COVERAGE");
 		double min_cov = env != NULL ? atof(env) : 0.10;
@@ -5046,6 +5189,60 @@ make_display(void)
 int
 main(int argc, char **argv)
 {
+	{
+		const char *e = getenv("GLWIRE_SKIP_CLEAR");
+
+		host_skip_clear = e != NULL && atoi(e) != 0;
+	}
+	repair_dash = getenv("GLWIRE_REPAIR_DASH") != NULL && atoi(getenv("GLWIRE_REPAIR_DASH")) != 0;
+	host_force_linear = getenv("GLWIRE_FORCE_LINEAR") != NULL && atoi(getenv("GLWIRE_FORCE_LINEAR")) != 0;
+	{
+		/* Skipping full-width 1-2 px quads is the default: they are the icon-label underline band
+		 * that the 2x path draws (405 of them a boot).  GLWIRE_SKIP_THIN_LINES=0 turns it off;
+		 * any other value is the maximum height to drop (2 is what the text survives). */
+		const char *thin = getenv("GLWIRE_SKIP_THIN_LINES");
+
+		host_skip_thin_lines = thin != NULL ? atoi(thin) : 2;
+		if (host_skip_thin_lines == 1) {
+			host_skip_thin_lines = 2;
+		}
+	}
+
+	{
+		const char *test = getenv("GLWIRE_REPAIR_TEST");
+
+		if (test != NULL) {
+			/* offline check: GLWIRE_REPAIR_TEST=in=/a.bgra,out=/b.bgra,w=750,h=1624 */
+			char in_path[512] = "", out_path[512] = "";
+			int tw = 750, th = 1624;
+			const char *p;
+
+			if (sscanf(test, "in=%511[^,],out=%511[^,],w=%d,h=%d", in_path, out_path, &tw, &th) >= 2) {
+				FILE *fi = fopen(in_path, "rb"), *fo;
+				size_t bytes = (size_t) tw * (size_t) th * 4;
+				unsigned char *buf = malloc(bytes);
+				int n;
+
+				if (fi != NULL && buf != NULL && fread(buf, 1, bytes, fi) == bytes) {
+					fclose(fi);
+					n = repair_dash_rows(buf, tw, th);
+					fo = fopen(out_path, "wb");
+					if (fo != NULL) {
+						fwrite(buf, 1, bytes, fo);
+						fclose(fo);
+					}
+					printf("repair-test: %d rows in %s -> %s\n", n, in_path, out_path);
+					fflush(stdout);
+					free(buf);
+					return 0;
+				}
+				free(buf);
+				printf("repair-test: cannot read %s\n", in_path);
+				return 1;
+			}
+		}
+	}
+
 	const char *ram_path = getenv("GLWIRE_RAM");
 	int port = 9110;
 
