@@ -27,10 +27,12 @@
 
 #define MW_MAGIC 0x4D575452u     /* "MWTR" */
 #define MW_ACK_MAGIC 0x4D57414Bu /* "MWAK" */
-/* 1: the blit/present contract (stage 29). 2: adds the render-encoder opcodes (stage C); a v2
- * guest may still use every v1 message unchanged, and the guest's synthetic blit client is the
- * same path it was in v1. */
-#define MW_VERSION 2u
+/* 1: the blit/present contract (stage 29). 2: adds the render-encoder opcodes (stage C). 3: the
+ * WP-3 additions: the two per-draw buffer-offset setters CoreAnimation calls between its draws,
+ * texture content (replaceRegion:) and the IOSurface binding of an existing texture. A v2 guest
+ * may still use every v1 message unchanged; the host accepts both versions so the synthetic blit
+ * client's v2 regression is the same path it was. */
+#define MW_VERSION 3u
 
 /* the message header, on the wire as it is in memory (little-endian hosts only; the translator
  * refuses a big-endian one) */
@@ -58,6 +60,14 @@ enum mw_type {
     MW_UPLOAD_BUFFER_PHYS = 0x0014,
     MW_CREATE_TEXTURE = 0x0020,
     MW_DESTROY_TEXTURE = 0x0021,
+    /* WP-3: the bytes Metal's -replaceRegion:mipmapLevel:withBytes:bytesPerRow: (and its
+     * slice/bytesPerImage sibling) hands to the texture. The bytes follow the structure inside
+     * the same message, like MW_UPLOAD_BUFFER. */
+    MW_TEXTURE_REPLACE_REGION = 0x0022,
+    /* WP-3: the physical segments behind a texture that was made from an IOSurface. The host
+     * keeps them so it can put the rendered picture into the guest's real surface and read it
+     * back by reference (hakios_vtop's mechanism, the same one MW_UPLOAD_BUFFER_PHYS uses). */
+    MW_TEXTURE_SET_IOSURFACE = 0x0023,
 
     MW_COPY_BUFFER_TO_TEXTURE = 0x0030,
     MW_FILL_BUFFER = 0x0031,
@@ -97,6 +107,10 @@ enum mw_type {
     MW_CREATE_RENDER_PIPELINE = 0x0073,
     MW_CREATE_SAMPLER = 0x0074,
     MW_CREATE_DEPTH_STENCIL = 0x0075,
+    /* WP-3: -setVertexBufferOffset:atIndex: / -setFragmentBufferOffset:atIndex:. Metal replaces
+     * the offset of the buffer already bound at the index; it does not bind a new buffer. */
+    MW_RENDER_SET_VERTEX_BUFFER_OFFSET = 0x0076,
+    MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET = 0x0077,
 };
 
 enum mw_status {
@@ -161,6 +175,35 @@ struct mw_create_texture {
     uint32_t pixel_format; /* enum mw_pixel_format */
     uint32_t usage;        /* Metal's MTLTextureUsage, for the log */
     uint32_t reserved;
+};
+
+/* MW_TEXTURE_REPLACE_REGION: the bytes follow the structure. `slice` is MTLTexture's array slice
+ * (0 for CoreAnimation's 2D textures), `bytes_per_image` 0 when the caller did not pass one.
+ * `width`/`height`/`depth` are the MTLRegion's extent; `bytes_per_row` is the caller's stride. */
+struct mw_texture_replace_region {
+    uint32_t texture_id;
+    uint32_t mipmap_level;
+    uint32_t slice;
+    uint32_t origin_x;
+    uint32_t origin_y;
+    uint32_t origin_z;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t bytes_per_row;
+    uint32_t bytes_per_image;
+    uint32_t length;
+};
+
+/* MW_TEXTURE_SET_IOSURFACE: mw_segment[segment_count] follows the structure. The segments cover
+ * the IOSurface's allocation, so the host can address any byte of the surface by walking them. A
+ * guest with no vtop answer sends segment_count 0: the host then keeps the metadata and falls
+ * back to its own read-back for the picture. */
+struct mw_texture_set_iosurface {
+    uint32_t texture_id;
+    uint32_t bytes_per_row; /* the IOSurface's stride, which may exceed width*4 */
+    uint32_t alloc_size;
+    uint32_t segment_count;
 };
 
 /* MW_COPY_BUFFER_TO_TEXTURE: one row-major blit, the way a Metal blit encoder does it */
@@ -271,6 +314,16 @@ struct mw_render_set_depth_stencil {
 struct mw_render_set_buffer {
     uint32_t buffer_id;
     uint32_t index;
+    uint64_t offset;
+};
+
+/* MW_RENDER_SET_VERTEX_BUFFER_OFFSET / MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET:
+ * -setVertexBufferOffset:atIndex: / -setFragmentBufferOffset:atIndex:. The buffer at `index` is
+ * not named: Metal replaces the offset of the binding that is already there. The host applies it
+ * to the encoder's current binding and a later draw sees it, exactly as Metal does. */
+struct mw_render_set_buffer_offset {
+    uint32_t index;
+    uint32_t reserved;
     uint64_t offset;
 };
 

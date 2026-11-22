@@ -87,6 +87,10 @@
 #ifndef SYS_hakios_vtop
 #define SYS_hakios_vtop 556
 #endif
+/* One list is enough for a buffer, a texture region or an IOSurface: the port's vtop call fills
+ * 16-byte runs, and a run is at least a page, so 512 runs cover 2 MiB+ at the worst granularity
+ * and the guest's 4.87 MB surface in the usual (contiguous) case. */
+#define MW_VTOP_SEGMENTS 512
 extern int syscall(int, ...);
 
 #include "mw_metal_extras.h"
@@ -208,6 +212,31 @@ struct mw_texture_state {
     unsigned long usage;
     unsigned long storage_mode;
     id label;
+    /* WP-3: an IOSurface-backed texture carries the real surface, not just its geometry. The
+     * surface object is CoreAnimation's (not retained here); the base is the address the port's
+     * IOSurface implementation mapped for this process, and it is what hakios_vtop resolves. */
+    void *surface;
+    uint32_t surface_id;
+    uintptr_t surface_base;
+    uint64_t surface_length;
+    uint32_t surface_bytes_per_row;
+    int has_surface;
+    uint32_t surface_generation; /* connection whose wire has the binding, 0 for none */
+    /* WP-3: the last -replaceRegion:... content, kept until the wire is online and the texture
+     * is first named in a frame. CA uploads a layer image once and samples it; the host only
+     * needs the newest content. */
+    void *replace_bytes;
+    uint32_t replace_length;
+    uint32_t replace_bytes_per_row;
+    uint32_t replace_bytes_per_image;
+    uint32_t replace_mipmap_level;
+    uint32_t replace_slice;
+    uint32_t replace_origin[3];
+    uint32_t replace_width;
+    uint32_t replace_height;
+    uint32_t replace_depth;
+    uint64_t replace_serial;      /* bumped on every replaceRegion: */
+    uint64_t replace_sent_serial; /* the serial the wire last carried */
 };
 
 /* One recorded render-encoder call, replayed on the wire in order (stage C). The object fields are
@@ -233,6 +262,8 @@ enum {
     MWR_OP_SET_FILL_MODE,
     MWR_OP_SET_BLEND_COLOR,
     MWR_OP_SET_STENCIL_REFERENCE,
+    MWR_OP_SET_VERTEX_BUFFER_OFFSET,
+    MWR_OP_SET_FRAGMENT_BUFFER_OFFSET,
     MWR_OP_DRAW,
     MWR_OP_END,
 };
@@ -469,6 +500,9 @@ static void mw_free_stub(struct mw_stub_state *state);
 static void mw_free_pipeline_library(struct mw_pipeline_library_state *state);
 static struct mw_stub_state *mw_stub_state_of_object(id object);
 static int mw_send_render_frame(struct mw_command_buffer_state *state);
+static void *mw_iosurface_base(void *surface);
+static uint64_t mw_iosurface_alloc_size(void *surface);
+static uint32_t mw_iosurface_bytes_per_row(void *surface);
 static void mw_render_capture_pipeline(struct mw_stub_state *state, id descriptor);
 static void mw_render_capture_sampler(struct mw_stub_state *state, id descriptor);
 static void mw_render_capture_depth_stencil(struct mw_stub_state *state, id descriptor);
@@ -986,19 +1020,96 @@ static int mw_wire_ensure_texture(struct mw_texture_state *texture)
     if (texture == NULL) {
         return -1;
     }
-    if (texture->created_generation == gGeneration) {
-        return 0;
+    if (texture->created_generation != gGeneration) {
+        message.id = texture->remote_id;
+        message.width = texture->width;
+        message.height = texture->height;
+        message.pixel_format = texture->pixel_format;
+        message.usage = (uint32_t)texture->usage;
+        message.reserved = 0;
+        if (mw_send(&gWire, MW_CREATE_TEXTURE, &message, sizeof(message)) != 0) {
+            return -1;
+        }
+        texture->created_generation = gGeneration;
     }
-    message.id = texture->remote_id;
-    message.width = texture->width;
-    message.height = texture->height;
-    message.pixel_format = texture->pixel_format;
-    message.usage = (uint32_t)texture->usage;
-    message.reserved = 0;
-    if (mw_send(&gWire, MW_CREATE_TEXTURE, &message, sizeof(message)) != 0) {
-        return -1;
+    if (texture->has_surface && texture->surface_generation != gGeneration) {
+        struct {
+            struct mw_texture_set_iosurface request;
+            struct mw_segment segments[MW_VTOP_SEGMENTS];
+        } iosurface;
+        uint32_t count = 0;
+        uint64_t covered = 0;
+        int complete = 0;
+
+        memset(&iosurface, 0, sizeof(iosurface));
+        if (texture->surface_base != 0 && texture->surface_length != 0 &&
+            texture->surface_length <= UINT32_MAX) {
+            /* The surface's pages may be mapped but not yet faulted in: hakios_vtop answers
+             * EFAULT for a page the pmap has no translation for, so touch one byte per page
+             * first. This does not change the picture; it makes the mapping resident. */
+            volatile const unsigned char *touch =
+                (volatile const unsigned char *)texture->surface_base;
+
+            for (uint64_t at = 0; at < texture->surface_length; at += 16384) {
+                (void)touch[at];
+            }
+            if (syscall(SYS_hakios_vtop, texture->surface_base,
+                        (uintptr_t)texture->surface_length, (uintptr_t)iosurface.segments,
+                        (uintptr_t)MW_VTOP_SEGMENTS, (uintptr_t)&count) == 0 &&
+                count != 0 && count <= MW_VTOP_SEGMENTS) {
+                for (uint32_t i = 0; i < count; i++) {
+                    covered += iosurface.segments[i].len;
+                }
+                complete = covered == texture->surface_length;
+            }
+        }
+        if (!complete) {
+            count = 0;
+            mw_log("texture %u: IOSurface %u has no usable physical segments; the host keeps its "
+                   "own read-back for the picture",
+                   texture->remote_id, texture->surface_id);
+        }
+        iosurface.request.texture_id = texture->remote_id;
+        iosurface.request.bytes_per_row = texture->surface_bytes_per_row;
+        iosurface.request.alloc_size = (uint32_t)texture->surface_length;
+        iosurface.request.segment_count = count;
+        if (mw_send(&gWire, MW_TEXTURE_SET_IOSURFACE, &iosurface,
+                    (uint32_t)(sizeof(iosurface.request) +
+                               (size_t)count * sizeof(struct mw_segment))) != 0) {
+            return -1;
+        }
+        texture->surface_generation = gGeneration;
+        if (count != 0) {
+            mw_log("texture %u: IOSurface %u %u byte(s) in %u physical segment(s), row %u; the "
+                   "host can reach every byte",
+                   texture->remote_id, texture->surface_id,
+                   (unsigned)texture->surface_length, count, texture->surface_bytes_per_row);
+        }
     }
-    texture->created_generation = gGeneration;
+    if (texture->replace_length != 0 &&
+        texture->replace_serial != texture->replace_sent_serial) {
+        struct mw_texture_replace_region replace;
+
+        replace.texture_id = texture->remote_id;
+        replace.mipmap_level = texture->replace_mipmap_level;
+        replace.slice = texture->replace_slice;
+        replace.origin_x = texture->replace_origin[0];
+        replace.origin_y = texture->replace_origin[1];
+        replace.origin_z = texture->replace_origin[2];
+        replace.width = texture->replace_width;
+        replace.height = texture->replace_height;
+        replace.depth = texture->replace_depth;
+        replace.bytes_per_row = texture->replace_bytes_per_row;
+        replace.bytes_per_image = texture->replace_bytes_per_image;
+        replace.length = texture->replace_length;
+        if (mw_send_with_body(&gWire, MW_TEXTURE_REPLACE_REGION, &replace, sizeof(replace),
+                              texture->replace_bytes, texture->replace_length) != 0) {
+            return -1;
+        }
+        texture->replace_sent_serial = texture->replace_serial;
+        mw_log("texture %u: %u byte(s) of replaceRegion content on the wire", texture->remote_id,
+               texture->replace_length);
+    }
     return 0;
 }
 
@@ -1131,8 +1242,6 @@ static uint32_t mw_crc_of_copy(const struct mw_op *copy, struct mw_buffer_state 
  * buffer that is not resident, or an unexpectedly fragmented buffer falls back to the copy; the
  * fallback is measured, not assumed.
  */
-#define MW_VTOP_SEGMENTS 512
-
 static int mw_send_buffer_upload(struct mw_buffer_state *buffer)
 {
     static struct mw_segment segments[MW_VTOP_SEGMENTS];
@@ -1976,6 +2085,7 @@ static void mw_free_texture(struct mw_texture_state *state)
     if (state == NULL) {
         return;
     }
+    free(state->replace_bytes);
     [state->label release];
     free(state);
 }
@@ -2114,6 +2224,108 @@ static void mw_texture_set_label(id self, SEL _cmd, id label)
         [state->label release];
         state->label = [label copy];
     }
+}
+
+/* WP-3: Metal's -replaceRegion:mipmapLevel:withBytes:bytesPerRow: (and the slice/bytesPerImage
+ * sibling) is how CoreAnimation hands a texture its pixels. The bytes are copied out here and the
+ * newest content is what the wire carries; CA uploads a layer image once and then samples it. */
+static uint32_t mw_texture_bytes_per_pixel(uint32_t pixel_format)
+{
+    return pixel_format == MW_FORMAT_R8_UNORM ? 1u : 4u;
+}
+
+static void mw_texture_take_replace(id self, const char *what, MTLRegion region, NSUInteger level,
+                                    NSUInteger slice, const void *bytes,
+                                    NSUInteger bytes_per_row, NSUInteger bytes_per_image)
+{
+    struct mw_texture_state *state = mw_texture_state_of(self);
+    uint32_t bpp;
+    size_t row_bytes;
+    size_t length;
+
+    if (state == NULL) {
+        mw_log("%s: not a metalwire texture", what);
+        return;
+    }
+    if (bytes == NULL || region.size.width == 0 || region.size.height == 0) {
+        mw_log("%s: texture %u: empty region/image (%p, %lux%lu)", what, state->remote_id, bytes,
+               (unsigned long)region.size.width, (unsigned long)region.size.height);
+        return;
+    }
+    if (level != 0) {
+        mw_log("%s: texture %u: mipmap level %lu ignored (the wire carries level 0 only)", what,
+               state->remote_id, (unsigned long)level);
+        return;
+    }
+    if (slice != 0) {
+        mw_log("%s: texture %u: array slice %lu treated as 0 (the wire carries one layer)", what,
+               state->remote_id, (unsigned long)slice);
+        slice = 0;
+    }
+    bpp = mw_texture_bytes_per_pixel(state->pixel_format);
+    row_bytes = bytes_per_row != 0 ? (size_t)bytes_per_row : (size_t)region.size.width * bpp;
+    length = bytes_per_image != 0
+                 ? (size_t)bytes_per_image
+                 : row_bytes * (size_t)region.size.height *
+                       (size_t)(region.size.depth != 0 ? region.size.depth : 1);
+    if (length == 0 || length > 64u * 1024u * 1024u) {
+        mw_log("%s: texture %u: %lu bytes is outside the wire subset", what, state->remote_id,
+               (unsigned long)length);
+        return;
+    }
+    free(state->replace_bytes);
+    state->replace_bytes = malloc(length);
+    if (state->replace_bytes == NULL) {
+        state->replace_length = 0;
+        state->replace_serial++;
+        return;
+    }
+    memcpy(state->replace_bytes, bytes, length);
+    state->replace_length = (uint32_t)length;
+    state->replace_bytes_per_row = (uint32_t)row_bytes;
+    state->replace_bytes_per_image = (uint32_t)bytes_per_image;
+    state->replace_mipmap_level = (uint32_t)level;
+    state->replace_slice = (uint32_t)slice;
+    state->replace_origin[0] = (uint32_t)region.origin.x;
+    state->replace_origin[1] = (uint32_t)region.origin.y;
+    state->replace_origin[2] = (uint32_t)region.origin.z;
+    state->replace_width = (uint32_t)region.size.width;
+    state->replace_height = (uint32_t)region.size.height;
+    state->replace_depth = (uint32_t)(region.size.depth != 0 ? region.size.depth : 1);
+    state->replace_serial++;
+    mw_log("CA texture: %s texture %u: %lux%lu at %lu,%lu level %lu row %lu image %lu "
+           "(%lu byte(s); content on the wire, serial %llu)",
+           what, state->remote_id, (unsigned long)region.size.width,
+           (unsigned long)region.size.height, (unsigned long)region.origin.x,
+           (unsigned long)region.origin.y, (unsigned long)level, (unsigned long)row_bytes,
+           (unsigned long)bytes_per_image, (unsigned long)length,
+           (unsigned long long)state->replace_serial);
+}
+
+static void mw_texture_replace_region(id self, SEL _cmd, MTLRegion region, NSUInteger level,
+                                      const void *bytes, NSUInteger bytes_per_row)
+{
+    (void)_cmd;
+    mw_texture_take_replace(self, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", region, level,
+                            0, bytes, bytes_per_row, 0);
+}
+
+static void mw_texture_replace_region_slice(id self, SEL _cmd, MTLRegion region, NSUInteger level,
+                                            NSUInteger slice, const void *bytes,
+                                            NSUInteger bytes_per_row, NSUInteger bytes_per_image)
+{
+    (void)_cmd;
+    mw_texture_take_replace(self, "replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:"
+                                   "bytesPerImage:",
+                            region, level, slice, bytes, bytes_per_row, bytes_per_image);
+}
+
+static void *mw_texture_iosurface(id self, SEL _cmd)
+{
+    struct mw_texture_state *state = mw_texture_state_of(self);
+
+    (void)_cmd;
+    return state != NULL ? state->surface : NULL;
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -2356,8 +2568,9 @@ static BOOL mw_note_texture_format(unsigned long texture_type, unsigned long pix
     return first;
 }
 
-/* IOSurfaceGetID, looked up rather than linked: the bundle links Foundation/Metal/libobjc only,
- * and the id is wanted for the log, not for anything functional. */
+/* IOSurfaceGetID, looked up rather than linked: the bundle links Foundation/Metal/libobjc only.
+ * The same lookup covers the address/stride functions WP-3 needs; a system whose IOSurface
+ * library is incomplete simply reports no surface and the host keeps its own read-back. */
 static uint32_t mw_iosurface_id(void *surface)
 {
     typedef uint32_t (*mw_iosurface_get_id_fn)(void *);
@@ -2373,9 +2586,53 @@ static uint32_t mw_iosurface_id(void *surface)
     return surface != NULL && get_id != NULL ? get_id(surface) : 0;
 }
 
-/* IOSurface-backed textures are the Stage C gap (the pixels live in an IOSurface the host cannot
- * read yet); the first MW_IOSURFACE_LOG_LIMIT distinct surfaces are logged once each, then the
- * placeholder is made silently. */
+static void *mw_iosurface_base(void *surface)
+{
+    typedef void *(*mw_iosurface_base_fn)(void *);
+    static mw_iosurface_base_fn get_base;
+    static int resolved;
+
+    if (!resolved) {
+        void *symbol = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+
+        memcpy(&get_base, &symbol, sizeof(get_base));
+        resolved = 1;
+    }
+    return surface != NULL && get_base != NULL ? get_base(surface) : NULL;
+}
+
+static uint64_t mw_iosurface_alloc_size(void *surface)
+{
+    typedef size_t (*mw_iosurface_size_fn)(void *);
+    static mw_iosurface_size_fn get_size;
+    static int resolved;
+
+    if (!resolved) {
+        void *symbol = dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+
+        memcpy(&get_size, &symbol, sizeof(get_size));
+        resolved = 1;
+    }
+    return surface != NULL && get_size != NULL ? (uint64_t)get_size(surface) : 0;
+}
+
+static uint32_t mw_iosurface_bytes_per_row(void *surface)
+{
+    typedef size_t (*mw_iosurface_row_fn)(void *);
+    static mw_iosurface_row_fn get_row;
+    static int resolved;
+
+    if (!resolved) {
+        void *symbol = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+
+        memcpy(&get_row, &symbol, sizeof(get_row));
+        resolved = 1;
+    }
+    return surface != NULL && get_row != NULL ? (uint32_t)get_row(surface) : 0;
+}
+
+/* The first MW_IOSURFACE_LOG_LIMIT distinct surfaces are logged once each; the same report is
+ * what tells us whether the port's IOSurface implementation handed us real memory. */
 #define MW_IOSURFACE_LOG_LIMIT 64
 static NSMutableSet *gLoggedIosurfaces; /* NSString "pointers", under gStubLock */
 
@@ -2481,19 +2738,37 @@ static id mw_device_new_texture_iosurface(id self, SEL _cmd, id descriptor, void
                                           NSUInteger plane)
 {
     uint32_t surface_id = mw_iosurface_id(surface);
+    struct mw_texture_state *state;
     id texture;
 
     (void)self;
     (void)_cmd;
     texture = mw_texture_object(descriptor, "newTextureWithDescriptor:iosurface:plane:");
-    if (texture != nil && mw_note_iosurface(surface)) {
-        struct mw_texture_state *state = mw_texture_state_of(texture);
-
-        mw_log("newTextureWithDescriptor:iosurface:plane: IOSurface %u (%p) plane %lu -> placeholder "
-               "texture %u (%lux%lu; the surface is ignored, the Stage C gap)",
-               surface_id, surface, (unsigned long)plane, state != NULL ? state->remote_id : 0,
-               state != NULL ? (unsigned long)state->width : 0,
-               state != NULL ? (unsigned long)state->height : 0);
+    if (texture == nil) {
+        return nil;
+    }
+    state = mw_texture_state_of(texture);
+    if (state == NULL) {
+        return texture;
+    }
+    state->surface = surface;
+    state->surface_id = surface_id;
+    state->surface_base = (uintptr_t)mw_iosurface_base(surface);
+    state->surface_length = mw_iosurface_alloc_size(surface);
+    state->surface_bytes_per_row = mw_iosurface_bytes_per_row(surface);
+    if (state->surface_bytes_per_row == 0) {
+        state->surface_bytes_per_row = state->width * 4;
+    }
+    state->has_surface = state->surface_base != 0 && state->surface_length != 0;
+    if (mw_note_iosurface(surface)) {
+        mw_log("newTextureWithDescriptor:iosurface:plane: IOSurface %u (%p) plane %lu -> texture %u "
+               "(%lux%lu); surface base %p, row %u, %llu byte(s) %s",
+               surface_id, surface, (unsigned long)plane, state->remote_id,
+               (unsigned long)state->width, (unsigned long)state->height,
+               (void *)state->surface_base, state->surface_bytes_per_row,
+               (unsigned long long)state->surface_length,
+               state->has_surface ? "(real: the host will read and write it by reference)"
+                                  : "(no address from IOSurface; host read-back only)");
     }
     return texture;
 }
@@ -4323,6 +4598,23 @@ static void mw_render_set_vertex_buffer(id self, SEL _cmd, id buffer, NSUInteger
     mw_render_log_set("setVertexBuffer:offset:atIndex:", buffer, index);
 }
 
+static void mw_render_set_vertex_buffer_offset(id self, SEL _cmd, NSUInteger offset,
+                                               NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VERTEX_BUFFER_OFFSET);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        op->value64 = offset;
+    }
+    mw_log("CA set: setVertexBufferOffset:%lu atIndex:%lu", (unsigned long)offset,
+           (unsigned long)index);
+}
+
 static void mw_render_set_vertex_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
                                        NSUInteger index)
 {
@@ -4409,6 +4701,23 @@ static void mw_render_set_fragment_buffer(id self, SEL _cmd, id buffer, NSUInteg
         mw_render_op_take(op, buffer);
     }
     mw_render_log_set("setFragmentBuffer:offset:atIndex:", buffer, index);
+}
+
+static void mw_render_set_fragment_buffer_offset(id self, SEL _cmd, NSUInteger offset,
+                                                 NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FRAGMENT_BUFFER_OFFSET);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        op->value64 = offset;
+    }
+    mw_log("CA set: setFragmentBufferOffset:%lu atIndex:%lu", (unsigned long)offset,
+           (unsigned long)index);
 }
 
 static void mw_render_set_fragment_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
@@ -4804,6 +5113,22 @@ static int mw_send_render_frame(struct mw_command_buffer_state *state)
                 }
                 break;
             }
+            case MWR_OP_SET_VERTEX_BUFFER_OFFSET:
+            case MWR_OP_SET_FRAGMENT_BUFFER_OFFSET: {
+                struct mw_render_set_buffer_offset message;
+
+                message.index = op->index;
+                message.reserved = 0;
+                message.offset = op->value64;
+                if (mw_send(&gWire,
+                            op->kind == MWR_OP_SET_VERTEX_BUFFER_OFFSET
+                                ? MW_RENDER_SET_VERTEX_BUFFER_OFFSET
+                                : MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET,
+                            &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
             case MWR_OP_SET_VERTEX_BYTES:
             case MWR_OP_SET_FRAGMENT_BYTES: {
                 struct mw_render_set_bytes message;
@@ -5060,6 +5385,15 @@ static void mw_register_texture_class(void)
     class_addMethod(gTextureClass, sel_registerName("label"), (IMP)mw_texture_label, "@@:");
     class_addMethod(gTextureClass, sel_registerName("setLabel:"), (IMP)mw_texture_set_label,
                     "v@:@");
+    class_addMethod(gTextureClass, sel_registerName("replaceRegion:mipmapLevel:withBytes:"
+                                                    "bytesPerRow:"),
+                    (IMP)mw_texture_replace_region, "v@:{MTLRegion=QQQQQQ}Q^vQ");
+    class_addMethod(gTextureClass,
+                    sel_registerName("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:"
+                                     "bytesPerImage:"),
+                    (IMP)mw_texture_replace_region_slice, "v@:{MTLRegion=QQQQQQ}QQ^vQQ");
+    class_addMethod(gTextureClass, sel_registerName("iosurface"), (IMP)mw_texture_iosurface,
+                    "^v@:");
     objc_registerClassPair(gTextureClass);
     mw_log("the class HakiosMetalTexture is registered (a subclass of %s)",
            objc_getClass("_MTLTexture") != Nil ? "_MTLTexture"
@@ -5413,6 +5747,8 @@ static void mw_register_render_encoder_class(void)
                     (IMP)mw_render_set_stencil_reference, "v@:I");
     class_addMethod(gRenderEncoderClass, sel_registerName("setVertexBuffer:offset:atIndex:"),
                     (IMP)mw_render_set_vertex_buffer, "v@:@QQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setVertexBufferOffset:atIndex:"),
+                    (IMP)mw_render_set_vertex_buffer_offset, "v@:QQ");
     class_addMethod(gRenderEncoderClass, sel_registerName("setVertexBytes:length:atIndex:"),
                     (IMP)mw_render_set_vertex_bytes, "v@:r^vQQ");
     class_addMethod(gRenderEncoderClass, sel_registerName("setVertexTexture:atIndex:"),
@@ -5425,6 +5761,8 @@ static void mw_register_render_encoder_class(void)
         (IMP)mw_render_set_vertex_sampler_lod, "v@:@ffQ");
     class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentBuffer:offset:atIndex:"),
                     (IMP)mw_render_set_fragment_buffer, "v@:@QQ");
+    class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentBufferOffset:atIndex:"),
+                    (IMP)mw_render_set_fragment_buffer_offset, "v@:QQ");
     class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentBytes:length:atIndex:"),
                     (IMP)mw_render_set_fragment_bytes, "v@:r^vQQ");
     class_addMethod(gRenderEncoderClass, sel_registerName("setFragmentTexture:atIndex:"),

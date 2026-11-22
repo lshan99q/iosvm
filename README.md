@@ -96,6 +96,7 @@ Dates are commit dates on `main`. The repository has about 700 commits from 2026
 | 2026-11-22 | Stage 30 (experiment branch) — CoreAnimation's Metal renderer is reached: the `metallib` assert and six Apple-implementation walls are answered, and it **records its own indexed draws** (three triangles a frame, `com.apple.coreanimation.draw.*`); no picture yet (no AIR→SPIR-V, no render wire) | [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) |
 | 2026-11-22 | Stage 31 (experiment branch) — CoreAnimation's render encoder is **serialized on metalwire protocol 2**: render pass, 13 sets and 3 indexed draws a frame reach the host, which decodes and validates them (no pixels yet: WP-2 shaders) | [`docs/stage31-ca-metal-wire.md`](docs/stage31-ca-metal-wire.md) |
 | 2026-11-22 | Stage 32 (experiment branch) — the host **executes** CoreAnimation's three pipelines and 3 draws / 13 sets on Vulkan (lavapipe): four hand-written Vulkan GLSL base functions, three Vulkan pipelines created, no Vulkan/validation error; a picture still waits on the wire's missing per-draw offset setters and on texture uploads | [`docs/stage32-ca-metal-execute.md`](docs/stage32-ca-metal-execute.md) |
+| 2026-11-22 | Stage 33 (experiment branch, protocol 3) — **the picture appears**: per-draw buffer-offset setters and `replaceRegion:` (BGRA8 + R8Unorm) are on the wire, the display texture is a real IOSurface (≈300 physical segments), and the host renders CA's three recorded draws into it; the browser's JPEG stream shows the BootUI Apple logo. 0 VUID with the Khronos layer loaded; the v2 synthetic client stays 60/60 | [`docs/stage33-ca-metal-picture.md`](docs/stage33-ca-metal-picture.md) |
 
 ## Performance over time
 
@@ -124,7 +125,7 @@ The development dashboard, and how it is regenerated:
 | GPU acceleration | no — a CPU rasteriser is what this machine has | — |
 | animation smoothness | ~4–7 fps on the CPU rasteriser; **13.9 fps with the host drawing the frame** (one vCPU, the delivered setting); two pinned vCPUs reach ~15.9 fps but are not yet stable — [open problem](#multi-core-an-open-problem-stage-27) | [stage 25](docs/stage25-multicore.md), [stage 27](docs/stage27-multicore.md) |
 | complete frame, drawn on the host | **yes** — the guest's CoreAnimation calls are replayed on the host's GL, the result is what you see | [stage 23 verdict](docs/stage23-verdict.md) |
-| Metal calls translated to the host's Vulkan (experiment, separate branch) | **partly** — a Metal client's blit/present is recorded in the guest, executed on the host's Vulkan GPU and served in a browser; separately, CoreAnimation's Metal renderer is reached and its whole render encoder is **serialized on the wire** (stage 31 — the host decodes it; no picture yet: no shaders) | [stage 29](docs/stage29-metal-translation.md), [stage 30](docs/stage30-ca-metal.md), [stage 31](docs/stage31-ca-metal-wire.md) |
+| Metal calls translated to the host's Vulkan (experiment, separate branch) | **partly** — a Metal client's blit/present is recorded in the guest, executed on the host's Vulkan GPU and served in a browser; separately, CoreAnimation's Metal renderer is reached, its render encoder serialized, executed on Vulkan and — since stage 33 — its BootUI frame is a real picture in the browser (protocol 3) | [stage 29](docs/stage29-metal-translation.md), [stage 30](docs/stage30-ca-metal.md), [stage 33](docs/stage33-ca-metal-picture.md) |
 | watch that frame in a browser | **yes** — `tools/glwire/webview.py`, JPEG stream + clicks back through QMP | `tools/glwire/webview.html` |
 
 `docs/state-of-the-port.md` is the one-page handover view of the same table.
@@ -414,6 +415,7 @@ MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
 | 2026-11-22 | 第 30 阶段（实验分支）——CoreAnimation 的 Metal 渲染器被打通：越过 `metallib` 断言与六道 Apple 实现墙，**记录到它自己的索引绘制**（每帧三个三角形，`com.apple.coreanimation.draw.*`）；尚无画面（缺 AIR→SPIR-V 与渲染命令传输） | [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) |
 | 2026-11-22 | 第 31 阶段（实验分支）——CA 的 render encoder 被**序列化到 metalwire 协议 2**：每帧的 render pass、13 个 set、3 个索引绘制到达宿主并被解码校验（仍无像素：WP-2 着色器未做） | [`docs/stage31-ca-metal-wire.md`](docs/stage31-ca-metal-wire.md) |
 | 2026-11-22 | 第 32 阶段（实验分支）——宿主在 Vulkan（lavapipe）上**执行** CA 的 3 条 pipeline 与 3 个绘制 / 13 个 set：4 个手写 Vulkan GLSL 基函数、创建 3 条 Vulkan pipeline、无 Vulkan/校验错误；画面仍待协议补齐逐绘制 offset setter 与纹理上传 | [`docs/stage32-ca-metal-execute.md`](docs/stage32-ca-metal-execute.md) |
+| 2026-11-22 | 第 33 阶段（实验分支，协议 3）——**画面出现**：逐绘制 buffer offset setter 与 `replaceRegion:`（BGRA8 + R8Unorm）上线，显示纹理是真实 IOSurface（约 300 个物理段），宿主把 CA 的三个录制绘制渲染进去；浏览器 JPEG 流可见 BootUI 苹果 logo。加载 Khronos 校验层时 0 VUID；v2 合成客户端保持 60/60 | [`docs/stage33-ca-metal-picture.md`](docs/stage33-ca-metal-picture.md) |
 
 ## 当前能力
 

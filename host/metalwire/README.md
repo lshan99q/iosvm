@@ -1,6 +1,6 @@
 # metalwire host — executing a guest Metal frame on Vulkan (blits, and CA's render encoder)
 
-Status: experimental, branch `experiment/metal-translation`. This is the host half of the
+Status: experimental, branch `iosvm` (WP-3). This is the host half of the
 metalwire experiment (see [`PROTOCOL.md`](PROTOCOL.md) and
 [ADR-002](../../docs/adr/ADR-002-api-translation.md)); the guest half is
 `guest/metal-plugin/`. Nothing here is Apple code, and nothing here is a Metal implementation: a
@@ -27,6 +27,13 @@ created as real Vulkan pipelines from the four hand-written base functions in
 [`shaders/`](shaders/), and the recorded draws are replayed with the wire's buffers, textures,
 sampler, viewport and scissor. The blit path is unchanged and is what `make test` still measures;
 see [`../../docs/stage32-ca-metal-execute.md`](../../docs/stage32-ca-metal-execute.md).
+
+WP-3 (protocol 3) closes the two gaps that kept WP-2 from a picture: the per-draw buffer-offset
+setters are on the wire, and a texture's `replaceRegion:` bytes are uploaded to the Vulkan image
+(including `R8Unorm`). The display texture is a real IOSurface: the guest resolves its physical
+segments with `hakios_vtop`, the host writes the executed picture into the guest's surface and
+reads it back by reference for the browser. A boot frame now renders as the BootUI Apple logo —
+the picture path is in [`../../docs/stage33-ca-metal-picture.md`](../../docs/stage33-ca-metal-picture.md).
 
 ## Files
 
@@ -275,11 +282,11 @@ the shader composites), `nofetch` (no destination read: replace), `fixed` (fixed
 source-over), `fetch-noramp` (CA path with the R8 ramp empty, proving the ramp is sampled). See
 [`../../docs/spike-wp2-vulkan-glsl.md`](../../docs/spike-wp2-vulkan-glsl.md).
 
-Two known limits of this path, both recorded in `PROTOCOL.md` and the stage note: protocol 2 does
-not carry the two per-draw offset setters CA calls (`setVertexBufferOffset:`, `setFragmentBufferOffset:`),
-so all draws in a frame execute with the encoder's last full binding; and the guest does not upload
-texture pixels yet, so a layer image samples as zero content. Neither changes the acceptance of
-WP-2 (execution, not a picture) and both are WP-3 input.
+WP-3's wire additions are exercised by the real guest; the synthetic client still speaks v2 and
+remains the regression path. The host accepts both versions and echoes the peer's version in the
+ack. `--out DIR` now also writes render frames (`frame-%06u.ppm`, plus PNG with `--png-every`) and
+`--ram` is opened read/write when possible, which enables the IOSurface write-back; a read-only
+RAM file or a guest that cannot resolve the surface falls back to the Vulkan read-back.
 
 `MW_DEBUG_DRAWS=N` (environment) executes only the first N draws of a render frame; it is a
 bring-up aid, not a protocol feature.
@@ -291,10 +298,11 @@ bring-up aid, not a protocol feature.
   ARM shader compiler / AIR → SPIR-V), so these numbers say nothing about coverage of the system UI.
   They measure the smallest end-to-end version of the planned path.
 * **The delivered/measured blit path is not a picture either.** The v1 numbers below are blit
-  frames (buffer → texture → read-back). Render-encoder execution exists since WP-2, but its
-  picture is not claimed: the wire gaps above, the empty guest textures and the two inferred base
-  functions are WP-3 work. `MW_FILL_BUFFER` is in the protocol enum but has no wire structure in
-  v1, so the host fails it as `BAD_COMMAND` rather than inventing one.
+  frames (buffer → texture → read-back). Render-encoder execution is a picture since WP-3 for the
+  BootUI frame (Apple logo on black, drawn by CA's three recorded pipelines); the two reconstructed
+  base functions (`std_vert1_lpf`, `luma_boost_lpf`) and the wider SpringBoard pipeline set are
+  still limits. `MW_FILL_BUFFER` is in the protocol enum but has no wire structure in v1, so the
+  host fails it as `BAD_COMMAND` rather than inventing one.
 * **Pixels still cross the socket.** Like glwire, the picture bytes travel over TCP; the translation
   is Metal command → Vulkan command, and the host-side cost includes the real GPU round trip. It is
   not a zero-copy display path.
