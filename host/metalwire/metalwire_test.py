@@ -680,6 +680,99 @@ def run_draw_dump(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def run_material(env):
+    """WP-4 D3/D5: a Tmua material draw must sample its support texture, not paint white.
+
+    The Dock/Search bands come from `PBGRABsov_TmuaXfcn_IsrcCcl_Isup` (wp4-v12 dump lines
+    100/103/310/313): white vertex colour, fetch=1, fragment texture 3 = the support texture. The
+    host used to specialise that pipeline with HAS_TEXTURE=0 (the "Tmua" base function was not in
+    the texture list), so the fragment shader painted the wire's white colour opaque over the
+    fetched destination -- the flat white band. The fixture draws a non-white support texture
+    through the same pipeline name over a cleared target; the picture must be the texture.
+    """
+    size = metalwire_gen.MATERIAL_SIZE
+    pattern = metalwire_gen.MATERIAL_PATTERN
+    expected = bytearray()
+    for at in range(0, len(pattern), 4):
+        b, g, r, a = pattern[at:at + 4]
+        expected += bytes((r * a // 255, g * a // 255, b * a // 255))  # premultiplied source
+    expected = bytes(expected)
+    work = tempfile.mkdtemp(prefix="metalwire-material-")
+    out_dir = os.path.join(work, "frames")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "1", "--shm", "", "--out", out_dir,
+         "--png-every", "1", "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "material host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the material host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--material", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        require(gen.returncode == 0,
+                "material generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout,
+                                                           gen.stderr))
+        require(host.wait(timeout=60) == 0,
+                "material host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("material frame 1: ack status=ok" in gen.stdout,
+                "the material frame was not acknowledged:\n%s" % gen.stdout)
+        require("PBGRABsov_TmuaXfcn_IsrcCcl_Isup\" -> Vulkan pipeline (topology 3, texture 1, "
+                "fetch 1)" in output,
+                "the Tmua material pipeline was not specialised as a textured fetch draw:\n%s" %
+                output)
+        ppm_path = os.path.join(out_dir, "frame-000000.ppm")
+        with open(ppm_path, "rb") as f:
+            data = f.read()
+        header = b"P6\n%d %d\n255\n" % (size, size)
+        require(data.startswith(header), "%s: bad P6 header" % ppm_path)
+        pixels = data[len(header):]
+        require(pixels == expected,
+                "%s: the material picture is not the support texture (first pixel %s, expected "
+                "%s)" % (ppm_path, tuple(pixels[0:3]), tuple(expected[0:3])))
+        require(any(byte != 255 for byte in pixels),
+                "the material picture is still opaque white (the D3/D5 defect)")
+        png_path = os.path.join(out_dir, "frame-000000.png")
+        width, height, png_pixels = read_png_rgb(png_path)
+        require((width, height) == (size, size), "%s: %dx%d" % (png_path, width, height))
+        require(png_pixels == pixels, "%s differs from the PPM of the same frame" % png_path)
+        print("PASS material: a Tmua (support-texture + fetch) draw samples the texture -- the "
+              "picture is the support pattern, not opaque white (D3/D5 host semantics)")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- material host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def read_png_rgb(path):
     """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
     with open(path, "rb") as f:
@@ -960,10 +1053,11 @@ def main():
         run_blur_pipelines(env)
         run_labels(env)
         run_draw_dump(env)
+        run_material(env)
         run_chain(env)
         run_orientation(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
-              "labels, draw-dump, chain, orientation)" % (WIDTH, HEIGHT, FRAMES))
+              "labels, draw-dump, material, chain, orientation)" % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)

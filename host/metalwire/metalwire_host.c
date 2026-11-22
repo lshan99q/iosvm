@@ -3884,7 +3884,17 @@ static int mw_pipeline_fetches(const struct mw_render_pipeline *pipeline)
  * were known, and a `Tds*`/`Tn*` pipeline would have been created without a sampler binding. */
 static int mw_pipeline_has_texture(const struct mw_render_pipeline *pipeline)
 {
+    /*
+     * WP-4 D3/D5: `Tmua` is CA's "multiply alpha" material base function -- the Dock/Search
+     * material binds a support texture (fragment texture 3) that modulates the layer colour. It
+     * was missing from this list, so the fragment shader specialised HAS_TEXTURE=0 and painted the
+     * wire's white vertex colour opaque over the fetched destination: the flat white Dock/Search
+     * band (boot wp4-v12 dump lines 100/103/310/313, host log "texture 0, fetch 1"). Treating it
+     * as textured hands the draw to the existing texture * colour path; a Tmua draw without a
+     * bound texture keeps the dummy view and the previous white behaviour.
+     */
     return strstr(pipeline->name, "Timg") != NULL || strstr(pipeline->name, "Tlub") != NULL ||
+           strstr(pipeline->name, "Tmua") != NULL ||
            strstr(pipeline->name, "Tds4") != NULL || strstr(pipeline->name, "Tds8") != NULL ||
            strstr(pipeline->name, "Tnb7") != NULL || strstr(pipeline->name, "Tn11") != NULL ||
            strstr(pipeline->name, "Tn15") != NULL || strstr(pipeline->name, "Tn19") != NULL ||

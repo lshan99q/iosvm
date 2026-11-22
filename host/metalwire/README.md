@@ -201,6 +201,10 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
   missing report) and every tile matches the box/binomial kernel the shaders document to within
   2/255, including its PNG,
+* the material semantics (WP-4 D3/D5): a `PBGRABsov_TmuaXfcn_IsrcCcl_Isup` draw with a non-white
+  32x32 support texture, white layer colour and fetch=1 over a cleared target; the host must
+  specialise it as `texture 1, fetch 1` and the picture must be the support pattern, not opaque
+  white. A host without `Tmua` in its texture list paints (255,255,255) and the test fails,
 * the draw dump (WP-4 D3/D5 support): with `MW_DUMP_DRAWS=1` and `MW_DUMP_DRAWS_FILE=<path>` the
   host writes one machine-readable line per executed draw -- `seq`, `frame`, the pipeline name,
   the stream-1 vertex colour half4, the fragment uniform's buffer/offset and first 16 bytes
@@ -336,6 +340,13 @@ The execution half:
   write-back -- in the same framebuffer row order. Without it the whole desktop came out
   vertically mirrored (stage 34's symptom: status bar at the bottom); the BootUI only looked right
   because the Apple logo is nearly symmetric;
+* treats CA's `Tmua` base function as a textured material draw: it binds a support texture and
+  fetches the destination, and its white layer colour is only the *modulation* -- the support
+  texture decides the pixels. Missing it from the texture list specialised the pipeline with
+  HAS_TEXTURE=0, so the fragment shader painted the wire's white colour opaque over the fetched
+  destination: the flat white Dock/Search band of boot wp4-v12 (dump lines 100/103/310/313, host
+  log "texture 0, fetch 1"). A `Tmua` draw without a bound texture keeps the dummy view and the
+  previous behaviour;
 * creates the image view of an `A8Unorm` texture (CA's glyph/label mask) with a
   `(1, 1, 1, coverage)` component swizzle: the byte is coverage, which Metal's A8 view exposes as
   alpha with a zero colour, so the host's R8 image would otherwise feed the fragment stage
