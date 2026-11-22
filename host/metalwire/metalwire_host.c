@@ -625,6 +625,11 @@ static inline int mw_format_is_half_float(uint32_t format)
     return format == MW_FORMAT_RGBA16_FLOAT;
 }
 
+static inline int mw_format_is_rg8(uint32_t format)
+{
+    return format == MW_FORMAT_RG8_UNORM;
+}
+
 static inline int mw_format_is_one_byte(uint32_t format)
 {
     return format == MW_FORMAT_R8_UNORM || format == MW_FORMAT_A8_UNORM;
@@ -694,6 +699,18 @@ static void mw_pixels_to_rgb(const unsigned char *pixels, uint32_t width, uint32
         }
         return;
     }
+    if (mw_format_is_rg8(format)) {
+        /* Two channels, no blue: R and G are the picture, B stays 0. */
+        for (size_t i = 0; i < count; i++) {
+            const unsigned char *p = pixels + i * 2;
+            unsigned char *o = rgb + i * 3;
+
+            o[0] = p[0];
+            o[1] = p[1];
+            o[2] = 0;
+        }
+        return;
+    }
     if (mw_format_is_one_byte(format)) {
         /* A single channel has no colour of its own: a saved mask or ramp reads as grey. */
         for (size_t i = 0; i < count; i++)
@@ -734,6 +751,18 @@ static void mw_pixels_to_bgra(const unsigned char *pixels, size_t bytes, uint32_
             o[1] = mw_half_to_unorm8(mw_load_le16(p + 2)); /* G */
             o[2] = mw_half_to_unorm8(mw_load_le16(p + 0)); /* R */
             o[3] = mw_half_to_unorm8(mw_load_le16(p + 6)); /* A */
+        }
+        return;
+    }
+    if (mw_format_is_rg8(format)) {
+        for (size_t i = 0; i < bytes / 2; i++) {
+            const unsigned char *p = pixels + i * 2;
+            unsigned char *o = bgra + i * 4;
+
+            o[0] = 0;      /* B */
+            o[1] = p[1];   /* G */
+            o[2] = p[0];   /* R */
+            o[3] = 255;    /* A */
         }
         return;
     }
@@ -1074,6 +1103,8 @@ static uint32_t mw_format_bytes(uint32_t format)
         return 1u;
     if (mw_format_is_half_float(format))
         return 8u;
+    if (mw_format_is_rg8(format))
+        return 2u;
     return MW_PIXEL_BYTES;
 }
 
@@ -1082,7 +1113,8 @@ static uint32_t mw_format_bytes(uint32_t format)
 static int mw_format_is_known(uint32_t format)
 {
     return format == MW_FORMAT_BGRA8_UNORM || format == MW_FORMAT_RGBA8_UNORM ||
-           mw_format_is_one_byte(format) || mw_format_is_half_float(format);
+           mw_format_is_one_byte(format) || mw_format_is_half_float(format) ||
+           mw_format_is_rg8(format);
 }
 
 static const char *mw_format_name(uint32_t format)
@@ -1098,6 +1130,8 @@ static const char *mw_format_name(uint32_t format)
         return "A8";
     case MW_FORMAT_RGBA16_FLOAT:
         return "RGBA16Float";
+    case MW_FORMAT_RG8_UNORM:
+        return "RG8";
     default:
         return "unknown";
     }
@@ -1111,6 +1145,8 @@ static VkFormat mw_vk_format(uint32_t format)
         return VK_FORMAT_R8_UNORM;
     if (mw_format_is_half_float(format))
         return VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (mw_format_is_rg8(format))
+        return VK_FORMAT_R8G8_UNORM;
     return VK_FORMAT_B8G8R8A8_UNORM;
 }
 

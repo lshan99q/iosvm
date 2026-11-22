@@ -139,6 +139,11 @@ enum mw_pixel_format {
     MW_FORMAT_BGRA8_UNORM = 80, /* MTLPixelFormatBGRA8Unorm */
     MW_FORMAT_RGBA8_UNORM = 70, /* MTLPixelFormatRGBA8Unorm */
     MW_FORMAT_R8_UNORM = 10,    /* MTLPixelFormatR8Unorm: CoreAnimation's luma-boost ramp */
+    /* MTLPixelFormatRG8Unorm (iPhoneOS16.5 Metal.framework/Headers/MTLPixelFormat.h: = 30): two
+     * 8-bit unsigned normalized channels, 2 bytes a texel, alpha is 1.0. Boot wp4-v14 created a
+     * 23x32 one of these (CoreAnimation's two-channel support texture, pipeline
+     * PBGRABsov_TmuaXfc_Ixrg_Isrg) and the host answered "pixel format 30 is not implemented". */
+    MW_FORMAT_RG8_UNORM = 30,
     /* MTLPixelFormatRGBA16Float: four IEEE-754 binary16 values, 8 bytes a texel. CoreAnimation
      * hands the compositor its colour ramp in this format. */
     MW_FORMAT_RGBA16_FLOAT = 115,

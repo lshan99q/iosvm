@@ -1240,6 +1240,148 @@ def run_dual_buffer(args):
     return 0 if failures == 0 else 1
 
 
+
+# WP-4 t26: MTLPixelFormatRG8Unorm = 30 (iPhoneOS16.5 Metal.framework MTLPixelFormat.h), two
+# 8-bit unsigned normalized channels, 2 bytes a texel, alpha 1.0. Boot wp4-v14 created a 23x32 one
+# (pipeline PBGRABsov_TmuaXfc_Ixrg_Isrg, CoreAnimation's two-channel support texture) and the host
+# answered "pixel format 30 is not implemented; its draws are skipped".
+MW_FORMAT_RG8 = 30
+RG8_WIDTH = 256
+RG8_HEIGHT = 2
+
+
+def make_rg8_ramp():
+    """A 256x2 RG8 picture: row 0 walks R = x, G = 255 - x; row 1 keeps R = x and G = x / 2.
+
+    Every value is a byte the host can carry without scaling, so the PPM conversion (R, G, 0) and
+    the read-back of the raw texels have an exact expected value.
+    """
+    out = bytearray()
+    for y in range(RG8_HEIGHT):
+        for x in range(RG8_WIDTH):
+            out += bytes((x & 0xFF, ((255 - x) if y == 0 else (x // 2)) & 0xFF))
+    return bytes(out)
+
+
+def run_rg8_ramp(args):
+    """One frame presenting a 256x2 RG8 texture, one frame sampling it into a BGRA target.
+
+    Frame 0 proves creation, the 2-byte-texel blit and the read-back: the ack CRC covers the exact
+    bytes the client sent. Frame 1 draws the same texture through a Timg pipeline into a 256x2 BGRA
+    target and the test checks the PPM is (R, G, 0), i.e. the host sampled the two channels.
+    """
+    ramp = make_rg8_ramp()
+    row_bytes = RG8_WIDTH * 2
+    if len(ramp) != row_bytes * RG8_HEIGHT:
+        print("metalwire_gen: internal: the ramp is %d bytes, expected %d" %
+              (len(ramp), row_bytes * RG8_HEIGHT), file=sys.stderr)
+        return 2
+    wire = bytearray(262144)
+    uniform = bytearray(176)
+    uniform[72] = 1  # Uniform.premultiply, the P in PBGRA
+    mvp = ((2.0 / RG8_WIDTH, 0.0, 0.0, 0.0),
+           (0.0, -2.0 / RG8_HEIGHT, 0.0, 0.0),
+           (0.0, 0.0, 0.0, 0.0),
+           (-1.0, 1.0, 0.0, 1.0))
+    for row, values in enumerate(mvp):
+        struct.pack_into("<4f", wire, 240 + 16 * row, *values)
+    for vertex, (x, y) in enumerate(((0.0, 0.0), (RG8_WIDTH, 0.0),
+                                     (RG8_WIDTH, RG8_HEIGHT), (0.0, RG8_HEIGHT))):
+        at = 336 + vertex * 48
+        struct.pack_into("<4f", wire, at, x, y, 0.0, 1.0)
+        struct.pack_into("<2f", wire, at + 16, x, y)  # texels; the lod scale normalises them
+        struct.pack_into("<2f", wire, at + 24, 0.0, 0.0)
+        struct.pack_into("<4e", wire, at + 32, 1.0, 1.0, 1.0, 1.0)
+    struct.pack_into("<6H", wire, 528, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<4f", wire, 544, 1.0 / RG8_WIDTH, 1.0 / RG8_HEIGHT, 0.0, 0.0)
+    wire = bytes(wire)
+    attributes = [(31, 0, 1), (29, 16, 1), (29, 24, 1), (27, 32, 1)] + [(0, 0, 0)] * 12
+    layouts = [(0, 1, 1), (48, 1, 1)] + [(0, 1, 1)] * 6
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-rg8"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 52, 0, len(ramp)))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 93, 0, 176))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 94, 0, len(wire)))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 61, RG8_WIDTH, RG8_HEIGHT, MW_FORMAT_RG8,
+                                                   1, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 91, RG8_WIDTH, RG8_HEIGHT, 80, 5, 0))
+        client.send(MW_CREATE_SAMPLER, struct.pack("<9I2f2I", 45, 0, 0, 0, 0, 0, 0, 1, 0,
+                                                   0.0, 0.0, 1, 0))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(150,
+                                             "com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+
+        # Frame 0: upload the ramp, blit it into the RG8 texture, present it. The ack CRC covers
+        # the raw 2-byte texels the client sent.
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 0, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 52, 0, len(ramp), 0) + ramp)
+        client.send(MW_COPY_BUFFER_TO_TEXTURE,
+                    struct.pack("<IIQ6I", 52, 61, 0, row_bytes, len(ramp), RG8_WIDTH, RG8_HEIGHT,
+                                0, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 61, 0))
+        encoded = time.monotonic_ns() - begin
+        crc = zlib.crc32(ramp) & 0xFFFFFFFF
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 0, encoded, crc, RG8_WIDTH, RG8_HEIGHT,
+                                              row_bytes))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK or ack[3] != 0 or ack[7] != 1:
+            failures += 1
+            print("rg8 frame 0: host status %d seq %d crc_ok %d (sent 0x%08x, read 0x%08x)" %
+                  (ack[2], ack[3], ack[7], crc, ack[6]), flush=True)
+        else:
+            print("rg8 frame 0: ack status=ok crc_ok=1 crc=0x%08x, %dx%d row %d" %
+                  (crc, RG8_WIDTH, RG8_HEIGHT, row_bytes), flush=True)
+
+        # Frame 1: sample the RG8 texture into a 256x2 BGRA target and present it.
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 1, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 93, 0, len(uniform), 0) + uniform)
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 94, 0, len(wire), 0) + wire)
+        client.send(MW_RENDER_BEGIN,
+                    _begin_payload(0, 91, RG8_WIDTH, RG8_HEIGHT, 80, 2, 1,
+                                   (0.0, 0.0, 0.0, 0.0)))
+        client.send(MW_RENDER_SET_VIEWPORT,
+                    struct.pack("<6f", 0.0, 0.0, float(RG8_WIDTH), float(RG8_HEIGHT), 0.0, 1.0))
+        client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 150, 0))
+        client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 0, 0, RG8_WIDTH, RG8_HEIGHT))
+        client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 93, 1, 0))
+        client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 61, 3))
+        client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 94, 1, 336))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 94, 2, 240))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 94, 3, 544))
+        client.send(MW_RENDER_DRAW, _draw_payload(6, 528, 94))
+        client.send(MW_RENDER_END, struct.pack("<4I", 0, 1, 7, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 91, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 1, encoded, 0, RG8_WIDTH, RG8_HEIGHT,
+                                              RG8_WIDTH * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK or ack[3] != 1:
+            failures += 1
+            print("rg8 frame 1: host status %d seq %d" % (ack[2], ack[3]), flush=True)
+        else:
+            print("rg8 frame 1: ack status=ok", flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 # WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
 # top at NDC y=+1; Vulkan's viewport maps y down. The host compensates with a negative viewport
 # height, so framebuffer row y must come out as the source row y -- in the present read-back, the
@@ -1455,6 +1597,9 @@ def main(argv):
                         help="send one seed frame and three render frames through the "
                              "downsample_4 / narrow_blur_23 / narrow_blur_15 pipelines, the "
                              "WP-4 1.2 regression")
+    parser.add_argument("--rg8", action="store_true",
+                        help="a 256x2 MTLPixelFormatRG8Unorm (30) texture: present it, then sample "
+                             "it into a BGRA target, the WP-4 format-30 regression")
     parser.add_argument("--dual-buffer", action="store_true",
                         help="two alternating targets, static layer drawn once each, later frames "
                              "repaint only the clock with load=LOAD, the WP-4 D8 regression")
@@ -1478,6 +1623,8 @@ def main(argv):
         return run_rgba16f_ramp(args)
     if args.blur_pipelines:
         return run_blur_pipelines(args)
+    if args.rg8:
+        return run_rg8_ramp(args)
     if args.dual_buffer:
         return run_dual_buffer(args)
     if args.material:

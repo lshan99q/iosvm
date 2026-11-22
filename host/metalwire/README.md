@@ -206,6 +206,9 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   Every clock frame must show the full static layers: a host that copies the previous frame
   unconditionally lets the poor 91 erase 90's layers (boot wp4-v14's missing Dock/Search), and a
   host that never copies leaves the clock on black in 91 (boot wp4-v13's flicker),
+* the RG8 format (WP-4 t26): a 256x2 `MTLPixelFormatRG8Unorm` picture is uploaded (2-byte texels),
+  presented (the ack CRC must match the bytes the client sent) and sampled into a BGRA target; both
+  PPMs must be (R, G, 0), no draw may be skipped and the missing report stays empty,
 * the material semantics (WP-4 D3/D5): a `PBGRABsov_TmuaXfcn_IsrcCcl_Isup` draw with a non-white
   32x32 support texture, white layer colour and fetch=1 over a cleared target; the host must
   specialise it as `texture 1, fetch 1` and the picture must be the support pattern, not opaque

@@ -880,6 +880,102 @@ def run_dual_buffer(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def run_rg8(env):
+    """WP-4 t26: MTLPixelFormatRG8Unorm (30) has to cross the wire like the 8-bit formats.
+
+    Boot wp4-v14 answered "texture 146: pixel format 30 is not implemented; its draws are skipped"
+    (wire error 1) for CoreAnimation's two-channel support texture. This runs two frames: one
+    presents a 256x2 RG8 picture (creation, the 2-byte-texel blit, the read-back CRC against the
+    bytes the client sent and the PPM conversion), the other samples the same texture through a
+    Timg pipeline into a BGRA target (the Vulkan R8G8_UNORM sampling and the PPM again). Both PPMs
+    must be (R, G, 0) and the missing report must stay empty.
+    """
+    ramp = metalwire_gen.make_rg8_ramp()
+    expected = b"".join(bytes((ramp[i], ramp[i + 1], 0)) for i in range(0, len(ramp), 2))
+    work = tempfile.mkdtemp(prefix="metalwire-rg8-")
+    out_dir = os.path.join(work, "frames")
+    missing = os.path.join(work, "missing.txt")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "2", "--shm", "", "--out", out_dir,
+         "--png-every", "1", "--missing-report", missing, "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "rg8 host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the rg8 host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--rg8", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        require(gen.returncode == 0,
+                "rg8 generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require(host.wait(timeout=120) == 0,
+                "rg8 host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("ack status=ok crc_ok=1" in gen.stdout,
+                "the presented RG8 picture did not read back byte-identical:\n%s" % gen.stdout)
+        require("rg8 frame 1: ack status=ok" in gen.stdout,
+                "the RG8 sampling frame was not acknowledged:\n%s" % gen.stdout)
+        require("texture 61: 256x2 format 30, 1024 bytes" in output,
+                "the host did not create the RG8 texture:\n%s" % output)
+        require("render frame 1: executed 1 of 1" in output,
+                "the RG8 sampling draw did not execute:\n%s" % output)
+        require("is not implemented" not in output and "is not on the host" not in output,
+                "the host still rejects the format:\n%s" % output)
+        with open(missing) as handle:
+            report = handle.read()
+        require("frames 2, pipelines 0, skipped draws 0" in report,
+                "the missing report is not empty:\n%s" % report)
+        for index in (0, 1):
+            path = os.path.join(out_dir, "frame-%06d.ppm" % index)
+            with open(path, "rb") as f:
+                data = f.read()
+            header = b"P6\n%d %d\n255\n" % (metalwire_gen.RG8_WIDTH, metalwire_gen.RG8_HEIGHT)
+            require(data.startswith(header), "%s: bad P6 header" % path)
+            pixels = data[len(header):]
+            require(pixels == expected,
+                    "%s: the picture is not (R, G, 0) of the RG8 texels (first pixel %s, "
+                    "expected %s)" % (path, tuple(pixels[0:3]), tuple(expected[0:3])))
+        png_path = os.path.join(out_dir, "frame-000001.png")
+        width, height, png_pixels = read_png_rgb(png_path)
+        require((width, height) == (metalwire_gen.RG8_WIDTH, metalwire_gen.RG8_HEIGHT),
+                "%s: %dx%d" % (png_path, width, height))
+        require(png_pixels == expected, "%s differs from the RG8 PPM" % png_path)
+        print("PASS rg8: a 256x2 MTLPixelFormatRG8Unorm (30) texture is created, blitted, "
+              "presented and sampled -- 0 skipped, missing report empty, both PPMs are (R, G, 0)")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- rg8 host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def read_png_rgb(path):
     """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
     with open(path, "rb") as f:
@@ -1157,6 +1253,7 @@ def main():
         print("PASS files: %d PPM frame(s) match the sent picture, PNG headers are valid" % FRAMES)
         run_v4_fallback(env)
         run_format115(env)
+        run_rg8(env)
         run_blur_pipelines(env)
         run_labels(env)
         run_draw_dump(env)
@@ -1164,8 +1261,8 @@ def main():
         run_dual_buffer(env)
         run_chain(env)
         run_orientation(env)
-        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
-              "labels, draw-dump, material, dual-buffer, chain, orientation)"
+        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, rg8, "
+              "blur, labels, draw-dump, material, dual-buffer, chain, orientation)"
               % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
