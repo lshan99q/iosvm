@@ -95,3 +95,12 @@
 1. 读 `/home/lshan/dsh.MD/Scion-巡检定时任务.md` 最后两段，确认 exp/code 没有在跑的活。
 2. 用 `schedule_edit` 把每 5 小时的巡检任务目标改成**新会话自己**（`target: this_session`）。
 3. 继续第四节的实验；有结论再报主人，不要空转。
+
+## 2026-11-22 19:15 交接：画面瑕疵（下一位 agent 从这里开始）
+- 全部细节与实验记录：**`docs/stage26-visual-defects.md`**（十三节，含每个实验的命令、数字、结论）。
+- 一句话状态：**虚线已默认修好；绿块、黑洞有可用开关并验证到“基本干净”，残留一处橄榄绿残块待处理**。
+- 交付建议配置（跑法见 `/tmp/s25-smp-pin.sh` 重建版）：
+  `PATCH_FILE=host-picture-clean.bgra PATCH_COV=0.10 GLWIRE_SKIP_THIN_LINES=2 GLWIRE_KEEP_PREV=1 GLWIRE_SEED_PATCH=1 GLWIRE_CLEAN_GREEN=1`
+- 已知残留：① 右半屏橄榄绿残块（clean 阈值或调用顺序问题）；② 少数标签残影。
+- 禁止再投入（已 3 次失败）：把虚线当采样问题（force-linear）、把 3x 当交付（慢 2.6 倍）、按固定行号 scrub lab 区域。
+- 机器状态：无 VM、无录制进程；`breeze-tts`/ollama 属他人服务，未动。
