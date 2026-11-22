@@ -95,6 +95,7 @@ Dates are commit dates on `main`. The repository has about 700 commits from 2026
 | 2026-11-22 | Stage 29 (experiment branch) — a Metal client's commands are recorded in the guest, translated to Vulkan on the host and shown in a browser: 2,000/2,000 frames byte-exact, 58.3 fps median for the synthetic 750×1624 client; CoreAnimation still draws through GL | [`experiment/metal-translation`](docs/stage29-metal-translation.md) |
 | 2026-11-22 | Stage 30 (experiment branch) — CoreAnimation's Metal renderer is reached: the `metallib` assert and six Apple-implementation walls are answered, and it **records its own indexed draws** (three triangles a frame, `com.apple.coreanimation.draw.*`); no picture yet (no AIR→SPIR-V, no render wire) | [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) |
 | 2026-11-22 | Stage 31 (experiment branch) — CoreAnimation's render encoder is **serialized on metalwire protocol 2**: render pass, 13 sets and 3 indexed draws a frame reach the host, which decodes and validates them (no pixels yet: WP-2 shaders) | [`docs/stage31-ca-metal-wire.md`](docs/stage31-ca-metal-wire.md) |
+| 2026-11-22 | Stage 32 (experiment branch) — the host **executes** CoreAnimation's three pipelines and 3 draws / 13 sets on Vulkan (lavapipe): four hand-written Vulkan GLSL base functions, three Vulkan pipelines created, no Vulkan/validation error; a picture still waits on the wire's missing per-draw offset setters and on texture uploads | [`docs/stage32-ca-metal-execute.md`](docs/stage32-ca-metal-execute.md) |
 
 ## Performance over time
 
@@ -412,6 +413,7 @@ MIT for this project's code (`LICENSE`); Apple's open-source XNU keeps its APSL
 | 2026-11-22 | 第 29 阶段（实验分支）——客人机 Metal 客户端的命令被翻译为宿主 Vulkan 并显示在浏览器中：2000/2000 帧逐字节一致，合成 750×1624 客户端中位 58.3 fps；CoreAnimation 仍走 GL | [`experiment/metal-translation`](docs/stage29-metal-translation.md) |
 | 2026-11-22 | 第 30 阶段（实验分支）——CoreAnimation 的 Metal 渲染器被打通：越过 `metallib` 断言与六道 Apple 实现墙，**记录到它自己的索引绘制**（每帧三个三角形，`com.apple.coreanimation.draw.*`）；尚无画面（缺 AIR→SPIR-V 与渲染命令传输） | [`docs/stage30-ca-metal.md`](docs/stage30-ca-metal.md) |
 | 2026-11-22 | 第 31 阶段（实验分支）——CA 的 render encoder 被**序列化到 metalwire 协议 2**：每帧的 render pass、13 个 set、3 个索引绘制到达宿主并被解码校验（仍无像素：WP-2 着色器未做） | [`docs/stage31-ca-metal-wire.md`](docs/stage31-ca-metal-wire.md) |
+| 2026-11-22 | 第 32 阶段（实验分支）——宿主在 Vulkan（lavapipe）上**执行** CA 的 3 条 pipeline 与 3 个绘制 / 13 个 set：4 个手写 Vulkan GLSL 基函数、创建 3 条 Vulkan pipeline、无 Vulkan/校验错误；画面仍待协议补齐逐绘制 offset setter 与纹理上传 | [`docs/stage32-ca-metal-execute.md`](docs/stage32-ca-metal-execute.md) |
 
 ## 当前能力
 

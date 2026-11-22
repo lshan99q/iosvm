@@ -165,6 +165,254 @@ class Client:
         return ACK.unpack(self._recv_exactly(ACK.size))
 
 
+# ---- stage C: a synthetic render frame (the WP-2 execution harness) ---------------------------
+#
+# This is not the guest: it speaks protocol 2 directly, with the same 13 sets and 3 draws the
+# CoreAnimation boot recorded (docs/stage31-ca-metal-wire.md), and a buffer laid out the way the
+# captured CA buffer was (uniforms at 0, mvp at 240, quads at 336/576/816, indices at
+# 528/768/1008, lod at 540/780/1020, texture matrix at 544). It lets the Vulkan execution half be
+# exercised on lavapipe without a guest boot:
+#
+#     ./metalwire_host --gpu 1 --shm /dev/shm/wp2 --port 9131
+#     ./metalwire_gen.py --render --variant fetch --port 9131
+#
+# --variant selects what draw B's pipeline does, which is the WP-2 blending experiment:
+#   fetch   PBGRABsov_TimgXfc_Isrc, blendingEnabled = NO: the fragment shader reads the destination
+#           (framebuffer fetch) and does source-over itself -- the CA path
+#   nofetch PBGRA_TimgXfc, blendingEnabled = NO: the fragment writes its colour, no compositing
+#   fixed   PBGRA_TimgXfc, blendingEnabled = YES with source-alpha/one-minus-source-alpha
+#
+# The three variants draw the same two full-screen quads (a green background, then a 50%-alpha red
+# texture) plus the luma-boost pass, so the read-back centre pixel says which composition happened.
+
+MW_CREATE_RENDER_PIPELINE = 0x0073
+MW_CREATE_SAMPLER = 0x0074
+MW_CREATE_DEPTH_STENCIL = 0x0075
+MW_RENDER_BEGIN = 0x0060
+MW_RENDER_SET_PIPELINE = 0x0061
+MW_RENDER_SET_DEPTH_STENCIL = 0x0062
+MW_RENDER_SET_VERTEX_BUFFER = 0x0063
+MW_RENDER_SET_VERTEX_BYTES = 0x0064
+MW_RENDER_SET_VERTEX_TEXTURE = 0x0065
+MW_RENDER_SET_VERTEX_SAMPLER = 0x0066
+MW_RENDER_SET_FRAGMENT_BUFFER = 0x0067
+MW_RENDER_SET_FRAGMENT_BYTES = 0x0068
+MW_RENDER_SET_FRAGMENT_TEXTURE = 0x0069
+MW_RENDER_SET_FRAGMENT_SAMPLER = 0x006A
+MW_RENDER_SET_VIEWPORT = 0x006B
+MW_RENDER_SET_SCISSOR = 0x006C
+MW_RENDER_SET_BLEND_COLOR = 0x0070
+MW_RENDER_DRAW = 0x0071
+MW_RENDER_END = 0x0072
+
+MW_DRAW_INDEXED = 0x0001
+
+RENDER_WIDTH = 750
+RENDER_HEIGHT = 1624
+
+
+
+
+def _render_buffer(premultiply):
+    """The 256 KiB wire buffer in the captured layout: uniforms, MVP, three quads, indices, lod."""
+    buf = bytearray(262144)
+
+    # Fragment Uniform: byte 72 is the premultiply flag (the P in PBGRA). Draw A itself is opaque.
+    buf[72] = 1 if premultiply else 0
+    # hdr_scale (half2 at offset 68) makes the luma pass measurably scale what it reads, so the
+    # R8 ramp is actually sampled rather than silently skipped.
+    struct.pack_into("<2e", buf, 68, 0.5, 0.5)
+
+    # mvp_matrix: rows, as CA::OGL::Metal's fixed vertex function consumes them.
+    mvp = ((2.0 / RENDER_WIDTH, 0.0, 0.0, 0.0),
+           (0.0, -2.0 / RENDER_HEIGHT, 0.0, 0.0),
+           (0.0, 0.0, 0.0, 0.0),
+           (-1.0, 1.0, 0.0, 1.0))
+    for i, row in enumerate(mvp):
+        struct.pack_into("<4f", buf, 240 + 16 * i, *row)
+
+    def quad(offset, colour):
+        positions = ((0.0, 0.0), (RENDER_WIDTH, 0.0), (RENDER_WIDTH, RENDER_HEIGHT), (0.0, RENDER_HEIGHT))
+        texcoords = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+        for i, ((x, y), (u, v)) in enumerate(zip(positions, texcoords)):
+            at = offset + i * 48
+            struct.pack_into("<4f", buf, at, x, y, 0.0, 1.0)
+            struct.pack_into("<2f", buf, at + 16, u, v)
+            struct.pack_into("<2f", buf, at + 24, 0.0, 0.0)
+            struct.pack_into("<4e", buf, at + 32, *colour)
+
+    quad(336, (0.2, 0.8, 0.2, 1.0))          # draw A: opaque green background
+    struct.pack_into("<6H", buf, 528, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<f", buf, 540, 0.0)    # lod_bias for draw A
+    struct.pack_into("<4f", buf, 544, 1.0, 1.0, 0.0, 0.0)  # texture matrix (identity)
+
+    quad(576, (1.0, 1.0, 1.0, 1.0))          # draw B: white tint, 50%-alpha red texture
+    struct.pack_into("<6H", buf, 768, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<f", buf, 780, 0.0)
+
+    quad(816, (1.0, 1.0, 1.0, 1.0))          # draw C: luma-boost pass
+    struct.pack_into("<6H", buf, 1008, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<f", buf, 1020, 0.0)
+    return bytes(buf)
+
+
+def _image_pixels_bgra(width, height):
+    """4x4 red with 50% alpha, and the 128x1 R8 luma ramp."""
+    texture = bytearray()
+    for _ in range(width * height):
+        texture += bytes((0, 0, 255, 128))
+    return bytes(texture)
+
+
+def _luma_ramp():
+    return bytes((i * 255) // 127 for i in range(128))
+
+
+def _create_pipeline_payload(pid, name, vertex, fragment, attributes, layouts, blend=False):
+    # MTLBlendFactor SourceAlpha = 4, OneMinusSourceAlpha = 5; MTLBlendOperation Add = 0.
+    header = struct.pack("<14I", pid, 80, 1, 1 if blend else 0,
+                         0, 0, 4 if blend else 1, 5 if blend else 0,
+                         4 if blend else 1, 5 if blend else 0, 0xf,
+                         len(attributes), len(layouts), 0)
+    header += name.encode()[:63].ljust(64, b"\0")
+    header += vertex.encode()[:63].ljust(64, b"\0")
+    header += fragment.encode()[:63].ljust(64, b"\0")
+    for fmt, offset, buffer_index in attributes:
+        header += struct.pack("<4I", fmt, offset, buffer_index, 0)
+    for stride, step, rate in layouts:
+        header += struct.pack("<4I", stride, step, rate, 0)
+    return header
+
+
+def _draw_payload(index_count, index_offset, index_buffer=42):
+    return struct.pack("<6I4Qq", 3, MW_DRAW_INDEXED, 0, index_buffer, 1, 0,
+                       0, 0, index_count, index_offset, 0)
+
+
+def _begin_payload(encoder, target, width, height, pixel_format, load, store, clear):
+    return struct.pack("<7I4f4IfII", encoder, target, width, height, pixel_format, load, store,
+                       *clear, 0, 0, 0, 0, 0.0, 0, 0)
+
+
+def run_render(args):
+    """Send the synthetic CA-like frame (two seeding frames, then the render frame)."""
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    fetch_variant = args.variant in ("fetch", "fetch-noramp")
+    premultiply = fetch_variant
+    background = _render_buffer(premultiply)
+    seed_ramp = args.variant != "fetch-noramp"
+    texture_bgra = _image_pixels_bgra(4, 4)
+    ramp = _luma_ramp()
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", MW_VERSION, os.getpid(), b"wp2-render"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 42, 0, len(background)))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 44, 0, len(texture_bgra)))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 47, 0, len(ramp)))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 40, RENDER_WIDTH, RENDER_HEIGHT, 80, 5, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 43, 4, 4, 80, 1, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 46, 128, 1, 10, 1, 0))
+        client.send(MW_CREATE_SAMPLER, struct.pack("<9I2f2I", 45, 0, 0, 0, 0, 0, 0, 1, 0,
+
+                                                   0.0, 3.4028234663852886e38, 1, 0))
+
+        attributes = [(31, 0, 1), (29, 16, 1), (29, 24, 1), (27, 32, 1)] + [(0, 0, 0)] * 12
+        layouts = [(0, 1, 1), (48, 1, 1)] + [(0, 1, 1)] * 6
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(41, "com.apple.coreanimation.draw.PBGRA_Xfc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+        blend = args.variant == "fixed"
+        pipeline_b_name = ("com.apple.coreanimation.draw.PBGRABsov_TimgXfc_Isrc"
+                           if fetch_variant
+                           else "com.apple.coreanimation.draw.PBGRA_TimgXfc_nofetch")
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(44, pipeline_b_name, "fixed_vert_lpf_spc",
+                                             "fixed_frag_lpf_cpf", attributes, layouts, blend))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(47, "com.apple.coreanimation.draw.PBGRA_TlubXf_Isrc",
+                                             "std_vert1_lpf", "luma_boost_lpf",
+                                             attributes, layouts))
+
+        # Two v1 seeding frames put content into the BGRA8 texture and the R8 ramp (the wire has no
+        # texture upload; a buffer->texture copy is the existing route).
+        seeds = [(44, texture_bgra, 4, 4, 43)]
+        if seed_ramp:
+            seeds.append((47, ramp, 128, 1, 46))
+        for seq, (buffer_id, pixels, width, height, texture_id) in enumerate(seeds):
+            begin = time.monotonic_ns()
+            client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, begin))
+            client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", buffer_id, 0, len(pixels), 0) + pixels)
+            client.send(MW_COPY_BUFFER_TO_TEXTURE,
+                        struct.pack("<IIQ6I", buffer_id, texture_id, 0, width * (1 if texture_id == 46 else 4),
+                                    len(pixels), width, height, 0, 0))
+            client.send(MW_PRESENT, struct.pack("<II", 43, 0))
+            encoded = time.monotonic_ns() - begin
+            # The present is always the 4x4 BGRA texture, so the CRC is over that picture.
+            client.send(MW_FRAME_END, struct.pack("<QQIIII", seq, encoded,
+                                                  zlib.crc32(texture_bgra) & 0xFFFFFFFF,
+                                                  4, 4, 16))
+            ack = client.recv_ack()
+            if ack[2] != MW_STATUS_OK:
+                failures += 1
+                print("seed frame %d: host status %d" % (seq, ack[2]), flush=True)
+
+        seq = 2
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 42, 0, len(background), 0) + background)
+        client.send(MW_RENDER_BEGIN, _begin_payload(0, 40, RENDER_WIDTH, RENDER_HEIGHT, 80, 2, 1,
+                                                     (0.0, 0.0, 0.0, 0.0)))
+        client.send(MW_RENDER_SET_VIEWPORT, struct.pack("<6f", 0.0, 0.0, RENDER_WIDTH,
+                                                        RENDER_HEIGHT, 0.0, 1.0))
+        client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 41, 0))
+        client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 0, 0, RENDER_WIDTH, RENDER_HEIGHT))
+        client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 42, 1, 0))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 42, 2, 240))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 42, 1, 336))
+        client.send(MW_RENDER_DRAW, _draw_payload(6, 528))
+
+        client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 44, 0))
+        client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 43, 3))
+        client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
+        client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 42, 2, 780))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 42, 3, 544))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 42, 1, 576))
+        client.send(MW_RENDER_DRAW, _draw_payload(6, 768))
+
+        client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 47, 0))
+        client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 46, 3))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 42, 1, 816))
+        client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 42, 2, 1020))
+        client.send(MW_RENDER_DRAW, _draw_payload(6, 1008))
+        client.send(MW_RENDER_END, struct.pack("<4I", 0, 3, 13, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 40, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END,
+                    struct.pack("<QQIIII", seq, encoded, 0, RENDER_WIDTH, RENDER_HEIGHT,
+                                RENDER_WIDTH * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK:
+            failures += 1
+            print("render frame: host status %d" % ack[2], flush=True)
+        else:
+            print("render frame: ack status=ok crc=0x%08x (host read back a picture)" % ack[6],
+                  flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 def main(argv):
     parser = argparse.ArgumentParser(
         description="Send deterministic synthetic frames to a metalwire host.")
@@ -179,7 +427,15 @@ def main(argv):
                         help="deliberately send a wrong CRC for this frame index")
     parser.add_argument("--timeout", type=float, default=10.0,
                         help="socket timeout in seconds (default 10)")
+    parser.add_argument("--render", action="store_true",
+                        help="send the stage-C synthetic render frame (WP-2 execution harness) "
+                             "instead of the blit picture")
+    parser.add_argument("--variant", choices=("fetch", "fetch-noramp", "nofetch", "fixed"),
+                        default="fetch",
+                        help="render mode: draw B's composition path (default fetch, the CA path)")
     args = parser.parse_args(argv)
+    if args.render:
+        return run_render(args)
     if args.frames <= 0:
         parser.error("--frames must be positive")
     if args.width < 64 or args.height < 64:
