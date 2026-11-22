@@ -473,6 +473,98 @@ def run_labels(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def run_chain(env):
+    """WP-4 D3/D5: a frame's later pass must sample the texture an earlier pass rendered.
+
+    CA's backdrop chain renders one pass into an intermediate texture and the next pass samples
+    it; the host used to execute every draw into the frame's last target, so the second pass
+    sampled a texture the first pass never wrote (black). The fixture sends one frame with two
+    render encoders (source -> texture 101, texture 101 -> texture 102) and a second frame that
+    samples 101 again; both pictures must repeat the source.
+    """
+    size = metalwire_gen.CHAIN_SOURCE
+    source = metalwire_gen.make_orientation_source(size)
+    expected = bytearray()
+    for at in range(0, len(source), 4):
+        expected += bytes((source[at + 2], source[at + 1], source[at]))
+    expected = bytes(expected)
+    work = tempfile.mkdtemp(prefix="metalwire-chain-")
+    out_dir = os.path.join(work, "frames")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "2", "--shm", "", "--out", out_dir,
+         "--png-every", "1", "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "chain host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the chain host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--render-chain", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        require(gen.returncode == 0,
+                "chain generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require(host.wait(timeout=60) == 0,
+                "chain host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("chain frames: ack status=ok" in gen.stdout,
+                "the chain frames were not acknowledged:\n%s" % gen.stdout)
+        require("render frame 0: 2 encoder(s), 2 draws" in output,
+                "the host did not execute both encoders of the chained frame:\n%s" % output)
+        require("render frame 0: executed 2 of 2 draw(s) on texture 102" in output,
+                "the chained frame did not complete:\n%s" % output)
+        require("render frame 1: executed 1 of 1 draw(s) on texture 102" in output,
+                "the second frame did not read the intermediate texture back:\n%s" % output)
+        for index in (0, 1):
+            ppm_path = os.path.join(out_dir, "frame-%06d.ppm" % index)
+            require(os.path.exists(ppm_path), "%s was not written" % ppm_path)
+            with open(ppm_path, "rb") as f:
+                data = f.read()
+            header = b"P6\n%d %d\n255\n" % (size, size)
+            require(data.startswith(header), "%s: bad P6 header" % ppm_path)
+            pixels = data[len(header):]
+            require(pixels == expected,
+                    "%s: the chained picture is not the source (max diff %d)" % (
+                        ppm_path, max(abs(a - b) for a, b in zip(pixels, expected))))
+            png_path = os.path.join(out_dir, "frame-%06d.png" % index)
+            width, height, png_pixels = read_png_rgb(png_path)
+            require((width, height) == (size, size), "%s: %dx%d" % (png_path, width, height))
+            require(png_pixels == pixels, "%s differs from the PPM of the same frame" % png_path)
+        print("PASS chain: per-pass targets honoured -- a frame's second pass samples the texture "
+              "the first pass rendered (D3/D5 backdrop chain)")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- chain host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def read_png_rgb(path):
     """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
     with open(path, "rb") as f:
@@ -752,9 +844,10 @@ def main():
         run_format115(env)
         run_blur_pipelines(env)
         run_labels(env)
+        run_chain(env)
         run_orientation(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
-              "labels, orientation)" % (WIDTH, HEIGHT, FRAMES))
+              "labels, chain, orientation)" % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)

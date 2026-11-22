@@ -2944,6 +2944,11 @@ static int mw_handle_render_end(struct mw_server *s, const struct mw_render_end 
 
 /* ---- protocol: frame execution -------------------------------------------------------------- */
 
+/* The render frame execution composites into the draws' own targets; this bounds the set the
+ * per-frame "has this target been written already" bookkeeping tracks, so the first draw into a
+ * target honours the wire's load action and later draws into the same target load. */
+#define MW_RENDER_MAX_TARGETS 32
+
 static void mw_cmd_image_barrier(VkCommandBuffer command, VkImage image, VkImageLayout old_layout,
                                  VkImageLayout new_layout, VkAccessFlags src_access,
                                  VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
@@ -4107,6 +4112,11 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         status = MW_STATUS_VULKAN;
     }
 
+    {
+        uint32_t written[MW_RENDER_MAX_TARGETS];
+        uint32_t written_targets = 0;
+        int first_draw_to_target;
+
     for (uint32_t d = 0; d < frame->draw_count && status == MW_STATUS_OK; d++) {
         const struct mw_render_draw_command *draw = &frame->draws[d];
         struct mw_render_pipeline *pipeline = mw_pipeline_find(s, draw->pipeline_id);
@@ -4154,6 +4164,41 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             }
         }
         result->draws_executed++;
+        /*
+         * Per-draw target (WP-4 D3/D5). A wire frame carries one render encoder per CA render
+         * pass, and those passes composite into different textures: CA's backdrop/blur chain
+         * renders into intermediate surfaces and the last pass draws the display target. The
+         * execution used to feed every draw to the frame's last target, so an intermediate pass
+         * painted the wrong surface and the material that later samples it saw whatever was left
+         * there (a white Dock/Search band). Resolve the draw's own target here; the frame's
+         * target stays the read-back/published picture.
+         */
+        struct mw_image *draw_target = target;
+
+        if (draw->target_texture != 0 && draw->target_texture != draw_target->id) {
+            draw_target = mw_image_find(s, draw->target_texture);
+            if (draw_target == NULL) {
+                mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                              "draw targets unknown texture %u", draw->target_texture);
+                status = MW_STATUS_BAD_COMMAND;
+                break;
+            }
+        }
+        {
+            int target_written = 0;
+            uint32_t w;
+
+            for (w = 0; w < written_targets; w++) {
+                if (written[w] == draw_target->id) {
+                    target_written = 1;
+                    break;
+                }
+            }
+            if (!target_written && written_targets < MW_RENDER_MAX_TARGETS) {
+                written[written_targets++] = draw_target->id;
+            }
+            first_draw_to_target = !target_written;
+        }
         /* The shader's Metal buffer arguments live in the wire buffer; the one the vertex stage
          * reads at index 2 (mvp_matrix) is the authoritative allocation for this draw. */
         wire_id = draw->vertex_buffer_id[2] != 0
@@ -4195,6 +4240,12 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                 if (texture_image->layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
                     src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
                     src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                } else if (texture_image->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                    /* A draw in this frame rendered into it (per-draw targets: the backdrop/blur
+                     * chains hand a pass's own attachment to the next pass as a texture). The
+                     * transition must wait for the attachment writes. */
+                    src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                    src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
                 }
                 mw_cmd_image_barrier(
                     command, texture_image->image, texture_image->layout,
@@ -4207,10 +4258,22 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             sampler_state = mw_sampler_find(s, draw->sampler_id[0]);
         uses_fetch = mw_pipeline_fetches(pipeline);
 
-        if (uses_fetch && result->draws_executed > 0) {
+        if (uses_fetch && result->draws_executed > 0 &&
+            (draw_target->width != s->render.fetch_width ||
+             draw_target->height != s->render.fetch_height)) {
+            static int warned_fetch_size;
+
+            if (!warned_fetch_size) {
+                warned_fetch_size = 1;
+                mw_log("render: a draw fetches a %ux%u target while the frame's fetch image is "
+                       "%ux%u; the fetch is skipped for this draw",
+                       draw_target->width, draw_target->height, s->render.fetch_width,
+                       s->render.fetch_height);
+            }
+        } else if (uses_fetch && result->draws_executed > 0) {
             VkImageCopy copy = {0};
 
-            mw_cmd_image_barrier(command, target->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            mw_cmd_image_barrier(command, draw_target->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -4227,10 +4290,10 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             copy.srcSubresource.layerCount = 1;
             copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             copy.dstSubresource.layerCount = 1;
-            copy.extent.width = target->width;
-            copy.extent.height = target->height;
+            copy.extent.width = draw_target->width;
+            copy.extent.height = draw_target->height;
             copy.extent.depth = 1;
-            vkCmdCopyImage(command, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkCmdCopyImage(command, draw_target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            s->render.fetch_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             mw_cmd_image_barrier(command, s->render.fetch_image,
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -4239,32 +4302,32 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
             fetch_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            mw_cmd_image_barrier(command, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            mw_cmd_image_barrier(command, draw_target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                  VK_ACCESS_TRANSFER_READ_BIT,
                                  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
                                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        } else if (result->draws_executed == 0 &&
-                   target->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            draw_target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        } else if (first_draw_to_target &&
+                   draw_target->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
             VkAccessFlags src_access = 0;
             VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 
-            if (target->layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+            if (draw_target->layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
                 src_access = VK_ACCESS_TRANSFER_READ_BIT;
                 src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            } else if (target->layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            } else if (draw_target->layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
                 src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
                 src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
             }
-            mw_cmd_image_barrier(command, target->image, target->layout,
+            mw_cmd_image_barrier(command, draw_target->image, draw_target->layout,
                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, src_access,
                                  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
                                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                  src_stage, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            draw_target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
 
         allocate.descriptorPool = s->render.pool;
@@ -4317,10 +4380,10 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         writes[3].pImageInfo = &fetch_info;
         vkUpdateDescriptorSets(vk->device, 4, writes, 0, NULL);
 
-        color_attachment.imageView = target->view;
+        color_attachment.imageView = draw_target->view;
         color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attachment.loadOp =
-            result->draws_executed > 0 ? VK_ATTACHMENT_LOAD_OP_LOAD
+            !first_draw_to_target ? VK_ATTACHMENT_LOAD_OP_LOAD
                   : (draw->load_action == 2
                          ? VK_ATTACHMENT_LOAD_OP_CLEAR
                          : (draw->load_action == 1 ? VK_ATTACHMENT_LOAD_OP_LOAD
@@ -4332,8 +4395,8 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         color_attachment.clearValue.color.float32[3] = draw->clear_color[3];
         rendering.renderArea.offset.x = 0;
         rendering.renderArea.offset.y = 0;
-        rendering.renderArea.extent.width = target->width;
-        rendering.renderArea.extent.height = target->height;
+        rendering.renderArea.extent.width = draw_target->width;
+        rendering.renderArea.extent.height = draw_target->height;
         rendering.layerCount = 1;
         rendering.colorAttachmentCount = 1;
         rendering.pColorAttachments = &color_attachment;
@@ -4409,6 +4472,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                       (uint32_t)draw->vertex_start, draw->base_instance);
         }
         vkCmdEndRendering(command);
+    }
     }
 
     if (status == MW_STATUS_OK) {

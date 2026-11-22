@@ -872,6 +872,123 @@ def run_labels(args):
     return 0 if failures == 0 else 1
 
 
+
+# WP-4 D3/D5: the cross-pass chain fixture. One frame carries two render encoders: the first
+# composites the source into an intermediate texture, the second samples that texture and draws the
+# frame's display target. A host that executes every draw into the frame's last target renders the
+# second pass from a texture the first pass never wrote (black), which is what CA's backdrop chain
+# looked like in the boot; the test asserts the chained frame repeats the source.
+CHAIN_SOURCE = 64
+
+
+def run_render_chain(args):
+    """One frame, two encoders: source -> texture 101, then texture 101 -> texture 102."""
+    source = make_orientation_source(CHAIN_SOURCE)
+    wire = bytearray(262144)
+    wire[72] = 1  # Uniform.premultiply
+    mvp = ((2.0 / CHAIN_SOURCE, 0.0, 0.0, 0.0),
+           (0.0, -2.0 / CHAIN_SOURCE, 0.0, 0.0),
+           (0.0, 0.0, 0.0, 0.0),
+           (-1.0, 1.0, 0.0, 1.0))
+    for row, values in enumerate(mvp):
+        struct.pack_into("<4f", wire, 240 + 16 * row, *values)
+    for vertex, (x, y) in enumerate(((0.0, 0.0), (CHAIN_SOURCE, 0.0),
+                                     (CHAIN_SOURCE, CHAIN_SOURCE), (0.0, CHAIN_SOURCE))):
+        at = 336 + vertex * 48
+        struct.pack_into("<4f", wire, at, x, y, 0.0, 1.0)
+        struct.pack_into("<2f", wire, at + 16, x, y)
+        struct.pack_into("<2f", wire, at + 24, 0.0, 0.0)
+        struct.pack_into("<4e", wire, at + 32, 1.0, 1.0, 1.0, 1.0)
+    struct.pack_into("<6H", wire, 528, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<4f", wire, 544, 1.0 / CHAIN_SOURCE, 1.0 / CHAIN_SOURCE, 0.0, 0.0)
+    wire = bytes(wire)
+    attributes = [(31, 0, 1), (29, 16, 1), (29, 24, 1), (27, 32, 1)] + [(0, 0, 0)] * 12
+    layouts = [(0, 1, 1), (48, 1, 1)] + [(0, 1, 1)] * 6
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-chain"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 93, 0, len(wire)))
+        client.send(MW_CREATE_TEXTURE,
+                    struct.pack("<6I", 100, CHAIN_SOURCE, CHAIN_SOURCE, 80, 1, 0))
+        client.send(MW_CREATE_TEXTURE,
+                    struct.pack("<6I", 101, CHAIN_SOURCE, CHAIN_SOURCE, 80, 5, 0))
+        client.send(MW_CREATE_TEXTURE,
+                    struct.pack("<6I", 102, CHAIN_SOURCE, CHAIN_SOURCE, 80, 5, 0))
+        client.send(MW_CREATE_SAMPLER, struct.pack("<9I2f2I", 45, 0, 0, 0, 0, 0, 0, 1, 0,
+                                                   0.0, 0.0, 1, 0))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(140,
+                                             "com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+
+        def encoder(index, target, texture):
+            client.send(MW_RENDER_BEGIN,
+                        _begin_payload(index, target, CHAIN_SOURCE, CHAIN_SOURCE, 80, 2, 1,
+                                       (0.0, 0.0, 0.0, 0.0)))
+            client.send(MW_RENDER_SET_VIEWPORT,
+                        struct.pack("<6f", 0.0, 0.0, float(CHAIN_SOURCE), float(CHAIN_SOURCE),
+                                    0.0, 1.0))
+            client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 140, 0))
+            client.send(MW_RENDER_SET_SCISSOR,
+                        struct.pack("<4I", 0, 0, CHAIN_SOURCE, CHAIN_SOURCE))
+            client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 93, 1, 0))
+            client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", texture, 3))
+            client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 1, 336))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 2, 240))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 3, 544))
+            client.send(MW_RENDER_DRAW, _draw_payload(6, 528, 93))
+            client.send(MW_RENDER_END, struct.pack("<4I", index, 1, 7, 0))
+
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 0, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 93, 0, len(wire), 0) + wire)
+        client.send(MW_TEXTURE_REPLACE_REGION,
+                    struct.pack("<12I", 100, 0, 0, 0, 0, 0, CHAIN_SOURCE, CHAIN_SOURCE, 1,
+                                CHAIN_SOURCE * 4, len(source), len(source)) + source)
+        encoder(0, 101, 100)   # pass 1 writes the intermediate target
+        encoder(1, 102, 101)   # pass 2 samples the pass-1 target into this frame's target
+        client.send(MW_PRESENT, struct.pack("<II", 102, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 0, encoded, 0, CHAIN_SOURCE,
+                                              CHAIN_SOURCE, CHAIN_SOURCE * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK:
+            failures += 1
+            print("chain frame 0: host status %d" % ack[2], flush=True)
+
+        # Second frame: read texture 101 again, so a host that never wrote it is caught even if
+        # the frame target happened to be painted.
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 1, begin))
+        encoder(0, 102, 101)
+        client.send(MW_PRESENT, struct.pack("<II", 102, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 1, encoded, 0, CHAIN_SOURCE,
+                                              CHAIN_SOURCE, CHAIN_SOURCE * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK or ack[3] != 1:
+            failures += 1
+            print("chain frame 1: host status %d seq %d" % (ack[2], ack[3]), flush=True)
+        else:
+            print("chain frames: ack status=ok", flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 # WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
 # top at NDC y=+1; Vulkan's viewport maps y down. The host compensates with a negative viewport
 # height, so framebuffer row y must come out as the source row y -- in the present read-back, the
@@ -1087,6 +1204,9 @@ def main(argv):
                         help="send one seed frame and three render frames through the "
                              "downsample_4 / narrow_blur_23 / narrow_blur_15 pipelines, the "
                              "WP-4 1.2 regression")
+    parser.add_argument("--render-chain", action="store_true",
+                        help="one frame with two render encoders: source -> intermediate -> "
+                             "target, the WP-4 D3/D5 cross-pass chain")
     parser.add_argument("--labels", action="store_true",
                         help="send an A8 glyph mask drawn with a white colour, the WP-4 D4 "
                              "label-mask regression")
@@ -1101,6 +1221,8 @@ def main(argv):
         return run_rgba16f_ramp(args)
     if args.blur_pipelines:
         return run_blur_pipelines(args)
+    if args.render_chain:
+        return run_render_chain(args)
     if args.labels:
         return run_labels(args)
     if args.orientation:

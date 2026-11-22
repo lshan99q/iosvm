@@ -201,6 +201,10 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
   missing report) and every tile matches the box/binomial kernel the shaders document to within
   2/255, including its PNG,
+* the cross-pass chain (WP-4 D3/D5): one frame carries two render encoders (source -> texture
+  101, texture 101 -> texture 102) and a second frame samples 101 again; both pictures must repeat
+  the source. A host that composites every draw into the frame's last target renders the second
+  pass from an unwritten texture and the test sees black (0 of 12288 bytes non-zero),
 * the label mask (WP-4 D4): a 32x32 A8 glyph mask (Metal's alpha-only label format) is uploaded
   with replaceRegion and drawn over black with a white colour and premultiply on; the test asserts
   every pixel is grey coverage (R == G == B == the mask byte, within 1) and the SHM alpha carries
@@ -296,8 +300,15 @@ A protocol 2 frame that carries `MW_RENDER_*` messages is executed on Vulkan ins
 The execution half:
 
 * creates one `VkPipeline` per wire pipeline (and per primitive topology) on first use, from the
-  eight embedded shader modules; the wire's base-function names choose the modules, the pipeline
+  embedded shader modules; the wire's base-function names choose the modules, the pipeline
   name chooses the specialization constants (texture, destination fetch, texture matrix);
+* composites each draw into its own recorded target: a frame carries one render encoder per CA
+  render pass, and the passes target different textures (CA's backdrop/blur chain renders into
+  intermediate surfaces that the next pass samples). The first draw into a target honours the
+  wire's load action, later draws into the same target load, a texture that a previous pass
+  rendered is transitioned with a colour-attachment-write dependency, and the frame's last target
+  stays the one read back and published. Feeding every draw to the last target made the backdrop
+  chain sample never-written textures (the white Dock/Search band of the boot);
 * builds the vertex input from the wire's 16-attribute descriptor (only attributes with a real
   format are bound) and the instance/stride information from the layouts;
 * binds the wire's one buffer at the four byte offsets the shaders take as push constants, the
