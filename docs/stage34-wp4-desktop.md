@@ -178,7 +178,8 @@ vertically** (status bar at the bottom, icon glyphs upside down), on a black bac
 
 ![the home screen through the Metal path](demo/wp4-desktop-home.png)
 
-What is missing, by name, from `docs/stage34-missing-pipelines.txt` (the report the host writes):
+What was missing, by name, from this boot's report (the file `docs/stage34-missing-pipelines.txt`
+now carries the WP-4 close boot's report — `frames 706, pipelines 0, skipped draws 0`):
 
 ```
 pipeline 111 vertex "downsample_blur_vert_lpf" fragment "downsample_4_frag_lpf"  skipped 290
@@ -190,10 +191,14 @@ library 6 kind url bytes 64 hash 0x0472d062082ed7b7
 Those are exactly the background/Dock blur passes the work package predicted; the host has no
 `downsample_blur_vert_lpf`/`downsample_n_frag_lpf` GLSL yet, so the wallpaper band they feed stays
 black. A second blocker is a texture format: `texture 61: pixel format 115 is not implemented`
-(256×1, 8 bytes/texel = Metal's RGBA16Float ramp), whose draws are skipped the same way. The flip
-is a hybrid-path orientation issue, not a wire issue: the BootUI frame in stage 33 was upright,
-while SpringBoard's GL surfaces written by `host_glwire`'s by-reference path come back to the
-compositor with the opposite row order. All three are named follow-ups, not unknowns.
+(256×1, 8 bytes/texel = Metal's RGBA16Float ramp), whose draws are skipped the same way.
+
+The flip is **not** a hybrid-GL row-order issue: boot `wp4-v5` later showed that glwire took no part
+in that boot and that the host's own frame was the mirror. It was the Metal y-up NDC → Vulkan
+y-down direction in the CA execution; stage 35 fixed it with a negative viewport height
+(`docs/stage35-wp4-close.md` §2.1), which supersedes this section's attribution. The blur family,
+the RGBA16Float ramp and the flip were all closed in stage 35; the two texture/blur notes above
+remain the evidence that motivated it.
 
 ## 4. What this does not establish
 
@@ -221,7 +226,9 @@ compositor with the opposite row order. All three are named follow-ups, not unkn
 - `host/metalwire/PROTOCOL.md` — the protocol 4 section.
 - `docs/demo/wp4-desktop-composite.png`, `docs/demo/wp4-desktop-late.png`,
   `docs/demo/wp4-desktop-home.png` — the pictures here.
-- `docs/stage34-missing-pipelines.txt` — the `--missing-report` of boot `wp4-v4`.
+- `docs/stage34-missing-pipelines.txt` — the `--missing-report` of boot `wp4-v4` when this note was
+  committed; the file now carries the WP-4 close boot's report (`frames 706, pipelines 0, skipped
+  draws 0`), and this note quotes the stage-34 report above.
 - `README.md`, `docs/state-of-the-port.md` — the state row.
 
 ## 6. Reproduce

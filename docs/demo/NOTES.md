@@ -139,3 +139,46 @@ One frame of boot `wp4-v4`, taken 2026-11-22 10:19–10:20 UTC (18:19 +08).
   RGBA16Float (Metal format 115) ramp is skipped for the same reason. No frame-rate or V100 claim.
 - **Notes**: project's own pixels; sha256
   `82803d0d4232096833110c633f01b651b695d4a743965d6071d0f5b4e155fa5f`.
+
+# Metal translation acceptance capture — stage 35 / WP-4 (the upright desktop)
+
+One frame of boot `wp4-v13`, taken 2026-11-23 06:31 +08 on the branch
+`experiment/ca-metal-device`.
+
+- **Milestone**: the WP-4 close of ENG-METAL-006 (experiment only; not a delivered path)
+- **Commit**: `b232e33a0ed2a747fb67af177d982b427bf248b2` — the tree the boot ran; the capture is
+  committed with the stage-35 record `docs/stage35-wp4-close.md`
+- **Guest firmware**: Darwin 22.5.0, 20F66, iPhone10,3 — the contributor's own IPSW; run tree
+  `/home/lshan/DSH-desktop/mt-work`, image built by `tools/metalwire/prepare-guest.sh ui` plus
+  `bin/glremote_on`; clients `metal_frame`, `metal_probe`, `backboardd`; injected
+  `libcainject.dylib` (`aa123ccd…`) and `HakiosMetal` (`1152abab…`); `root.apfs` `964abbea…`
+  (the baseline, without gesture scripts)
+- **Host**: Linux x86_64; `metalwire_host` on device 0 = llvmpipe/lavapipe
+  (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json --gpu 0`; the V100 was not used), with
+  `--port 9111 --ram <ram.img> --out /tmp/wp4v13-frames --png-every 1 --verbose --missing-report
+  /tmp/wp4v13-missing.txt` and `MW_DUMP_DRAWS=1`; `host_glwire --no-panel 9210 <ram.img>` with
+  `GLWIRE_SOFTWARE_GL=1` (it logged 0 clients); QEMU TCG, one vCPU,
+  `CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1"`, instance 3 (ports 4474/4475)
+- **Command**: `MW_CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1" tools/metalwire/run-guest.sh
+  wp4-v13 1800`; the capture is `frame-good-750x1624.png` of that run's `--out` tree, downscaled
+  exactly to 375×812
+- **What it shows**: the upright home screen through the Metal path — the status bar at the top
+  (with the image's `rdar:45025538` banner), the real app icons with their images and labels, the
+  Search row and the Dock at the bottom. The Dock's white band and the Search capsule are gone:
+  their `Tmua` material pipeline now samples the support texture instead of painting opaque white
+  (D3/D5 fixed on the host). 706 frames were acknowledged, 7,363 draws executed, `--missing-report`
+  `frames 706, pipelines 0, skipped draws 0`, format 115 0, wire error 0; the two 256×1
+  RGBA16Float ramps are created as Vulkan images.
+- **What it does not show**: a finished or "100% correct" desktop. The wallpaper is black (D1),
+  Weather/Calendar are white placeholders (D2), the status bar carries the image's debug banner
+  (D7), and the presentation alternates in two frames — every second frame loses the
+  status-bar/Dock/Search layers (D8; this capture is the good half, and the boot's stage-2/stage-3
+  captures happened to land on the other one). Five of the eight blur kernels are implemented and
+  fixture-verified but were never requested by the guest, because Control Center/Spotlight would
+  not open. No frame-rate claim and no V100 claim here; the measured numbers are in
+  `docs/stage35-wp4-close.md`.
+- **Notes**: project's own pixels, no Apple asset. sha256
+  `1de573dfc5e0206af73ab51ceb04cc8c7ed2ebaecb59febf9d7c9647990d82b2` — the LANCZOS downscale of
+  the good 750×1624 frame (sha256
+  `ee3d98bf03c606c251e729ffdec2e61b9befe56e204e39533c3ca7dff9202ae2`); it is pixel-identical to
+  the run's own 375×812 thumbnail.

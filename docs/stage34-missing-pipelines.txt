@@ -1,6 +1,3 @@
 # metalwire missing-pipeline report
-# frames 462, pipelines 3, skipped draws 674
-pipeline 111 name "com.apple.coreanimation.draw.PBGRA_Tds4Xf_Isrc" vertex "downsample_blur_vert_lpf" fragment "downsample_4_frag_lpf" vertex_library 6 fragment_library 6 skipped_draws 290
-pipeline 117 name "com.apple.coreanimation.draw.PBGRA_Tn23Xf_Isrc" vertex "downsample_blur_vert_lpf" fragment "narrow_blur_23_frag_lpf" vertex_library 6 fragment_library 6 skipped_draws 98
-pipeline 431 name "com.apple.coreanimation.draw.PBGRA_Tn15Xf_Isrc" vertex "downsample_blur_vert_lpf" fragment "narrow_blur_15_frag_lpf" vertex_library 6 fragment_library 6 skipped_draws 286
+# frames 706, pipelines 0, skipped draws 0
 library 6 kind url bytes 64 hash 0x0472d062082ed7b7 functions 0
