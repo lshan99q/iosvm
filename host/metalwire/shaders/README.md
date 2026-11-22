@@ -3,8 +3,9 @@
 These eight files are hand-written Vulkan GLSL. The first four are the WP-2 rewrite of the four
 Metal base functions the BootUI frame names (`fixed_vert_lpf_spc`, `fixed_frag_lpf_cpf`,
 `std_vert1_lpf`, `luma_boost_lpf`); the second four are the WP-4 rewrite of the background/Dock
-blur family (`downsample_blur_vert_lpf`, `downsample_4_frag_lpf`, `narrow_blur_23_frag_lpf`,
-`narrow_blur_15_frag_lpf`), which the desktop boot (wp4-v4, 674 skipped draws) reported as
+blur family (`downsample_blur_vert_lpf`, `downsample_4/8_frag_lpf`,
+`narrow_blur_7/11/15/19/23/27_frag_lpf`), which the desktop boots (wp4-v4, 674 skipped draws;
+wp4-v6, 1916 more when Control Center/Spotlight opened the backdrop chain) reported as
 missing. Together they are what `metalwire_host` uses to execute a render frame. The build
 compiles them with `glslangValidator -V --target-env vulkan1.1`, validates the SPIR-V with
 `spirv-val`, and embeds it into the host binary (`../embed_spirv.py`).
@@ -79,10 +80,15 @@ EDR scale is zero it is the identity, which is what the wire's BootUI frame asks
 
 | file | base function | what the recorded draw says |
 |---|---|---|
-| [`downsample_blur_vert_lpf.vert`](downsample_blur_vert_lpf.vert) | `downsample_blur_vert_lpf` | one vertex function for five pipelines (`downsample_4/8`, `narrow_blur_11/15/23`); the blur draws bind vertex buffers 1/2/3 as the layer draws do, so it is the ordinary transform `[INFERRED]` |
+| [`downsample_blur_vert_lpf.vert`](downsample_blur_vert_lpf.vert) | `downsample_blur_vert_lpf` | one vertex function for all eight blur pipelines (`downsample_4/8`, `narrow_blur_7/11/15/19/23/27`); the blur draws bind vertex buffers 1/2/3 as the layer draws do, so it is the ordinary transform `[INFERRED]` |
 | [`downsample_4_frag_lpf.frag`](downsample_4_frag_lpf.frag) | `downsample_4_frag_lpf` | renders a 180x72 target from `com.apple.coreanimation.framebuffer-surface`, no sampler bound; a 4x4 box average `[INFERRED]` |
-| [`narrow_blur_23_frag_lpf.frag`](narrow_blur_23_frag_lpf.frag) | `narrow_blur_23_frag_lpf` | samples `com.apple.coreanimation.surface`, no sampler, 1-10 quads per region; a 23-tap-per-axis binomial Gaussian evaluated in one pass `[INFERRED]` |
-| [`narrow_blur_15_frag_lpf.frag`](narrow_blur_15_frag_lpf.frag) | `narrow_blur_15_frag_lpf` | the same, 15 taps per axis `[INFERRED]` |
+| [`downsample_8_frag_lpf.frag`](downsample_8_frag_lpf.frag) | `downsample_8_frag_lpf` | the 8x sibling (pipeline `Tds8`, 692 skipped draws in boot wp4-v6); an 8x8 box average, 64 taps at 1/64 `[INFERRED]` |
+| [`narrow_blur_7_frag_lpf.frag`](narrow_blur_7_frag_lpf.frag) | `narrow_blur_7_frag_lpf` | samples `com.apple.coreanimation.surface`, no sampler; 7 taps per axis, Pascal row 6 binomial `[INFERRED]` |
+| [`narrow_blur_11_frag_lpf.frag`](narrow_blur_11_frag_lpf.frag) | `narrow_blur_11_frag_lpf` | the same, 11 taps per axis, Pascal row 10 `[INFERRED]` |
+| [`narrow_blur_23_frag_lpf.frag`](narrow_blur_23_frag_lpf.frag) | `narrow_blur_23_frag_lpf` | the same, 23 taps per axis, Pascal row 22 `[INFERRED]` |
+| [`narrow_blur_15_frag_lpf.frag`](narrow_blur_15_frag_lpf.frag) | `narrow_blur_15_frag_lpf` | the same, 15 taps per axis, Pascal row 14 `[INFERRED]` |
+| [`narrow_blur_19_frag_lpf.frag`](narrow_blur_19_frag_lpf.frag) | `narrow_blur_19_frag_lpf` | the same, 19 taps per axis, Pascal row 18 `[INFERRED]` |
+| [`narrow_blur_27_frag_lpf.frag`](narrow_blur_27_frag_lpf.frag) | `narrow_blur_27_frag_lpf` | the same, 27 taps per axis, Pascal row 26 (the backdrop's widest kernel, 1202 skipped draws in boot wp4-v6) `[INFERRED]` |
 
 The blur fragment shaders use texel-exact access (`texelFetch`) because the recorded draws bind no
 sampler; they do not read the wire buffer. Their specialization constants carry the ids the host

@@ -45,7 +45,8 @@ costs its draws, not the frame, and `--missing-report` writes the work list. `RG
 115, the colour ramp the desktop boot reported as unimplemented) is a real
 `VK_FORMAT_R16G16B16A16_SFLOAT` image, 8 bytes a texel, and its own regression in `make test`. The
 background/Dock blur family (`downsample_blur_vert_lpf` + `downsample_4_frag_lpf` /
-`narrow_blur_23_frag_lpf` / `narrow_blur_15_frag_lpf`, the 674 skipped draws of boot wp4-v4) now
+`downsample_8_frag_lpf` / `narrow_blur_7/11/15/19/23/27_frag_lpf`, the 674 skipped draws of boot
+wp4-v4 and the further 1916 of boot wp4-v6's Control Center/Spotlight backdrop) now
 has its four hand-written shaders and a fixture that executes all three pipelines; the kernel
 weights are `[INFERRED]` binomial kernels and each file says so. The desktop run itself is
 [`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-wp4-desktop.md).
@@ -195,10 +196,11 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   `--byte-check` memcmp says the read-back is byte-identical, the PPM/PNG hold the ramp converted
   to 8 bits, no wire error occurs, and an unknown format in the same frame still takes the
   skip-draw fallback,
-* the blur family: one seed frame and three render frames drive `downsample_4`, `narrow_blur_23`
-  and `narrow_blur_15` over a 256x256 source; every frame executes 1 of 1 draw (0 skipped), the
-  missing report is empty, and the three pictures match the kernels the shaders document (4x4 box,
-  then two binomial blurs) to within 2/255,
+* the blur family: one frame draws all eight backdrop pipelines (`Tds4`, `Tds8`, `Tnb7`, `Tn11`,
+  `Tn15`, `Tn19`, `Tn23`, `Tn27`) into one 64x64 target, each pipeline painting its own 16x16 tile
+  of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
+  missing report) and every tile matches the box/binomial kernel the shaders document to within
+  2/255, including its PNG,
 * the direction (WP-4 1.1): a 64x64 source whose every row is a different colour is copied 1:1
   through CA's mvp into a render target, then a framebuffer-fetch draw blends 50% over it. The
   test asserts the present read-back, the PPM and the PNG hold source row y at output row y, and

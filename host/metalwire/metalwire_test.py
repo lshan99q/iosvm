@@ -255,22 +255,24 @@ def run_format115(env):
 
 
 def run_blur_pipelines(env):
-    """WP-4 1.2: the three blur pipelines execute instead of being skipped.
+    """WP-4 1.2: all eight backdrop pipelines execute instead of being skipped.
 
-    boot wp4-v4 reported `downsample_blur_vert_lpf` + `downsample_4_frag_lpf` /
-    `narrow_blur_23_frag_lpf` / `narrow_blur_15_frag_lpf` as unsupported (674 skipped draws, the
-    wallpaper/background band black). This runs the synthetic blur fixture: a 256x256 source is
-    downsampled 4x, then blurred by the 23-tap and 15-tap passes, one pipeline per frame. The host
-    has to execute 1 of 1 draw in each frame, write nothing to --missing-report, and produce the
-    pictures the same kernels predict in the test (a 4x4 box, then two binomial blurs).
+    boot wp4-v4 reported the 4x downsample plus the 23/15-tap blurs unsupported; boot wp4-v6's
+    Control Center/Spotlight backdrop needed five more (8x downsample, 7/11/19/27-tap blurs) and
+    the missing report counted 1916 skipped draws. This runs the synthetic blur fixture: one seed
+    frame copies a 64x64 input texture, then one render frame draws all eight pipelines into one
+    64x64 target -- each pipeline paints its own 16x16 tile of a 4x2 mosaic, sampling the same
+    input. The PPM/PNG of that frame therefore carry every kernel's output, and the test compares
+    each tile against the box/binomial kernels in Python.
     """
+    tile = metalwire_gen.BLUR_TILE
     size = metalwire_gen.BLUR_TARGET
     source, expected = metalwire_gen.blur_fixture_reference()
     work = tempfile.mkdtemp(prefix="metalwire-blur-")
     out_dir = os.path.join(work, "frames")
     report = os.path.join(work, "missing.txt")
     host = subprocess.Popen(
-        [HOST, "--gpu", "0", "--port", "0", "--frames", "4", "--shm", "", "--out", out_dir,
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "2", "--shm", "", "--out", out_dir,
          "--png-every", "1", "--missing-report", report, "--verbose"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     host_lines = []
@@ -308,50 +310,53 @@ def run_blur_pipelines(env):
         reader.join(timeout=10)
         with host_lock:
             output = "\n".join(host_lines)
-        for seq in (1, 2, 3):
-            require("blur frame %d: ack status=ok" % seq in gen.stdout,
-                    "blur frame %d was not acknowledged:\n%s" % (seq, gen.stdout))
-        require(output.count("executed 1 of 1 draw(s) on texture") == 3,
-                "the three blur frames did not each execute their draw:\n%s" % output)
-        require("no embedded Vulkan GLSL for vertex \"downsample_blur_vert_lpf\"" not in output,
-                "the host still has no shader for the blur family:\n%s" % output)
-        for name in ("com.apple.coreanimation.draw.PBGRA_Tds4Xf_Isrc",
-                     "com.apple.coreanimation.draw.PBGRA_Tn23Xf_Isrc",
-                     "com.apple.coreanimation.draw.PBGRA_Tn15Xf_Isrc"):
+        require("blur frame 1: ack status=ok" in gen.stdout,
+                "the eight-pipeline frame was not acknowledged:\n%s" % gen.stdout)
+        require("executed 8 of 8 draw(s) on texture 73 (64x64)" in output,
+                "the host did not execute all eight blur draws in one frame:\n%s" % output)
+        require("skipped" not in output.split("render frame 1: 1 encoder(s)")[0].split(
+                    "render frame 1: executed")[-1],
+                "the blurred frame reports skipped draws:\n%s" % output)
+        for pipeline_id, name, _fragment, _kernel in metalwire_gen.BLUR_PIPELINES:
             require("-> Vulkan pipeline" in output and name in output,
                     "the host did not build a Vulkan pipeline for %s:\n%s" % (name, output))
         with open(report) as f:
             report_text = f.read()
-        require("# frames 4, pipelines 0, skipped draws 0" in report_text,
+        require("# frames 2, pipelines 0, skipped draws 0" in report_text,
                 "the blur pipelines are still in the missing report:\n%s" % report_text)
         require("downsample_blur_vert_lpf" not in report_text and
-                "narrow_blur_23_frag_lpf" not in report_text and
-                "narrow_blur_15_frag_lpf" not in report_text,
+                "narrow_blur_" not in report_text and "downsample_" not in report_text,
                 "the missing report still names the blur family:\n%s" % report_text)
-        for index, picture in enumerate(expected, start=1):
-            ppm_path = os.path.join(out_dir, "frame-%06d.ppm" % index)
-            require(os.path.exists(ppm_path), "%s was not written" % ppm_path)
-            with open(ppm_path, "rb") as f:
-                data = f.read()
-            header = b"P6\n%d %d\n255\n" % (size, size)
-            require(data.startswith(header), "%s: bad P6 header" % ppm_path)
-            pixels = data[len(header):]
-            require(len(pixels) == len(picture),
-                    "%s: %d pixel bytes, expected %d" % (ppm_path, len(pixels), len(picture)))
-            worst = max(abs(a - b) for a, b in zip(pixels, picture))
-            require(worst <= 2,
-                    "%s: blur output differs from the predicted kernel by %d (allowed 2)" %
-                    (ppm_path, worst))
-            png_path = os.path.join(out_dir, "frame-%06d.png" % index)
-            require(os.path.exists(png_path), "%s was not written" % png_path)
-            with open(png_path, "rb") as f:
-                png = f.read(33)
-            require(png.startswith(b"\x89PNG\r\n\x1a\n") and png[12:16] == b"IHDR",
-                    "%s is not a PNG" % png_path)
-            require((int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big"),
-                     png[24], png[25]) == (size, size, 8, 2),
-                    "%s has the wrong header" % png_path)
-        print("PASS blur: 3 pipelines executed, 0 skipped, pictures match the predicted kernels")
+        ppm_path = os.path.join(out_dir, "frame-000001.ppm")
+        require(os.path.exists(ppm_path), "%s was not written" % ppm_path)
+        with open(ppm_path, "rb") as f:
+            data = f.read()
+        header = b"P6\n%d %d\n255\n" % (size, size)
+        require(data.startswith(header), "%s: bad P6 header" % ppm_path)
+        pixels = data[len(header):]
+        require(len(pixels) == len(expected),
+                "%s: %d pixel bytes, expected %d" % (ppm_path, len(pixels), len(expected)))
+        worst = max(abs(a - b) for a, b in zip(pixels, expected))
+        require(worst <= 2,
+                "%s: blur mosaic differs from the predicted kernels by %d (allowed 2)" %
+                (ppm_path, worst))
+        worst_tile = 0
+        for index in range(len(metalwire_gen.BLUR_PIPELINES)):
+            tx, ty = metalwire_gen.BLUR_TILES[index]
+            for y in range(tile):
+                for x in range(tile):
+                    at = ((ty + y) * size + tx + x) * 3
+                    for c in range(3):
+                        worst_tile = max(worst_tile, abs(pixels[at + c] - expected[at + c]))
+        require(worst_tile <= 2,
+                "a blur tile differs from its kernel by %d (allowed 2)" % worst_tile)
+        png_path = os.path.join(out_dir, "frame-000001.png")
+        require(os.path.exists(png_path), "%s was not written" % png_path)
+        width, height, png_pixels = read_png_rgb(png_path)
+        require((width, height) == (size, size), "%s: %dx%d" % (png_path, width, height))
+        require(png_pixels == pixels, "%s differs from the PPM of the same frame" % png_path)
+        print("PASS blur: 8 pipelines executed in one frame, 0 skipped, mosaic matches the "
+              "predicted kernels (max diff %d/255)" % worst)
         ok = True
     except TestFailure:
         with host_lock:

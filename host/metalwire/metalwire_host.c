@@ -235,7 +235,7 @@ struct mw_render_vk {
     VkDeviceMemory dummy_memory;
     VkImageView dummy_view;
     VkSampler dummy_sampler;
-    VkShaderModule modules[8];
+    VkShaderModule modules[16];
     VkImage fetch_image;
     VkDeviceMemory fetch_memory;
     VkImageView fetch_view;
@@ -2146,10 +2146,20 @@ static const char *mw_render_fragment_shader(const struct mw_render_pipeline *pi
         return "luma_boost_lpf";
     if (strcmp(pipeline->fragment_function, "downsample_4_frag_lpf") == 0)
         return "downsample_4_frag_lpf";
-    if (strcmp(pipeline->fragment_function, "narrow_blur_23_frag_lpf") == 0)
-        return "narrow_blur_23_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "downsample_8_frag_lpf") == 0)
+        return "downsample_8_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_7_frag_lpf") == 0)
+        return "narrow_blur_7_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_11_frag_lpf") == 0)
+        return "narrow_blur_11_frag_lpf";
     if (strcmp(pipeline->fragment_function, "narrow_blur_15_frag_lpf") == 0)
         return "narrow_blur_15_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_19_frag_lpf") == 0)
+        return "narrow_blur_19_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_23_frag_lpf") == 0)
+        return "narrow_blur_23_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_27_frag_lpf") == 0)
+        return "narrow_blur_27_frag_lpf";
     return NULL;
 }
 
@@ -3343,8 +3353,13 @@ static VkShaderModule mw_render_module(struct mw_server *s, const char *name)
                                         "luma_boost_lpf",
                                         "downsample_blur_vert_lpf",
                                         "downsample_4_frag_lpf",
+                                        "downsample_8_frag_lpf",
+                                        "narrow_blur_7_frag_lpf",
+                                        "narrow_blur_11_frag_lpf",
+                                        "narrow_blur_15_frag_lpf",
+                                        "narrow_blur_19_frag_lpf",
                                         "narrow_blur_23_frag_lpf",
-                                        "narrow_blur_15_frag_lpf"};
+                                        "narrow_blur_27_frag_lpf"};
     struct mw_render_vk *r = &s->render;
     int slot = -1;
     const struct mw_spirv_blob *blob;
@@ -3628,8 +3643,10 @@ static int mw_pipeline_fetches(const struct mw_render_pipeline *pipeline)
 static int mw_pipeline_has_texture(const struct mw_render_pipeline *pipeline)
 {
     return strstr(pipeline->name, "Timg") != NULL || strstr(pipeline->name, "Tlub") != NULL ||
-           strstr(pipeline->name, "Tds4") != NULL || strstr(pipeline->name, "Tn23") != NULL ||
-           strstr(pipeline->name, "Tn15") != NULL;
+           strstr(pipeline->name, "Tds4") != NULL || strstr(pipeline->name, "Tds8") != NULL ||
+           strstr(pipeline->name, "Tnb7") != NULL || strstr(pipeline->name, "Tn11") != NULL ||
+           strstr(pipeline->name, "Tn15") != NULL || strstr(pipeline->name, "Tn19") != NULL ||
+           strstr(pipeline->name, "Tn23") != NULL || strstr(pipeline->name, "Tn27") != NULL;
 }
 
 static int mw_render_ensure_pipeline(struct mw_server *s, struct mw_render_pipeline *pipeline,

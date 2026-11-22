@@ -29,6 +29,7 @@ import struct
 import sys
 import time
 import zlib
+from math import comb
 
 MW_MAGIC = 0x4D575452  # "MWTR"
 MW_ACK_MAGIC = 0x4D57414B  # "MWAK"
@@ -537,168 +538,153 @@ def run_rgba16f_ramp(args):
     return 0 if failures == 0 else 1
 
 
-# WP-4 1.2: the background/Dock blur fixture. A 256x256 source is downsampled 4x into a 64x64
-# texture, blurred by the 23-tap pass into a second 64x64 texture and by the 15-tap pass back into
-# the first, so one frame exercises each of the three blur pipelines the wp4-v4 boot reported.
+# WP-4 1.2: the background/Dock blur fixture. The eight backdrop pipelines (Tds4, Tds8, Tnb7,
+# Tn11, Tn15, Tn19, Tn23, Tn27) are created with their recorded names and base functions, and one
+# frame draws all eight: each pipeline renders its kernel over the same 64x64 input texture into
+# its own 16x16 tile of a 64x64 target (a 4x2 mosaic), so a single PPM carries every kernel's
+# output and the test can compare each tile against a Python reference. The host executes the
+# draws of one frame into the frame's target, so a mosaic (one target, eight scissored draws) is
+# the natural shape; chaining intermediate targets is done by CA across frames, not inside one.
+BLUR_INPUT = 64
+BLUR_TILE = 16
 BLUR_TARGET = 64
-BLUR_SOURCE = 256
+BLUR_TILES = ((0, 0), (16, 0), (32, 0), (48, 0), (0, 16), (16, 16), (32, 16), (48, 16))
+
+BLUR_PIPELINES = (
+    (111, "com.apple.coreanimation.draw.PBGRA_Tds4Xf_Isrc", "downsample_4_frag_lpf", "box4"),
+    (112, "com.apple.coreanimation.draw.PBGRA_Tds8Xf_Isrc", "downsample_8_frag_lpf", "box8"),
+    (120, "com.apple.coreanimation.draw.PBGRA_Tnb7Xf_Isrc", "narrow_blur_7_frag_lpf", 7),
+    (119, "com.apple.coreanimation.draw.PBGRA_Tn11Xf_Isrc", "narrow_blur_11_frag_lpf", 11),
+    (122, "com.apple.coreanimation.draw.PBGRA_Tn15Xf_Isrc", "narrow_blur_15_frag_lpf", 15),
+    (118, "com.apple.coreanimation.draw.PBGRA_Tn19Xf_Isrc", "narrow_blur_19_frag_lpf", 19),
+    (117, "com.apple.coreanimation.draw.PBGRA_Tn23Xf_Isrc", "narrow_blur_23_frag_lpf", 23),
+    (121, "com.apple.coreanimation.draw.PBGRA_Tn27Xf_Isrc", "narrow_blur_27_frag_lpf", 27),
+)
 
 
-def make_blur_source(size=BLUR_SOURCE):
-    """The fixture's source picture: a smooth gradient, BGRA bytes, alpha 255.
+def make_blur_source(size=BLUR_INPUT):
+    """The fixture's input picture: BGRA bytes, alpha 255, smooth in both directions.
 
-    It is symmetric in x and y so the CI does not depend on the NDC orientation a fixture happens
-    to choose, and it has enough structure (two different ramps, a mixed blue channel) that a
-    wrong kernel, a wrong tap step or a flat output is visible.
+    Red ramps in y, green mirrors in x and blue mixes both, so a wrong kernel, a wrong tap step, a
+    wrong tile origin or a flat pass all show up in the mosaic comparison.
     """
     buf = bytearray(size * size * 4)
     for y in range(size):
-        ty = min(y, size - 1 - y) * 2
-        g = 32 + (96 * ty) // (size - 1)
         for x in range(size):
-            tx = min(x, size - 1 - x) * 2
-            r = 32 + (96 * tx) // (size - 1)
-            b = (r + g) // 2
+            g = int(255.0 * (min(x, size - 1 - x) / (size / 2.0))) & 0xFF
+            r = int(255.0 * (y / (size - 1.0))) & 0xFF
+            b = int(255.0 * ((x + y) % 32) / 31.0) & 0xFF
             at = (y * size + x) * 4
             buf[at:at + 4] = bytes((b, g, r, 255))
     return bytes(buf)
 
 
-def _blur_source_rgb(size):
-    """The source as (r, g, b) tuples, the order the fragment shaders compute in."""
-    raw = make_blur_source(size)
-    return [(raw[at + 2], raw[at + 1], raw[at]) for at in range(0, len(raw), 4)]
+def _pixels_rgb(source, size):
+    return [(source[at + 2], source[at + 1], source[at]) for at in range(0, len(source), 4)]
 
 
-def _binomial_kernel(taps):
-    """Pascal's triangle row taps-1, normalised: the [INFERRED] narrow-blur kernel."""
-    if taps % 2 != 1:
-        raise ValueError("a narrow blur kernel has an odd tap count")
-    row = [1]
-    for _ in range(taps - 1):
-        row = [1] + [row[i] + row[i + 1] for i in range(len(row) - 1)] + [1]
-    total = sum(row)
-    return [value / total for value in row]
+def _box_weight(offset, block):
+    return 1.0
 
 
-def _box4(picture, size, target):
-    out = []
-    for y in range(target):
-        for x in range(target):
-            acc = [0, 0, 0]
-            for j in range(4):
-                for i in range(4):
-                    pixel = picture[(y * 4 + j) * size + x * 4 + i]
-                    acc[0] += pixel[0]
-                    acc[1] += pixel[1]
-                    acc[2] += pixel[2]
-            out.append((acc[0] / 16.0, acc[1] / 16.0, acc[2] / 16.0))
-    return out
-
-
-def _binomial_blur(picture, size, taps):
-    kernel = _binomial_kernel(taps)
+def _narrow_at(picture, size, cx, cy, taps):
     radius = taps // 2
-    horizontal = []
-    for y in range(size):
-        for x in range(size):
-            acc = [0.0, 0.0, 0.0]
-            for k, weight in enumerate(kernel):
-                pixel = picture[y * size + min(max(x + k - radius, 0), size - 1)]
-                acc[0] += weight * pixel[0]
-                acc[1] += weight * pixel[1]
-                acc[2] += weight * pixel[2]
-            horizontal.append(tuple(acc))
-    out = []
-    for y in range(size):
-        for x in range(size):
-            acc = [0.0, 0.0, 0.0]
-            for k, weight in enumerate(kernel):
-                pixel = horizontal[min(max(y + k - radius, 0), size - 1) * size + x]
-                acc[0] += weight * pixel[0]
-                acc[1] += weight * pixel[1]
-                acc[2] += weight * pixel[2]
-            out.append(tuple(acc))
-    return out
+    total = float(1 << (taps - 1))
+    acc = [0.0, 0.0, 0.0]
+    for dy in range(-radius, radius + 1):
+        wy = float(comb(taps - 1, radius + abs(dy)))
+        for dx in range(-radius, radius + 1):
+            wx = float(comb(taps - 1, radius + abs(dx)))
+            pixel = picture[min(max(cy + dy, 0), size - 1) * size + min(max(cx + dx, 0), size - 1)]
+            weight = wx * wy / (total * total)
+            acc[0] += weight * pixel[0]
+            acc[1] += weight * pixel[1]
+            acc[2] += weight * pixel[2]
+    return acc
+
+
+def _downsample_at(picture, size, cx, cy, block):
+    acc = [0.0, 0.0, 0.0]
+    base = block // 2
+    for dy in range(-base, block - base):
+        for dx in range(-base, block - base):
+            pixel = picture[min(max(cy + dy, 0), size - 1) * size + min(max(cx + dx, 0), size - 1)]
+            acc[0] += pixel[0]
+            acc[1] += pixel[1]
+            acc[2] += pixel[2]
+    area = float(block * block)
+    return [acc[0] / area, acc[1] / area, acc[2] / area]
+
+
+def _kernel_at(picture, size, cx, cy, kernel):
+    if kernel == "box4":
+        return _downsample_at(picture, size, cx, cy, 4)
+    if kernel == "box8":
+        return _downsample_at(picture, size, cx, cy, 8)
+    return _narrow_at(picture, size, cx, cy, kernel)
 
 
 def blur_fixture_reference():
-    """(source bytes, [expected PPM bytes per frame]) for the three blur frames.
+    """(source BGRA, expected PPM RGB of the one frame's 4x2 mosaic).
 
-    The expected pictures are the same [INFERRED] kernels the shaders implement -- 4x4 box, then
-    the 23-tap and 15-tap binomial blurs, chained the way the fixture draws them. The test allows
-    a small tolerance because the host accumulates in binary32 and this reference in Python's
-    doubles; a wrong kernel or a skipped draw is far outside it.
+    Tile i (BLUR_TILES order, matching BLUR_PIPELINES) holds the kernel of pipeline i evaluated at
+    the tile's own input centres; the reference accumulates in doubles, the host in binary32, hence
+    the small tolerance in the test.
     """
     source = make_blur_source()
-    picture = _blur_source_rgb(BLUR_SOURCE)
-    frames = []
-    picture = _box4(picture, BLUR_SOURCE, BLUR_TARGET)
-    frames.append(_rgb_bytes(picture))
-    picture = _binomial_blur(picture, BLUR_TARGET, 23)
-    frames.append(_rgb_bytes(picture))
-    picture = _binomial_blur(picture, BLUR_TARGET, 15)
-    frames.append(_rgb_bytes(picture))
-    return source, frames
-
-
-def _rgb_bytes(picture):
-    out = bytearray()
-    for r, g, b in picture:
-        out += bytes((max(0, min(255, int(round(r)))), max(0, min(255, int(round(g)))),
-                      max(0, min(255, int(round(b))))))
-    return bytes(out)
+    picture = _pixels_rgb(source, BLUR_INPUT)
+    out = [0] * (BLUR_TARGET * BLUR_TARGET * 3)
+    for index, (pipeline_id, _name, _fragment, kernel) in enumerate(BLUR_PIPELINES):
+        tx, ty = BLUR_TILES[index]
+        for y in range(BLUR_TILE):
+            for x in range(BLUR_TILE):
+                pixel = _kernel_at(picture, BLUR_INPUT, tx + x, ty + y, kernel)
+                at = ((ty + y) * BLUR_TARGET + tx + x) * 3
+                for c in range(3):
+                    out[at + c] = max(0, min(255, int(round(pixel[c]))))
+    return source, bytes(out)
 
 
 def _blur_wire_buffer():
-    """The 256 KiB wire buffer the three blur draws index into.
+    """The wire buffer: one CA-convention mvp, one quad per tile, indices and the texture matrix.
 
-    Layout (byte offsets, the WP-2 convention): Uniform at 0, mvp at 240, the 4x-downsample quad at
-    336, its indices at 528, its texture matrix at 544, the 1:1 blur quad at 640 with indices at
-    832 and its texture matrix at 624. Positions are target pixels; texcoords are source pixels and
-    the texture matrix normalises them, the way the recorded draws carry them.
+    Layout: Uniform at 0, mvp at 240, tile quads at 800 + 192*i (four vertices of 48 bytes each:
+    position, texcoord, texcoord1, colour), indices at 2336, texture matrix (1/64) at 2360. The
+    quad positions and texcoords are absolute target/input pixels -- the mvp maps the whole 64x64
+    target to NDC and each draw's scissor selects its 16x16 tile -- so the fragment stage's
+    `floor(texcoord * size)` is the input texel the kernel centres on.
     """
     buf = bytearray(262144)
-    buf[72] = 1  # Uniform.premultiply: the source is premultiplied BGRA
-    # CA's own mvp convention: position y=0 is the top of the layer (Metal NDC y=+1). The host
-    # compensates Metal's y-up NDC with a negative viewport height, so the target's top row is the
-    # picture's top row and the PPMs below read the same way as the references.
+    buf[72] = 1  # Uniform.premultiply: the input is premultiplied BGRA
+    # CA's mvp convention: position y=0 is the top of the target (Metal NDC y=+1), which the host
+    # compensates with a negative viewport height.
     mvp = ((2.0 / BLUR_TARGET, 0.0, 0.0, 0.0),
            (0.0, -2.0 / BLUR_TARGET, 0.0, 0.0),
            (0.0, 0.0, 0.0, 0.0),
            (-1.0, 1.0, 0.0, 1.0))
-    for i, row in enumerate(mvp):
-        struct.pack_into("<4f", buf, 240 + 16 * i, *row)
-
-    def quad(offset, texels):
-        positions = ((0.0, 0.0), (BLUR_TARGET, 0.0), (BLUR_TARGET, BLUR_TARGET),
-                     (0.0, BLUR_TARGET))
-        for i, (x, y) in enumerate(positions):
-            at = offset + i * 48
+    for row, values in enumerate(mvp):
+        struct.pack_into("<4f", buf, 240 + 16 * row, *values)
+    for index, (tx, ty) in enumerate(BLUR_TILES):
+        for vertex, (x, y) in enumerate(((tx, ty), (tx + BLUR_TILE, ty),
+                                         (tx + BLUR_TILE, ty + BLUR_TILE),
+                                         (tx, ty + BLUR_TILE))):
+            at = 800 + 192 * index + 48 * vertex
             struct.pack_into("<4f", buf, at, x, y, 0.0, 1.0)
-            struct.pack_into("<2f", buf, at + 16, x * texels, y * texels)
+            struct.pack_into("<2f", buf, at + 16, x, y)
             struct.pack_into("<2f", buf, at + 24, 0.0, 0.0)
             struct.pack_into("<4e", buf, at + 32, 1.0, 1.0, 1.0, 1.0)
-
-    quad(336, BLUR_SOURCE / BLUR_TARGET)  # the 4x downsample reads a 256x256 source
-    struct.pack_into("<6H", buf, 528, 0, 1, 2, 2, 3, 0)
-    struct.pack_into("<4f", buf, 544, 1.0 / BLUR_SOURCE, 1.0 / BLUR_SOURCE, 0.0, 0.0)
-    quad(640, 1.0)  # the narrow blurs read the 64x64 downsampled texture
-    struct.pack_into("<6H", buf, 832, 0, 1, 2, 2, 3, 0)
-    struct.pack_into("<4f", buf, 624, 1.0 / BLUR_TARGET, 1.0 / BLUR_TARGET, 0.0, 0.0)
+    struct.pack_into("<6H", buf, 2336, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<4f", buf, 2360, 1.0 / BLUR_INPUT, 1.0 / BLUR_INPUT, 0.0, 0.0)
     return bytes(buf)
 
 
 def run_blur_pipelines(args):
-    """One seed frame and three render frames around the WP-4 1.2 blur pipelines.
+    """One seed frame and one render frame that draws all eight WP-4 1.2 blur pipelines.
 
-    The three pipelines the wp4-v4 boot reported as unsupported are created with their recorded
-    names and base functions, then each draws a full-target quad:
-      frame 1  pipeline 111, downsample_4:  256x256 source -> 64x64 texture 70
-      frame 2  pipeline 117, narrow_blur_23: texture 70 -> texture 74
-      frame 3  pipeline 431, narrow_blur_15: texture 74 -> texture 70, presented
-    A host that still has no shader for them skips the draws and lists the pipelines in
-    --missing-report; a host with them executes 1 of 1 draw per frame.
+    The seed frame copies the 64x64 input into texture 70 and presents it (pinning the blit path's
+    direction). The render frame is a single encoder and a single 64x64 target: eight draws, each
+    binding one pipeline, its own tile mvp/quad and a 16x16 scissor, all sampling texture 70. The
+    resulting 4x2 mosaic carries every kernel's output for the test's Python comparison.
     """
     source = make_blur_source()
     wire = _blur_wire_buffer()
@@ -713,80 +699,71 @@ def run_blur_pipelines(args):
 
     failures = 0
     try:
-        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-blur"))
-        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 72, 0, len(source)))
-        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 73, 0, len(wire)))
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-blur8"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 80, 0, len(source)))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 81, 0, len(wire)))
         client.send(MW_CREATE_TEXTURE,
-                    struct.pack("<6I", 70, BLUR_TARGET, BLUR_TARGET, 80, 5, 0))
+                    struct.pack("<6I", 70, BLUR_INPUT, BLUR_INPUT, 80, 1, 0))
         client.send(MW_CREATE_TEXTURE,
-                    struct.pack("<6I", 71, BLUR_SOURCE, BLUR_SOURCE, 80, 1, 0))
-        client.send(MW_CREATE_TEXTURE,
-                    struct.pack("<6I", 74, BLUR_TARGET, BLUR_TARGET, 80, 5, 0))
-        client.send(MW_CREATE_RENDER_PIPELINE,
-                    _create_pipeline_payload(111, "com.apple.coreanimation.draw.PBGRA_Tds4Xf_Isrc",
-                                             "downsample_blur_vert_lpf", "downsample_4_frag_lpf",
-                                             attributes, layouts))
-        client.send(MW_CREATE_RENDER_PIPELINE,
-                    _create_pipeline_payload(117, "com.apple.coreanimation.draw.PBGRA_Tn23Xf_Isrc",
-                                             "downsample_blur_vert_lpf", "narrow_blur_23_frag_lpf",
-                                             attributes, layouts))
-        client.send(MW_CREATE_RENDER_PIPELINE,
-                    _create_pipeline_payload(431, "com.apple.coreanimation.draw.PBGRA_Tn15Xf_Isrc",
-                                             "downsample_blur_vert_lpf", "narrow_blur_15_frag_lpf",
-                                             attributes, layouts))
+                    struct.pack("<6I", 73, BLUR_TARGET, BLUR_TARGET, 80, 5, 0))
+        for pipeline_id, name, fragment, _kernel in BLUR_PIPELINES:
+            client.send(MW_CREATE_RENDER_PIPELINE,
+                        _create_pipeline_payload(pipeline_id, name, "downsample_blur_vert_lpf",
+                                                 fragment, attributes, layouts))
+        print("blur: %d pipelines sent (Tds4, Tds8, Tnb7, Tn11, Tn15, Tn19, Tn23, Tn27)" %
+              len(BLUR_PIPELINES), flush=True)
 
-        # Seed frame: the 256x256 source through buffer 72 -> texture 71 (the wire has no direct
-        # texture upload; a buffer->texture copy is the existing route).
+        # Seed frame: 64x64 input -> texture 70, presented.
         begin = time.monotonic_ns()
         client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 0, begin))
-        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 72, 0, len(source), 0) + source)
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 80, 0, len(source), 0) + source)
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 81, 0, len(wire), 0) + wire)
         client.send(MW_COPY_BUFFER_TO_TEXTURE,
-                    struct.pack("<IIQ6I", 72, 71, 0, BLUR_SOURCE * 4, len(source), BLUR_SOURCE,
-                                BLUR_SOURCE, 0, 0))
-        client.send(MW_PRESENT, struct.pack("<II", 71, 0))
+                    struct.pack("<IIQ6I", 80, 70, 0, BLUR_INPUT * 4, len(source), BLUR_INPUT,
+                                BLUR_INPUT, 0, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 70, 0))
         encoded = time.monotonic_ns() - begin
         client.send(MW_FRAME_END, struct.pack("<QQIIII", 0, encoded,
-                                              zlib.crc32(source) & 0xFFFFFFFF, BLUR_SOURCE,
-                                              BLUR_SOURCE, BLUR_SOURCE * 4))
+                                              zlib.crc32(source) & 0xFFFFFFFF, BLUR_INPUT,
+                                              BLUR_INPUT, BLUR_INPUT * 4))
         ack = client.recv_ack()
         if ack[2] != MW_STATUS_OK:
             failures += 1
             print("blur seed frame: host status %d" % ack[2], flush=True)
+        else:
+            print("blur seed frame: ack status=ok", flush=True)
 
-        frames = ((1, 111, 70, 71, 336, 544, 528),
-                  (2, 117, 74, 70, 640, 624, 832),
-                  (3, 431, 70, 74, 640, 624, 832))
-        for number, (seq, pipeline, target, texture, vertex_at, texmat_at, indices_at) in \
-                enumerate(frames):
-            begin = time.monotonic_ns()
-            client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, begin))
-            if number == 0:
-                client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 73, 0, len(wire), 0) + wire)
-            client.send(MW_RENDER_BEGIN,
-                        _begin_payload(0, target, BLUR_TARGET, BLUR_TARGET, 80, 2, 1,
-                                       (0.0, 0.0, 0.0, 0.0)))
-            client.send(MW_RENDER_SET_VIEWPORT,
-                        struct.pack("<6f", 0.0, 0.0, BLUR_TARGET, BLUR_TARGET, 0.0, 1.0))
-            client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", pipeline, 0))
+        # One frame, one target, eight draws: each pipeline paints its 16x16 tile.
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 1, begin))
+        client.send(MW_RENDER_BEGIN,
+                    _begin_payload(0, 73, BLUR_TARGET, BLUR_TARGET, 80, 2, 1,
+                                   (0.0, 0.0, 0.0, 0.0)))
+        client.send(MW_RENDER_SET_VIEWPORT,
+                    struct.pack("<6f", 0.0, 0.0, float(BLUR_TARGET), float(BLUR_TARGET), 0.0, 1.0))
+        for index, (pipeline_id, _name, _fragment, _kernel) in enumerate(BLUR_PIPELINES):
+            tx, ty = BLUR_TILES[index]
+            client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", pipeline_id, 0))
             client.send(MW_RENDER_SET_SCISSOR,
-                        struct.pack("<4I", 0, 0, BLUR_TARGET, BLUR_TARGET))
-            client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 73, 1, 0))
-            client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", texture, 3))
-            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 73, 1, vertex_at))
-            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 73, 2, 240))
-            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 73, 3, texmat_at))
-            client.send(MW_RENDER_DRAW, _draw_payload(6, indices_at, 73))
-            client.send(MW_RENDER_END, struct.pack("<4I", 0, 1, 9, 0))
-            client.send(MW_PRESENT, struct.pack("<II", target, 0))
-            encoded = time.monotonic_ns() - begin
-            client.send(MW_FRAME_END, struct.pack("<QQIIII", seq, encoded, 0, BLUR_TARGET,
-                                                  BLUR_TARGET, BLUR_TARGET * 4))
-            ack = client.recv_ack()
-            if ack[2] != MW_STATUS_OK or ack[3] != seq:
-                failures += 1
-                print("blur frame %d: host status %d seq %d" % (seq, ack[2], ack[3]), flush=True)
-            else:
-                print("blur frame %d: ack status=ok" % seq, flush=True)
+                        struct.pack("<4I", tx, ty, BLUR_TILE, BLUR_TILE))
+            client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 81, 1, 0))
+            client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 70, 3))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 81, 1, 800 + 192 * index))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 81, 2, 240))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 81, 3, 2360))
+            client.send(MW_RENDER_DRAW, _draw_payload(6, 2336, 81))
+        client.send(MW_RENDER_END, struct.pack("<4I", 0, len(BLUR_PIPELINES),
+                                               len(BLUR_PIPELINES) * 5 + 1, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 73, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 1, encoded, 0, BLUR_TARGET, BLUR_TARGET,
+                                              BLUR_TARGET * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK or ack[3] != 1:
+            failures += 1
+            print("blur frame 1: host status %d seq %d" % (ack[2], ack[3]), flush=True)
+        else:
+            print("blur frame 1: ack status=ok", flush=True)
         client.send(MW_BYE)
     except (OSError, WireError) as exc:
         failures += 1
@@ -794,7 +771,6 @@ def run_blur_pipelines(args):
     finally:
         client.close()
     return 0 if failures == 0 else 1
-
 
 
 # WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
