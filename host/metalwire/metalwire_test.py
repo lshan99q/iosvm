@@ -147,6 +147,112 @@ def run_v4_fallback(env):
             host.kill()
 
 
+def half_ramp_rgb(ramp):
+    """The PPM bytes the host's RGBA16Float conversion must produce: clamp, round to nearest."""
+    out = bytearray()
+    for at in range(0, len(ramp), 8):
+        r, g, b, _alpha = struct.unpack_from("<4e", ramp, at)
+        for value in (r, g, b):
+            if value <= 0.0:
+                out.append(0)
+            elif value >= 1.0:
+                out.append(255)
+            else:
+                out.append(int(value * 255.0 + 0.5))
+    return bytes(out)
+
+
+def run_format115(env):
+    """WP-4 1.3: a 256x1 RGBA16Float texture (MTLPixelFormat 115) has to cross the wire.
+
+    boot wp4-v4 answered 'texture 61: pixel format 115 is not implemented', so CoreAnimation's
+    colour ramp was simply absent from the desktop. This runs one frame whose presented texture is
+    that ramp: creation, the 8-byte-texel blit, the read-back CRC and the PPM/PNG conversion all
+    have to agree with the bytes the client sent, and the host has to acknowledge the frame.
+    """
+    work = tempfile.mkdtemp(prefix="metalwire-format115-")
+    out_dir = os.path.join(work, "frames")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "1", "--shm", "", "--out", out_dir,
+         "--png-every", "1", "--byte-check", "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "format115 host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the format115 host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--rgba16f-ramp", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+        require(gen.returncode == 0,
+                "format115 generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require("wire error" not in gen.stderr,
+                "format115 generator saw a wire error:\n%s" % gen.stderr)
+        require(host.wait(timeout=120) == 0,
+                "format115 host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("rgba16f frame 0: ack status=ok crc_ok=1" in gen.stdout,
+                "the RGBA16Float frame was not acknowledged:\n%s" % gen.stdout)
+        require("texture 61: 256x1 format 115, 2048 bytes" in output,
+                "the host did not create a 256x1 8-byte-texel texture:\n%s" % output)
+        require("pixel format 115 is not implemented" not in output,
+                "the host still falls back on format 115:\n%s" % output)
+        require("picture byte-identical: 2048 bytes of 256x1" in output,
+                "the read-back is not byte-identical to the uploaded ramp:\n%s" % output)
+        require("texture 62: pixel format 999 is not implemented" in output,
+                "an unknown pixel format no longer takes the skip-draw fallback:\n%s" % output)
+        ramp = metalwire_gen.make_half_ramp()
+        width = metalwire_gen.RAMP_WIDTH
+        ppm_path = os.path.join(out_dir, "frame-000000.ppm")
+        require(os.path.exists(ppm_path), "%s was not written" % ppm_path)
+        require(read_ppm(ppm_path, width, 1) == half_ramp_rgb(ramp),
+                "%s does not hold the RGBA16Float ramp converted to RGB" % ppm_path)
+        png_path = os.path.join(out_dir, "frame-000000.png")
+        require(os.path.exists(png_path), "%s was not written" % png_path)
+        with open(png_path, "rb") as f:
+            png = f.read(33)
+        require(png.startswith(b"\x89PNG\r\n\x1a\n") and png[12:16] == b"IHDR",
+                "%s is not a PNG" % png_path)
+        png_width = int.from_bytes(png[16:20], "big")
+        png_height = int.from_bytes(png[20:24], "big")
+        require((png_width, png_height, png[24], png[25]) == (width, 1, 8, 2),
+                "%s has %dx%d depth %d colour %d" % (png_path, png_width, png_height, png[24],
+                                                    png[25]))
+        print("PASS format115: 256x1 RGBA16Float uploaded, presented and read back "
+              "byte-identical")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- format115 host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     if not os.path.exists(LAVAPIPE):
         print("metalwire_test: SKIP: lavapipe ICD not found at %s" % LAVAPIPE)
@@ -267,7 +373,8 @@ def main():
                                                          png[24], png[25]))
         print("PASS files: %d PPM frame(s) match the sent picture, PNG headers are valid" % FRAMES)
         run_v4_fallback(env)
-        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback)" %
+        run_format115(env)
+        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115)" %
               (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:

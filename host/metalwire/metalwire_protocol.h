@@ -139,6 +139,9 @@ enum mw_pixel_format {
     MW_FORMAT_BGRA8_UNORM = 80, /* MTLPixelFormatBGRA8Unorm */
     MW_FORMAT_RGBA8_UNORM = 70, /* MTLPixelFormatRGBA8Unorm */
     MW_FORMAT_R8_UNORM = 10,    /* MTLPixelFormatR8Unorm: CoreAnimation's luma-boost ramp */
+    /* MTLPixelFormatRGBA16Float: four IEEE-754 binary16 values, 8 bytes a texel. CoreAnimation
+     * hands the compositor its colour ramp in this format. */
+    MW_FORMAT_RGBA16_FLOAT = 115,
 };
 
 /* MW_HELLO */

@@ -35,7 +35,7 @@ work is deferred to `MW_FRAME_END`. A host must not require creates to precede `
 - `MW_PRESENT`: the texture that is the frame's picture. The host reads it back and publishes it.
 - `MW_FRAME_BEGIN` / `MW_FRAME_END`: a frame's command group, and its CRC-32 (`zlib` polynomial,
   initial value 0xFFFFFFFF, final XOR 0xFFFFFFFF — the usual CRC-32) over the picture bytes the
-  guest believes it sent (height rows of width*4 bytes, no padding).
+  guest believes it sent (height rows of width * bytes-a-texel, no padding).
 
 ## What "executed on the GPU" means here
 
@@ -177,8 +177,11 @@ The host-side contract (and the reason the messages exist):
   still reads the picture back and is still acknowledged `MW_STATUS_OK`. This is the WP-4 rule:
   a missing icon is a missing icon, not a dead boot.
 * **A texture format the host does not implement is not a frame error.** The texture stays absent;
-  its draws are skipped and the frame continues. `A8Unorm` (Metal format 1, the alpha masks the
-  desktop's label pass uses) is implemented as an R8 image.
+  its draws are skipped and the frame continues. The formats the host does implement:
+  `BGRA8Unorm` (80), `RGBA8Unorm` (70), `R8Unorm` (10) and `A8Unorm` (1, the alpha masks the
+  desktop's label pass uses) as R8 images, and `RGBA16Float` (115, CoreAnimation's colour ramp):
+  `VK_FORMAT_R16G16B16A16_SFLOAT`, 8 bytes a texel, with the same create/copy/replaceRegion/
+  read-back/CRC path as the 4-byte formats.
 * **`--missing-report FILE`** writes one line per unsupported pipeline (name, vertex/fragment base
   function, the two library ids, skipped draw count) plus the library records themselves. That file
   is the work list for WP-4's rewrite loop; the serial log keeps the first sighting of each.

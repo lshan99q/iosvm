@@ -213,7 +213,31 @@ MW_DRAW_INDEXED = 0x0001
 RENDER_WIDTH = 750
 RENDER_HEIGHT = 1624
 
+# WP-4 1.3: MTLPixelFormatRGBA16Float, four IEEE-754 binary16 channels, 8 bytes a texel.
+MW_FORMAT_RGBA16F = 115
+RAMP_WIDTH = 256
 
+
+def make_half_ramp(width=RAMP_WIDTH):
+    """The 256x1 RGBA16Float ramp CoreAnimation samples: 8 bytes a texel.
+
+    R walks 0 .. 1 in 1/128 steps, G mirrors it, B is 0.5 and A is 1.0. The first texel carries
+    R=2.0/G=-1.0 and the last R=-1.0/G=2.0, so the diagnostic 8-bit conversion's clamping has
+    both ends under test. Every value is a multiple of 1/128, which makes the expected rounding
+    exact both in the host's binary32 arithmetic and in metalwire_test.py's doubles: there is no
+    half-way case for the two to disagree about.
+    """
+    texels = []
+    for i in range(width):
+        if i == 0:
+            r, g = 2.0, -1.0
+        elif i == width - 1:
+            r, g = -1.0, 2.0
+        else:
+            r = ((i - 1) * 128) // (width - 2) / 128.0
+            g = 1.0 - r
+        texels.append(struct.pack("<4e", r, g, 0.5, 1.0))
+    return b"".join(texels)
 
 
 def _render_buffer(premultiply):
@@ -440,6 +464,78 @@ def run_render(args):
     return 0 if failures == 0 else 1
 
 
+def run_rgba16f_ramp(args):
+    """One frame around a 256x1 RGBA16Float texture (MTLPixelFormat 115), the WP-4 1.3 case.
+
+    The host used to answer "pixel format 115 is not implemented", which left CoreAnimation's
+    colour ramp out of the picture. Here the ramp is the frame's presented texture: a
+    buffer->texture blit uploads it, the frame presents it, and the host reads it back and
+    checksums it. The ack's CRC therefore covers the raw 8-byte texels the client sent, so a
+    wrong stride, a wrong Vulkan format or a truncated read-back cannot pass.
+    """
+    ramp = make_half_ramp()
+    row_bytes = RAMP_WIDTH * 8
+    if len(ramp) != row_bytes:
+        print("metalwire_gen: internal: the ramp is %d bytes, expected %d" %
+              (len(ramp), row_bytes), file=sys.stderr)
+        return 2
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-format115"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 52, 0, len(ramp)))
+        client.send(MW_CREATE_TEXTURE,
+                    struct.pack("<6I", 61, RAMP_WIDTH, 1, MW_FORMAT_RGBA16F, 1, 0))
+        # WP-4 fallback, still in force: a pixel format the host does not implement must not fail
+        # the frame. Texture 62 stays absent, nothing draws with it, the frame is acknowledged.
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 62, 8, 8, 999, 5, 0))
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 0, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 52, 0, len(ramp), 0) + ramp)
+        client.send(MW_COPY_BUFFER_TO_TEXTURE,
+                    struct.pack("<IIQ6I", 52, 61, 0, row_bytes, len(ramp), RAMP_WIDTH, 1, 0, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 61, 0))
+        encoded = time.monotonic_ns() - begin
+        crc = zlib.crc32(ramp) & 0xFFFFFFFF
+        client.send(MW_FRAME_END,
+                    struct.pack("<QQIIII", 0, encoded, crc, RAMP_WIDTH, 1, row_bytes))
+        ack = client.recv_ack()
+        (magic, version, status, ack_seq, _commit, _done, ack_crc, crc_ok,
+         ack_width, ack_height, ack_row, _reserved) = ack
+        problems = []
+        if magic != MW_ACK_MAGIC or version != WIRE_VERSION:
+            problems.append("bad ack header magic=0x%08x version=%u" % (magic, version))
+        if ack_seq != 0:
+            problems.append("ack seq %d, expected 0" % ack_seq)
+        if (ack_width, ack_height, ack_row) != (RAMP_WIDTH, 1, row_bytes):
+            problems.append("ack geometry %dx%d row %d" % (ack_width, ack_height, ack_row))
+        if ack_crc != crc:
+            problems.append("host read back 0x%08x, sent 0x%08x" % (ack_crc, crc))
+        if crc_ok != 1:
+            problems.append("crc_ok=%d, expected 1" % crc_ok)
+        if status != MW_STATUS_OK:
+            problems.append("status=%d, expected %d" % (status, MW_STATUS_OK))
+        if problems:
+            failures += 1
+            print("rgba16f frame 0: FAIL: %s" % "; ".join(problems), flush=True)
+        else:
+            print("rgba16f frame 0: ack status=ok crc_ok=1 crc=0x%08x, %dx%d row %d, %d bytes" %
+                  (crc, RAMP_WIDTH, 1, row_bytes, len(ramp)), flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 def main(argv):
     parser = argparse.ArgumentParser(
         description="Send deterministic synthetic frames to a metalwire host.")
@@ -463,9 +559,14 @@ def main(argv):
                         choices=("fetch", "fetch-noramp", "nofetch", "fixed", "unknown"),
                         default="fetch",
                         help="render mode: draw B's composition path (default fetch, the CA path)")
+    parser.add_argument("--rgba16f-ramp", action="store_true",
+                        help="send one frame around a 256x1 RGBA16Float texture (format 115) and "
+                             "present it, the WP-4 1.3 regression")
     args = parser.parse_args(argv)
     global WIRE_VERSION
     WIRE_VERSION = args.protocol
+    if args.rgba16f_ramp:
+        return run_rgba16f_ramp(args)
     if args.render:
         return run_render(args)
     if args.frames <= 0:

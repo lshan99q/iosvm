@@ -40,8 +40,10 @@ never did: `MW_CREATE_LIBRARY`/`MW_PIPELINE_LIBRARY_REF` carry a library's hash 
 names (the AIR bytes cannot be compiled here), and the host no longer turns an unknown base function
 into a wrong shader — it marks the pipeline unsupported, skips its draws and keeps the frame. A
 texture format the host does not implement (and `A8Unorm`, which CoreAnimation's desktop masks use)
-costs its draws, not the frame, and `--missing-report` writes the work list. The desktop run itself
-is [`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-wp4-desktop.md).
+costs its draws, not the frame, and `--missing-report` writes the work list. `RGBA16Float` (Metal
+115, the colour ramp the desktop boot reported as unimplemented) is a real
+`VK_FORMAT_R16G16B16A16_SFLOAT` image, 8 bytes a texel, and its own regression in `make test`. The
+desktop run itself is [`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-wp4-desktop.md).
 
 ## Files
 
@@ -180,14 +182,22 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
 * the SHM header is glwire's magic/geometry and the published pixels are exactly the picture the
   client sent,
 * the PPM files hold that same picture in RGB order, and the PNG files are valid PNGs of the right
-  size.
+  size,
+* the v4 fallback: a frame with one pipeline this host has no shader for executes its other draws,
+  skips that one, is acknowledged and is listed in `--missing-report`,
+* format 115: a 256x1 `RGBA16Float` texture (8 bytes a texel) is created, uploaded through a
+  buffer→texture blit and presented; the ack's CRC covers the raw 2048 half-float bytes, the
+  `--byte-check` memcmp says the read-back is byte-identical, the PPM/PNG hold the ramp converted
+  to 8 bits, no wire error occurs, and an unknown format in the same frame still takes the
+  skip-draw fallback.
 
 No GPU is needed. If the lavapipe ICD is absent the test prints `SKIP` and exits 0, so `make test`
 stays green on a machine with only a proprietary driver or no Vulkan at all.
 
-The CI test exercises the BGRA8 (Metal 80) format. The RGBA8 (Metal 70) path was checked by hand
-on lavapipe: the same 100-frame generator with `--format rgba8` produced `crc_ok=1` frames, the SHM
-picture was the expected RGBA→BGRA swap, and the PPM held the right RGB order.
+The CI test exercises the BGRA8 (Metal 80) format and the RGBA16Float (Metal 115) path. The RGBA8
+(Metal 70) path was checked by hand on lavapipe: the same 100-frame generator with `--format rgba8`
+produced `crc_ok=1` frames, the SHM picture was the expected RGBA→BGRA swap, and the PPM held the
+right RGB order.
 
 Robustness checks done by hand while building this (not part of `make test`):
 

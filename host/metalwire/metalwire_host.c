@@ -600,10 +600,74 @@ static void mw_store_le16(unsigned char *out, uint32_t value)
 }
 
 /* The guest's pixel formats, converted for the two consumers that are not Vulkan: PPM/PNG files
- * (RGB) and glwire's shared file (BGRA, webview.py decodes BGRA). */
+ * (RGB) and glwire's shared file (BGRA, webview.py decodes BGRA).
+ *
+ * Three shapes reach these converters: four 8-bit channels (BGRA8/RGBA8), one 8-bit channel
+ * (R8/A8, CoreAnimation's masks and luma ramp) and four IEEE-754 binary16 channels
+ * (RGBA16Float, CA's colour ramp, 8 bytes a texel). A half float becomes unorm8 by clamping to
+ * [0, 1] and rounding to nearest; NaN and negative values become 0. The diagnostic picture is
+ * 8 bits a channel, so a 16-bit ramp is quantised here, never in the Vulkan read-back. */
 static inline int mw_format_is_bgra(uint32_t format)
 {
     return format == MW_FORMAT_BGRA8_UNORM;
+}
+
+static inline int mw_format_is_half_float(uint32_t format)
+{
+    return format == MW_FORMAT_RGBA16_FLOAT;
+}
+
+static inline int mw_format_is_one_byte(uint32_t format)
+{
+    return format == MW_FORMAT_R8_UNORM || format == MW_FORMAT_A8_UNORM;
+}
+
+/* binary16 -> binary32, bit-exact: normals, subnormals, infinities and NaN keep their value. */
+static float mw_half_to_float(uint16_t half)
+{
+    uint32_t sign = (uint32_t)(half & 0x8000u) << 16;
+    uint32_t exponent = (half >> 10) & 0x1fu;
+    uint32_t mantissa = half & 0x03ffu;
+    uint32_t bits;
+    float value;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign; /* +/- zero */
+        } else {
+            exponent = 113; /* 2^-14 as a binary32 exponent: the subnormal's first normal step */
+            while ((mantissa & 0x0400u) == 0) {
+                mantissa <<= 1;
+                exponent--;
+            }
+            mantissa &= 0x03ffu;
+            bits = sign | (exponent << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 0x1fu) {
+        bits = sign | 0x7f800000u | (mantissa << 13); /* infinity or NaN */
+    } else {
+        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static unsigned char mw_half_to_unorm8(uint16_t half)
+{
+    float value = mw_half_to_float(half);
+    float scaled;
+
+    if (!(value > 0.0f))
+        return 0; /* zero, negative, NaN */
+    if (value >= 1.0f)
+        return 255;
+    scaled = value * 255.0f + 0.5f;
+    return (unsigned char)(scaled >= 255.0f ? 255.0f : scaled);
+}
+
+static uint16_t mw_load_le16(const unsigned char *bytes)
+{
+    return (uint16_t)(bytes[0] | ((uint16_t)bytes[1] << 8));
 }
 
 static void mw_pixels_to_rgb(const unsigned char *pixels, uint32_t width, uint32_t height,
@@ -611,6 +675,23 @@ static void mw_pixels_to_rgb(const unsigned char *pixels, uint32_t width, uint32
 {
     size_t count = (size_t)width * height;
 
+    if (mw_format_is_half_float(format)) {
+        for (size_t i = 0; i < count; i++) {
+            const unsigned char *p = pixels + i * 8;
+            unsigned char *o = rgb + i * 3;
+
+            o[0] = mw_half_to_unorm8(mw_load_le16(p + 0));
+            o[1] = mw_half_to_unorm8(mw_load_le16(p + 2));
+            o[2] = mw_half_to_unorm8(mw_load_le16(p + 4));
+        }
+        return;
+    }
+    if (mw_format_is_one_byte(format)) {
+        /* A single channel has no colour of its own: a saved mask or ramp reads as grey. */
+        for (size_t i = 0; i < count; i++)
+            rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = pixels[i];
+        return;
+    }
     for (size_t i = 0; i < count; i++) {
         const unsigned char *p = pixels + i * 4;
         unsigned char *o = rgb + i * 3;
@@ -627,11 +708,34 @@ static void mw_pixels_to_rgb(const unsigned char *pixels, uint32_t width, uint32
     }
 }
 
+/* `bytes` is the source size; the output is always BGRA8, so a 16-bit source yields half as many
+ * bytes as it consumes. */
 static void mw_pixels_to_bgra(const unsigned char *pixels, size_t bytes, uint32_t format,
                               unsigned char *bgra)
 {
     if (mw_format_is_bgra(format)) {
         memcpy(bgra, pixels, bytes);
+        return;
+    }
+    if (mw_format_is_half_float(format)) {
+        for (size_t i = 0; i < bytes / 8; i++) {
+            const unsigned char *p = pixels + i * 8;
+            unsigned char *o = bgra + i * 4;
+
+            o[0] = mw_half_to_unorm8(mw_load_le16(p + 4)); /* B */
+            o[1] = mw_half_to_unorm8(mw_load_le16(p + 2)); /* G */
+            o[2] = mw_half_to_unorm8(mw_load_le16(p + 0)); /* R */
+            o[3] = mw_half_to_unorm8(mw_load_le16(p + 6)); /* A */
+        }
+        return;
+    }
+    if (mw_format_is_one_byte(format)) {
+        for (size_t i = 0; i < bytes; i++) {
+            bgra[i * 4 + 0] = pixels[i];
+            bgra[i * 4 + 1] = pixels[i];
+            bgra[i * 4 + 2] = pixels[i];
+            bgra[i * 4 + 3] = 255;
+        }
         return;
     }
     for (size_t i = 0; i < bytes; i += 4) {
@@ -958,17 +1062,47 @@ static int mw_create_host_buffer(struct mw_vulkan *vk, VkDeviceSize size, VkBuff
 
 static uint32_t mw_format_bytes(uint32_t format)
 {
-    if (format == MW_FORMAT_R8_UNORM || format == MW_FORMAT_A8_UNORM)
+    if (mw_format_is_one_byte(format))
         return 1u;
+    if (mw_format_is_half_float(format))
+        return 8u;
     return MW_PIXEL_BYTES;
+}
+
+/* The formats the host can put in a Vulkan image. Anything else keeps the WP-4 fallback: the
+ * texture stays absent, its draws are skipped, and the frame is still acknowledged. */
+static int mw_format_is_known(uint32_t format)
+{
+    return format == MW_FORMAT_BGRA8_UNORM || format == MW_FORMAT_RGBA8_UNORM ||
+           mw_format_is_one_byte(format) || mw_format_is_half_float(format);
+}
+
+static const char *mw_format_name(uint32_t format)
+{
+    switch (format) {
+    case MW_FORMAT_BGRA8_UNORM:
+        return "BGRA8";
+    case MW_FORMAT_RGBA8_UNORM:
+        return "RGBA8";
+    case MW_FORMAT_R8_UNORM:
+        return "R8";
+    case MW_FORMAT_A8_UNORM:
+        return "A8";
+    case MW_FORMAT_RGBA16_FLOAT:
+        return "RGBA16Float";
+    default:
+        return "unknown";
+    }
 }
 
 static VkFormat mw_vk_format(uint32_t format)
 {
     if (format == MW_FORMAT_RGBA8_UNORM)
         return VK_FORMAT_R8G8B8A8_UNORM;
-    if (format == MW_FORMAT_R8_UNORM || format == MW_FORMAT_A8_UNORM)
+    if (mw_format_is_one_byte(format))
         return VK_FORMAT_R8_UNORM;
+    if (mw_format_is_half_float(format))
+        return VK_FORMAT_R16G16B16A16_SFLOAT;
     return VK_FORMAT_B8G8R8A8_UNORM;
 }
 
@@ -1556,10 +1690,7 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
                       request->width, request->height);
         return -1;
     }
-    if (request->pixel_format != MW_FORMAT_BGRA8_UNORM &&
-        request->pixel_format != MW_FORMAT_RGBA8_UNORM &&
-        request->pixel_format != MW_FORMAT_R8_UNORM &&
-        request->pixel_format != MW_FORMAT_A8_UNORM) {
+    if (!mw_format_is_known(request->pixel_format)) {
         /* WP-4 fallback: a texture format the host does not know is not a frame error. The
          * texture stays absent; every draw that names it is skipped and the rest of the frame
          * still becomes a picture. */
@@ -1572,8 +1703,7 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
     if ((format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) == 0 ||
         (format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) == 0) {
         mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "texture %u: device cannot transfer %s",
-                      request->id,
-                      request->pixel_format == MW_FORMAT_BGRA8_UNORM ? "BGRA8" : "RGBA8");
+                      request->id, mw_format_name(request->pixel_format));
         return -1;
     }
     image = calloc(1, sizeof(*image));
@@ -2979,9 +3109,13 @@ static int mw_run_frame(struct mw_server *s, struct mw_frame_state *frame,
         return MW_STATUS_VULKAN;
     }
 
-    result->crc =
-        mw_crc32_rows_zlib((const unsigned char *)present->readback_mapped, present->width * 4,
-                           present->width * 4, present->height, s->crc_stride);
+    {
+        /* The read-back is tight width*bytes-a-texel rows, whatever format the texture has. */
+        uint32_t row_bytes = present->width * mw_format_bytes(present->format);
+
+        result->crc = mw_crc32_rows_zlib((const unsigned char *)present->readback_mapped, row_bytes,
+                                         row_bytes, present->height, s->crc_stride);
+    }
     result->crc_ok = result->crc == frame->guest_crc ? 1 : 0;
     t3 = mw_now_ns();
     /*
@@ -3800,9 +3934,9 @@ static int mw_surface_ram_read(struct mw_server *s, const struct mw_image *image
     return length == 0 ? 0 : -1;
 }
 
-/* Put the tight width*4 read-back into the surface's row-padded layout and read it back. Returns a
- * host-visible copy of what the guest's surface now contains, or NULL when the surface or the
- * writable RAM file is not there (the caller then publishes the Vulkan read-back). */
+/* Put the tight width*bytes-a-texel read-back into the surface's row-padded layout and read it
+ * back. Returns a host-visible copy of what the guest's surface now contains, or NULL when the
+ * surface or the writable RAM file is not there (the caller then publishes its own read-back). */
 static unsigned char *mw_surface_roundtrip(struct mw_server *s, struct mw_image *image)
 {
     uint32_t row_bytes;
@@ -3810,7 +3944,7 @@ static unsigned char *mw_surface_roundtrip(struct mw_server *s, struct mw_image 
 
     if (!image->has_surface || !s->ram_writable || image->readback_mapped == NULL)
         return NULL;
-    row_bytes = image->width * 4;
+    row_bytes = image->width * mw_format_bytes(image->format);
     if (image->surface_bytes_per_row < row_bytes ||
         image->surface_alloc_size < (uint64_t)image->surface_bytes_per_row * image->height)
         return NULL;
@@ -4280,6 +4414,9 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
          * Vulkan read-back is the picture, exactly as WP-2 left it. */
         unsigned char *surface_copy = mw_surface_roundtrip(s, target);
         const unsigned char *bgra = surface_copy != NULL ? surface_copy : target->readback_mapped;
+        /* Once converted, the bytes are BGRA8 whatever the texture's format was; the PPM step
+         * must read them in that order, not convert the 16-bit ramp twice. */
+        uint32_t bgra_format = target->format;
 
         if (!mw_format_is_bgra(target->format)) {
             unsigned char *scratch = mw_scratch_resize(&s->bgra_scratch, &s->bgra_scratch_size,
@@ -4288,6 +4425,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             if (scratch != NULL) {
                 mw_pixels_to_bgra(bgra, target->bytes, target->format, scratch);
                 bgra = scratch;
+                bgra_format = MW_FORMAT_BGRA8_UNORM;
             }
         }
         if (s->shm.path != NULL && s->shm.path[0] != '\0' && !s->shm.failed) {
@@ -4300,7 +4438,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             char path[4096];
 
             if (rgb != NULL) {
-                mw_pixels_to_rgb(bgra, target->width, target->height, target->format, rgb);
+                mw_pixels_to_rgb(bgra, target->width, target->height, bgra_format, rgb);
                 snprintf(path, sizeof(path), "%s/frame-%06u.ppm", s->out_dir,
                          (unsigned)s->frames_done);
                 if (mw_write_ppm(path, rgb, target->width, target->height) < 0)
