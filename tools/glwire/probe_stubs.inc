@@ -147,4 +147,55 @@ host_label_begin(struct glstate *g)
 	return 0;
 }
 
+static void
+host_note_uniform(struct glstate *g, const char *kind, GLint guest_location, GLint host_location,
+    const GLfloat *values)
+{
+	(void)g;
+	(void)kind;
+	(void)guest_location;
+	(void)host_location;
+	(void)values;
+}
+
+static int
+host_widget_blank(const unsigned char *data, GLsizei bytes, GLint w, GLint h, GLsizei row_bytes,
+    GLsizei pixel_bytes)
+{
+	(void)data;
+	(void)bytes;
+	(void)w;
+	(void)h;
+	(void)row_bytes;
+	(void)pixel_bytes;
+	/* not blank: the replay draws the surface it uploaded, as it did before the widget probe */
+	return 0;
+}
+
+/*
+ * The replay switches, as "every recorded call is replayed": the same idea as the probe stubs above.
+ * GLWIRE_SKIP_CLEAR, GLWIRE_SKIP_THIN_LINES, GLWIRE_FORCE_LINEAR, GLWIRE_LABEL_ROW_SCRUB and the
+ * RLE request field are host_glwire dash experiments, and dispatch.inc reads them (and the
+ * per-frame upload bookkeeping and the last text draw's scissor) directly. Defining them here keeps
+ * the two replay tests compiling as the host grows switches -- the stage-26 thin-line default broke
+ * them because dispatch.inc learned a new global and this file did not.
+ */
+int host_skip_clear;
+int host_skip_thin_lines;
+int host_force_linear;
+static int label_row_scrub;
+static int rle_wanted;
+static int trace_width, trace_height;
+static unsigned long long frames_replayed;
+static GLuint panel_upload_texture;
+static int panel_upload_frame;
+static GLuint panel_upload_texture2;
+static int panel_upload_frame2;
+static unsigned char *panel_upload_copy;
+static size_t panel_upload_copy_bytes;
+static struct {
+	int scissor_on;
+	GLint scissor[4];
+} text_snap;
+
 #endif /* GLWIRE_PROBE_STUBS */

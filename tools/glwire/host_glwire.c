@@ -95,6 +95,15 @@ static unsigned char *ram_memory;
 static size_t ram_bytes;
 static uint64_t ram_pa_base = 0x40000000;
 static int ram_writable;
+/*
+ * GLWIRE_SURFACE_FLIP=1: the WP-4 item 1.1 orientation switch. The in-place write-back into the
+ * guest's display surface writes guest row 0 from the picture's last row instead of its first
+ * (and read_picture_rows() undoes it). Default 0 = the delivered path is byte-for-byte what it
+ * was. The published SHM picture, --save files and dumps are never flipped: the browser view and
+ * the V100 baseline do not move with this switch; only the bytes the guest's compositor reads
+ * out of its own surface do. See the "Orientation" section of README.md.
+ */
+static int surface_flip_rows;
 
 static int
 map_ram(const char *path)
@@ -3703,8 +3712,11 @@ stage11_report(const char *which, const unsigned char *picture, int width, int h
 		struct guest_cursor cursor = { segments, count, 0, 0 };
 		size_t available = 0;
 		unsigned char *where = cursor_at(&cursor, (size_t)rows[i] * row_bytes, &available);
+		/* The report checks that the write landed; with GLWIRE_SURFACE_FLIP=1 the guest row
+		 * holds the picture row counted from the other end. */
+		int picture_row = surface_flip_rows ? height - 1 - rows[i] : rows[i];
 
-		picture_hash[i] = sample_row_hash(picture + (size_t)rows[i] * (size_t)width * 4,
+		picture_hash[i] = sample_row_hash(picture + (size_t)picture_row * (size_t)width * 4,
 		    (size_t)width * 4);
 		surface_hash[i] = where != NULL && available >= (size_t)width * 4
 		    ? sample_row_hash(where, (size_t)width * 4) : 0;
@@ -3727,7 +3739,10 @@ read_picture_rows(unsigned char *picture, int width, int height, size_t row_byte
 	struct guest_cursor cursor = { segments, count, 0, 0 };
 	size_t used = (size_t)width * 4;
 
+	/* The inverse of write_picture_rows(): a guest row read back lands in the picture row the
+	 * flip took it from, so the fallback picture keeps the orientation of the wire's picture. */
 	for (int y = 0; y < height; y++) {
+		int destination_row = surface_flip_rows ? height - 1 - y : y;
 		size_t offset = (size_t)y * row_bytes;
 		size_t done = 0;
 
@@ -3741,7 +3756,7 @@ read_picture_rows(unsigned char *picture, int width, int height, size_t row_byte
 			if (available > used - done) {
 				available = used - done;
 			}
-			memcpy(picture + (size_t)y * used + done, source, available);
+			memcpy(picture + (size_t)destination_row * used + done, source, available);
 			done += available;
 		}
 	}
@@ -3755,7 +3770,15 @@ write_picture_rows(const unsigned char *picture, int width, int height, size_t r
 	struct guest_cursor cursor = { segments, count, 0, 0 };
 	size_t used = (size_t)width * 4;
 
+	/*
+	 * The flip is a row permutation, not a byte one: guest row y still lives at y*row_bytes and
+	 * still gets `used` = width*4 bytes, only the source row is counted from the end. The row
+	 * padding (row_bytes - used, the IOSurface's bytesPerRow beyond the picture) stays padding
+	 * and is never written. The destination offsets still grow, so the segment cursor walks
+	 * forward exactly as it does unflipped.
+	 */
 	for (int y = 0; y < height; y++) {
+		int source_row = surface_flip_rows ? height - 1 - y : y;
 		size_t offset = (size_t)y * row_bytes;
 		size_t done = 0;
 
@@ -3769,13 +3792,146 @@ write_picture_rows(const unsigned char *picture, int width, int height, size_t r
 			if (available > used - done) {
 				available = used - done;
 			}
-			memcpy(destination, picture + (size_t)y * used + done, available);
+			memcpy(destination, picture + (size_t)source_row * used + done, available);
 			done += available;
 		}
 	}
 	return 1;
 }
 
+
+/*
+ * GLWIRE_SURFACE_FLIP_TEST=1: offline check of the WP-4 item 1.1 orientation switch. It needs no
+ * display and no guest: it builds a numbered 4x5 picture and a strided guest buffer (24 bytes a
+ * row for a 16-byte row, so the row padding is visible), splits that buffer into two segments at
+ * a non-row boundary (53 bytes: two rows and five bytes, so the writer crosses segments inside a
+ * row), and calls the same write_picture_rows() the in-place path calls. Then it reads the guest
+ * rows back and asserts the mapping the switch asks for:
+ *
+ *   unset / GLWIRE_SURFACE_FLIP=0 -- guest row y holds picture row y (identity);
+ *   GLWIRE_SURFACE_FLIP=1         -- guest row y holds picture row height-1-y (vertical);
+ *
+ * and, for both, that every row's padding bytes were left alone and that the picture published
+ * for the browser (GLWIRE_SHM) is still the unflipped one. Exits 0 only when all of that holds.
+ */
+static int
+surface_flip_selftest(void)
+{
+	enum { W = 4, H = 5 };
+	const size_t row_bytes = (size_t)W * 4 + 8;   /* 24: 16 bytes of picture + 8 bytes of padding */
+	const size_t target = row_bytes * (size_t)H;
+	const size_t split = 53;                      /* inside row 2, not on a row boundary */
+	unsigned char *guest = malloc(target);
+	unsigned char picture[W * H * 4];
+	unsigned char *ram_saved = ram_memory;
+	uint64_t base_saved = ram_pa_base;
+	wire_segment segments[2];
+	int failures = 0;
+	int padding_ok = 1;
+	int published_ok = 1;
+
+	if (guest == NULL) {
+		printf("surface-flip-test: out of memory\n");
+		return 1;
+	}
+	memset(guest, 0xee, target);
+	for (int y = 0; y < H; y++) {
+		for (int x = 0; x < W; x++) {
+			unsigned char *p = picture + ((size_t)y * (size_t)W + (size_t)x) * 4;
+
+			p[0] = (unsigned char)(y + 1);   /* BGRA: the row number in blue */
+			p[1] = 0x40;
+			p[2] = 0x80;
+			p[3] = 0xff;
+		}
+	}
+	ram_memory = guest;
+	ram_pa_base = 0x40000000;
+	segments[0].pa = ram_pa_base;
+	segments[0].len = (uint32_t)split;
+	segments[0].reserved = 0;
+	segments[1].pa = ram_pa_base + split;
+	segments[1].len = (uint32_t)(target - split);
+	segments[1].reserved = 0;
+
+	if (!write_picture_rows(picture, W, H, row_bytes, segments, 2)) {
+		printf("surface-flip-test: write_picture_rows failed\n");
+		failures++;
+	}
+	for (int y = 0; y < H; y++) {
+		const unsigned char *row = guest + (size_t)y * row_bytes;
+		int expected = surface_flip_rows ? H - 1 - y : y;
+
+		if (row[0] != (unsigned char)(expected + 1) || row[1] != 0x40 || row[2] != 0x80 ||
+		    row[3] != 0xff) {
+			printf("surface-flip-test: guest row %d holds picture row %u, expected %d\n", y,
+			    (unsigned)row[0] - 1, expected);
+			failures++;
+		}
+		for (size_t b = (size_t)W * 4; b < row_bytes; b++) {
+			if (row[b] != 0xee) {
+				printf("surface-flip-test: guest row %d padding byte %zu was written\n", y,
+				    b - (size_t)W * 4);
+				padding_ok = 0;
+				failures++;
+			}
+		}
+	}
+	{
+		/* The published picture must not follow the guest surface: it is what webview.py shows
+		 * and what the delivery branch keeps stable. */
+		char path[128];
+		const char *previous = getenv("GLWIRE_SHM");
+		FILE *file;
+
+		snprintf(path, sizeof(path), "/tmp/glwire-surface-flip-%ld.shm", (long)getpid());
+		setenv("GLWIRE_SHM", path, 1);
+		publish_picture(picture, sizeof(picture), W, H);
+		file = fopen(path, "rb");
+		if (file == NULL) {
+			printf("surface-flip-test: the published picture was not written\n");
+			published_ok = 0;
+			failures++;
+		} else {
+			struct shm_header header;
+			unsigned char published[sizeof(picture)];
+			size_t got = fread(&header, 1, sizeof(header), file);
+
+			if (got != sizeof(header) || fread(published, 1, sizeof(published), file) !=
+			    sizeof(published)) {
+				printf("surface-flip-test: short published picture\n");
+				published_ok = 0;
+				failures++;
+			} else if (header.width != W || header.height != H ||
+			    header.bytes != sizeof(picture)) {
+				printf("surface-flip-test: published header %ux%u %u bytes\n",
+				    header.width, header.height, header.bytes);
+				published_ok = 0;
+				failures++;
+			} else if (memcmp(published, picture, sizeof(picture)) != 0) {
+				printf("surface-flip-test: the published picture was flipped\n");
+				published_ok = 0;
+				failures++;
+			}
+			fclose(file);
+		}
+		unlink(path);
+		if (previous == NULL) {
+			unsetenv("GLWIRE_SHM");
+		} else {
+			setenv("GLWIRE_SHM", previous, 1);
+		}
+	}
+	ram_memory = ram_saved;
+	ram_pa_base = base_saved;
+	free(guest);
+	printf("surface-flip-test: mode=%s row_bytes=%zu height=%d mapping=%s padding=%s "
+	    "published=%s %s\n", surface_flip_rows ? "on" : "off", row_bytes, (int)H,
+	    surface_flip_rows ? "vertical" : "identity", padding_ok ? "kept" : "MOVED",
+	    published_ok ? "unflipped" : "FLIPPED", failures == 0 ? "PASS" : "FAIL");
+	fflush(stdout);
+	return failures == 0 ? 0 : 1;
+}
 
 /* GLWIRE_DUMP_TEXTURES=<prefix>: every host texture after the frame's upload pass, with the
  * parameters the replay will sample it with. The files are level 0 as RGBA; the small text line
@@ -5193,6 +5349,20 @@ main(int argc, char **argv)
 		const char *e = getenv("GLWIRE_SKIP_CLEAR");
 
 		host_skip_clear = e != NULL && atoi(e) != 0;
+	}
+	{
+		/* WP-4 item 1.1: the experimental orientation switch for the in-place write-back into
+		 * the guest's display surface. Off (the default) is the delivered behaviour. */
+		const char *flip = getenv("GLWIRE_SURFACE_FLIP");
+
+		surface_flip_rows = flip != NULL && flip[0] != '\0' && atoi(flip) != 0;
+	}
+	{
+		const char *test = getenv("GLWIRE_SURFACE_FLIP_TEST");
+
+		if (test != NULL && atoi(test) != 0) {
+			return surface_flip_selftest();
+		}
 	}
 	repair_dash = getenv("GLWIRE_REPAIR_DASH") != NULL && atoi(getenv("GLWIRE_REPAIR_DASH")) != 0;
 	host_force_linear = getenv("GLWIRE_FORCE_LINEAR") != NULL && atoi(getenv("GLWIRE_FORCE_LINEAR")) != 0;

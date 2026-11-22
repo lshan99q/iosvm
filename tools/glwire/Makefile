@@ -4,7 +4,8 @@
 # (userland/build.sh GL=1), not here.
 #
 #   make            frame_replay, host_glwire, map_test
-#   make test       map_test, then e2e_test.py (which builds a fake RAM file)
+#   make test       map_test, e2e_test.py, then surface_flip_test.py (the offline row-order check
+#                   of the GLWIRE_SURFACE_FLIP experiment)
 #   make clean
 
 CC      ?= cc
@@ -27,6 +28,7 @@ map_test: map_test.c map_stream.c $(HOST_SRC)
 test: map_test host_glwire
 	./map_test
 	./e2e_test.py
+	./surface_flip_test.py
 
 clean:
 	rm -f frame_replay host_glwire map_test

@@ -108,6 +108,12 @@ $ ./e2e_test.py
 e2e_test: reply 'R done 0.09'
 e2e_test: centre pixel B=0 G=51 R=51 A=255
 e2e_test: PASS
+
+$ ./surface_flip_test.py
+PASS surface-flip: GLWIRE_SURFACE_FLIP=unset -> identity mapping, padding kept, published picture unflipped
+PASS surface-flip: GLWIRE_SURFACE_FLIP=0 -> identity mapping, padding kept, published picture unflipped
+PASS surface-flip: GLWIRE_SURFACE_FLIP=1 -> vertical mapping, padding kept, published picture unflipped
+surface_flip_test: PASS (unset and =0 are identity, =1 is vertical; default unchanged)
 ```
 
 `map_stream.c` deliberately names its objects 77, 88/89, 101/102 and 303 and its uniforms 5/6; the
@@ -144,6 +150,44 @@ panel_probe: PASS: the console surface is live
 
 `tools/qemu/qemu-ppm-stride.patch` is the one-line QEMU fix (write `width * 3` rather than the
 padded stride) for a build that wants standard PPMs; the readers here handle QEMU's current output.
+
+## Orientation: the GL surface's row order (WP-4 item 1.1)
+
+The desktop boot (`docs/stage34-wp4-desktop.md` section 3.7) shows SpringBoard's desktop upside
+down -- status bar at the bottom, glyphs inverted -- while the BootUI frame is upright. The split is
+the path, not the wire:
+
+* the BootUI frame is backboardd's CoreAnimation, executed by `host/metalwire` on Vulkan; its
+  orientation is the wire's and it is upright;
+* the desktop is SpringBoard's GL, replayed here, and the composited picture is written by
+  reference into SpringBoard's own display IOSurface (the in-place path above) for the guest's
+  compositor to sample.
+
+The host's picture comes from `glReadPixels()`, whose row 0 is the GL framebuffer's bottom row, and
+`write_picture_rows()` puts picture row y into guest row y. The guest's IOSurface consumer reads
+rows top-down, so a host-GL surface arrives vertically mirrored. The fix belongs at that one byte
+boundary: guest row y at offset `y * row_bytes` gets picture row `height-1-y`; each row is still
+`width * 4` bytes, and the row padding (`row_bytes - width*4` -- 3072 against 3000 for the 750-wide
+surface) stays padding and is never written. `read_picture_rows()` applies the inverse for the
+fallback that samples the second surface, and the stage11 row-hash report compares the same pairs.
+
+The switch is experimental and off by default:
+
+```
+GLWIRE_SURFACE_FLIP=1 ./host_glwire 9110     # the experiment
+./host_glwire 9110                           # delivered behaviour, byte for byte
+```
+
+Only the bytes written into the guest's surface flip. The picture published for `webview.py`
+(`GLWIRE_SHM`), `--save` files and the texture/frame dumps keep the order they always had, so the
+browser view and the delivered 9110 output do not move. The packed picture-buffer path (a request
+with `row_bytes` 0) is unchanged too: that buffer is a picture, not a strided surface.
+
+The check needs neither a display nor a guest: `GLWIRE_SURFACE_FLIP_TEST=1 ./host_glwire` builds a
+numbered 4x5 picture, writes it through the same `write_picture_rows()` into a strided buffer split
+across two segments at a non-row boundary, and asserts the mapping, the untouched padding and the
+unflipped published picture. `surface_flip_test.py` runs it with the variable unset, `=0` and `=1`
+(the output is in Tests above).
 
 ## What is left
 
