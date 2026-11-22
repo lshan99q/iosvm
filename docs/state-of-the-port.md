@@ -13,7 +13,7 @@ not have to rediscover any of it.
 | CoreAnimation draws through Mesa `softpipe` | addendum 12, `docs/demo/system-ui-first.png` |
 | **the iOS home screen is drawn by the system itself** | addendum 15, `docs/demo/home-screen.png` |
 | (experiment, branch `experiment/metal-translation`) a synthetic Metal client's blit/present is translated to the host's Vulkan, checked byte for byte and shown in a browser | `docs/stage29-metal-translation.md`, `docs/demo/metal-translation-webview.png` |
-| (experiment, same branch) CoreAnimation's Metal renderer reaches this port's device plug-in and its render encoder is **serialized on metalwire protocol 2** — render pass, 13 sets and 3 indexed draws a frame, `com.apple.coreanimation.draw.*` pipelines with their base functions; the host decodes and validates them. There is no picture yet (no shaders, display IOSurface not wrapped) | `docs/stage30-ca-metal.md`, `docs/stage31-ca-metal-wire.md`, `docs/research/ca-metallib-url.md` |
+| (experiment, same branch) CoreAnimation's Metal renderer reaches this port's device plug-in, its render encoder is **serialized and executed** (metalwire protocol 3): render pass, 16–17 sets, 3 indexed draws with their recorded buffer offsets; the layer image and the R8 luma ramp arrive through `replaceRegion:`, the display texture is a real IOSurface, and the BootUI frame is a picture in the browser (0 VUID, lavapipe) | `docs/stage30-ca-metal.md`, `docs/stage31-ca-metal-wire.md`, `docs/stage33-ca-metal-picture.md` |
 
 ## How to get the home screen
 
