@@ -201,6 +201,13 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
   missing report) and every tile matches the box/binomial kernel the shaders document to within
   2/255, including its PNG,
+* the draw dump (WP-4 D3/D5 support): with `MW_DUMP_DRAWS=1` and `MW_DUMP_DRAWS_FILE=<path>` the
+  host writes one machine-readable line per executed draw -- `seq`, `frame`, the pipeline name,
+  the stream-1 vertex colour half4, the fragment uniform's buffer/offset and first 16 bytes
+  (hex and f32), the target-space bbox from the mvp and the draw's vertices, the bound texture and
+  the fetch flag. The test asserts the line's format and the labels fixture's known values
+  (white colour, bbox 0,0,32,32, texture 90, fetch 0) and that without the switch no file and no
+  line appear,
 * the cross-pass chain (WP-4 D3/D5): one frame carries two render encoders (source -> texture
   101, texture 101 -> texture 102) and a second frame samples 101 again; both pictures must repeat
   the source. A host that composites every draw into the frame's last target renders the second
@@ -334,6 +341,10 @@ The execution half:
   alpha with a zero colour, so the host's R8 image would otherwise feed the fragment stage
   `(coverage, 0, 0)` and every label came out red (boot wp4-v6's D4). `R8Unorm` (the luma ramp,
   format 10) keeps a plain view;
+* can write a per-draw diagnostic dump when `MW_DUMP_DRAWS=1` is in the environment (file from
+  `MW_DUMP_DRAWS_FILE`, default `/tmp/metalwire-draws.txt`): one grep-able `draw ...` line per
+  executed draw with the vertex colour, the fragment uniform's first 16 bytes and the draw's
+  target-space bounding box. The switch is off by default and changes nothing when unset;
 * reads the target back after the draws, logs its CRC and a non-zero-byte count, publishes it in
   glwire's SHM format when `--shm` is on, and acknowledges the frame as before.
 

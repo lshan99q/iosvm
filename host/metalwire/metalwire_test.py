@@ -565,6 +565,121 @@ def run_chain(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def _run_labels_once(base_env, work, extra_env):
+    """Run the labels fixture once with a given environment; return (host output, host code)."""
+    out_dir = os.path.join(work, "frames")
+    os.makedirs(out_dir, exist_ok=True)
+    env = dict(base_env)
+    env.update(extra_env)
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "1", "--shm", "",
+         "--out", out_dir, "--png-every", "1", "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    lines = []
+    lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain():
+        for line in host.stderr:
+            with lock:
+                lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        require(listening.wait(60), "draw-dump host did not print a listening line in 60 s")
+        with lock:
+            port = None
+            for line in lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    port = match.group(1)
+                    break
+        require(port is not None, "cannot parse the draw-dump host's port")
+        gen = subprocess.run([sys.executable, GEN, "--labels", "--port", port],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             timeout=120)
+        require(gen.returncode == 0, "labels fixture failed under the draw-dump test:\n%s\n%s" %
+                (gen.stdout, gen.stderr))
+        code = host.wait(timeout=60)
+        reader.join(timeout=10)
+        with lock:
+            return "\n".join(lines), code
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+
+
+def run_draw_dump(env):
+    """WP-4 D3/D5 support: MW_DUMP_DRAWS writes one machine-readable line per executed draw.
+
+    The switch is off by default: no file, no extra output. With it on, every executed draw gets a
+    stable key=value line carrying the vertex colour, the fragment uniform's first 16 bytes and the
+    draw's target-space bbox -- the three fields t16 needed for a Dock/Search frame. The labels
+    fixture draws once (32x32, white, texture 90, no fetch), so the line's values are known.
+    """
+    size = metalwire_gen.LABEL_MASK
+    work = tempfile.mkdtemp(prefix="metalwire-drawdump-")
+    dump_path = os.path.join(work, "draws.txt")
+    ok = False
+    try:
+        on_output, on_code = _run_labels_once(env, work, {
+            "MW_DUMP_DRAWS": "1", "MW_DUMP_DRAWS_FILE": dump_path})
+        require(on_code == 0, "draw-dump host exited %s\n%s" % (on_code, on_output))
+        require("draw dump: %s" % dump_path in on_output,
+                "the enabled switch did not announce its file:\n%s" % on_output)
+        require(os.path.exists(dump_path), "%s was not written" % dump_path)
+        with open(dump_path) as handle:
+            lines = [line.rstrip("\n") for line in handle if line.strip()]
+        require(len(lines) == 1, "expected one draw line, got %d:\n%s" % (len(lines),
+                                                                         "\n".join(lines)))
+        pattern = re.compile(
+            r'^draw seq=(\d+) frame=(\d+) pipeline="([^"]+)" '
+            r"vertex_color=(-?\d+\.\d{4}),(-?\d+\.\d{4}),(-?\d+\.\d{4}),(-?\d+\.\d{4}) "
+            r"frag_uniform_buffer=(\d+) frag_uniform_offset=(\d+) "
+            r"uniform16=([0-9a-f]{32}) uniform16_f32=(-?\d+\.\d{4}),(-?\d+\.\d{4}),"
+            r"(-?\d+\.\d{4}),(-?\d+\.\d{4}) "
+            r"bbox=(-?\d+),(-?\d+),(-?\d+),(-?\d+) texture=(\d+) fetch=([01])$")
+        match = pattern.match(lines[0])
+        require(match is not None, "the draw line does not match the documented format:\n%s" %
+                lines[0])
+        require(match.group(1) == "1" and match.group(2) == "0",
+                "unexpected seq/frame: %s/%s" % (match.group(1), match.group(2)))
+        require(match.group(3) == "com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                "unexpected pipeline %s" % match.group(3))
+        for group in range(4, 8):
+            require(float(match.group(group)) == 1.0,
+                    "unexpected vertex colour component %s" % match.group(group))
+        require(match.group(8) == "93" and match.group(9) == "0",
+                "unexpected fragment uniform binding %s/%s" % (match.group(8), match.group(9)))
+        require(match.group(10) == "0" * 32,
+                "unexpected uniform bytes %s" % match.group(10))
+        require((match.group(15), match.group(16), match.group(17), match.group(18)) ==
+                ("0", "0", str(size), str(size)),
+                "unexpected bbox %s,%s,%s,%s" % (match.group(15), match.group(16),
+                                                 match.group(17), match.group(18)))
+        require(match.group(19) == "90" and match.group(20) == "0",
+                "unexpected texture/fetch %s/%s" % (match.group(19), match.group(20)))
+
+        off_path = os.path.join(work, "off-draws.txt")
+        off_output, off_code = _run_labels_once(env, os.path.join(work, "off"), {
+            "MW_DUMP_DRAWS_FILE": off_path})
+        require(off_code == 0, "off-switch host exited %s\n%s" % (off_code, off_output))
+        require("draw dump" not in off_output,
+                "the off switch still printed a draw-dump line:\n%s" % off_output)
+        require(not os.path.exists(off_path),
+                "the off switch still wrote %s" % off_path)
+        print("PASS draw-dump: MW_DUMP_DRAWS=1 writes one documented line per draw "
+              "(pipeline/vertex_color/uniform16/bbox/texture/fetch); off writes nothing")
+        ok = True
+    finally:
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def read_png_rgb(path):
     """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
     with open(path, "rb") as f:
@@ -844,10 +959,11 @@ def main():
         run_format115(env)
         run_blur_pipelines(env)
         run_labels(env)
+        run_draw_dump(env)
         run_chain(env)
         run_orientation(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
-              "labels, chain, orientation)" % (WIDTH, HEIGHT, FRAMES))
+              "labels, draw-dump, chain, orientation)" % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)

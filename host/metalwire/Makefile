@@ -14,7 +14,7 @@
 
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
-LDLIBS  ?= -lvulkan
+LDLIBS  ?= -lvulkan -lm
 
 GLSLANG ?= glslangValidator
 PYTHON  ?= python3

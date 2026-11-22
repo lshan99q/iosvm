@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -2949,6 +2950,225 @@ static int mw_handle_render_end(struct mw_server *s, const struct mw_render_end 
  * target honours the wire's load action and later draws into the same target load. */
 #define MW_RENDER_MAX_TARGETS 32
 
+/*
+ * MW_DUMP_DRAWS=1 (and optional MW_DUMP_DRAWS_FILE=<path>): write one machine-readable line per
+ * executed render draw. The switch exists so a boot can answer per-draw questions -- the vertex
+ * colour, the fragment uniform's first bytes, and the draw's target-space bounding box -- without
+ * keeping a full wire dump around (WP-4's D3/D5 needed exactly those fields). It is off by
+ * default: without the variable the file is never opened and the host's output is unchanged.
+ */
+static FILE *draw_dump;
+
+static int mw_pipeline_fetches(const struct mw_render_pipeline *pipeline);
+
+static void mw_draw_dump_open(void)
+{
+    const char *path = getenv("MW_DUMP_DRAWS_FILE");
+
+    if (path == NULL || path[0] == '\0')
+        path = "/tmp/metalwire-draws.txt";
+    draw_dump = fopen(path, "w");
+    if (draw_dump == NULL)
+        mw_log("draw dump: cannot write %s", path);
+    else
+        mw_log("draw dump: %s (one line per executed draw)", path);
+}
+
+static void mw_draw_dump_close(void)
+{
+    if (draw_dump != NULL) {
+        fclose(draw_dump);
+        draw_dump = NULL;
+    }
+}
+
+static int mw_draw_buf_read(const struct mw_buffer *buffer, uint64_t offset, void *out,
+                            size_t bytes)
+{
+    if (buffer == NULL || buffer->mapped == NULL || offset > buffer->length ||
+        bytes > buffer->length - offset)
+        return -1;
+    memcpy(out, (const unsigned char *)buffer->mapped + offset, bytes);
+    return 0;
+}
+
+/* Read the draw's position attribute as float4 at vertex `index` (stream 1, the wire's layouts). */
+static int mw_draw_position(const struct mw_server *s, const struct mw_render_draw_command *draw,
+                            const struct mw_render_pipeline *pipeline, uint32_t index,
+                            float out[4])
+{
+    const struct mw_vertex_attribute *attribute = &pipeline->attributes[0];
+    const struct mw_buffer *buffer;
+    uint32_t binding = attribute->buffer_index;
+    uint64_t stride;
+    uint64_t offset;
+
+    if (attribute->format != 31 || binding >= MW_MAX_RENDER_LAYOUTS)
+        return -1;
+    buffer = mw_buffer_find((struct mw_server *)s, draw->vertex_buffer_id[binding]);
+    if (buffer == NULL)
+        return -1;
+    stride = pipeline->layouts[binding].stride;
+    offset = draw->vertex_buffer_offset[binding] + (uint64_t)index * stride + attribute->offset;
+    return mw_draw_buf_read(buffer, offset, out, sizeof(float) * 4);
+}
+
+static void mw_dump_draw(const struct mw_server *s, uint64_t frame_seq, uint64_t frame_index,
+                         const struct mw_render_draw_command *draw,
+                         const struct mw_render_pipeline *pipeline,
+                         const struct mw_image *draw_target)
+{
+    float colour[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    unsigned char uniform[16];
+    char uniform_hex[33];
+    char uniform_f32[128];
+    float mvp[16];
+    const struct mw_buffer *wire;
+    const struct mw_buffer *index_buffer = NULL;
+    uint32_t wire_id;
+    uint32_t colour_binding = pipeline->attributes[3].buffer_index;
+    uint32_t index_count = 0;
+    uint32_t index_start = 0;
+    float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
+    int have_bbox = 0;
+    uint32_t i;
+
+    if (draw_dump == NULL)
+        return;
+
+    /* The fragment uniform is the wire's fragment buffer index 1; the vertex stage reads the mvp
+     * from vertex buffer index 2 (the same allocation the draw records as its wire buffer). */
+    wire_id = draw->vertex_buffer_id[2] != 0
+                  ? draw->vertex_buffer_id[2]
+                  : (draw->fragment_buffer_id[1] != 0 ? draw->fragment_buffer_id[1]
+                                                     : draw->vertex_buffer_id[1]);
+    wire = mw_buffer_find((struct mw_server *)s, wire_id);
+    uniform_hex[0] = '\0';
+    strcpy(uniform_f32, "none");
+    if (draw->fragment_buffer_id[1] != 0) {
+        const struct mw_buffer *uniform_buffer =
+            mw_buffer_find((struct mw_server *)s, draw->fragment_buffer_id[1]);
+
+        if (mw_draw_buf_read(uniform_buffer, draw->fragment_buffer_offset[1], uniform,
+                             sizeof(uniform)) == 0) {
+            float first[4];
+
+            for (i = 0; i < sizeof(uniform); i++)
+                snprintf(uniform_hex + i * 2, 3, "%02x", uniform[i]);
+            memcpy(first, uniform, sizeof(first));
+            snprintf(uniform_f32, sizeof(uniform_f32), "%.4f,%.4f,%.4f,%.4f", (double)first[0],
+                     (double)first[1], (double)first[2], (double)first[3]);
+        } else {
+            strcpy(uniform_hex, "none");
+        }
+    } else {
+        strcpy(uniform_hex, "none");
+    }
+
+    /* The vertex colour is stream 1's attribute 3 (half4). */
+    if (colour_binding < MW_MAX_RENDER_LAYOUTS) {
+        const struct mw_buffer *colour_buffer =
+            mw_buffer_find((struct mw_server *)s, draw->vertex_buffer_id[colour_binding]);
+        uint64_t stride = pipeline->layouts[colour_binding].stride;
+        uint64_t base = draw->vertex_buffer_offset[colour_binding] +
+                        (uint64_t)((draw->flags & MW_DRAW_INDEXED) ? 0 : draw->vertex_start) *
+                            stride +
+                        pipeline->attributes[3].offset;
+        unsigned short half4[4];
+
+        if (mw_draw_buf_read(colour_buffer, base, half4, sizeof(half4)) == 0) {
+            for (i = 0; i < 4; i++) {
+                int sign = (half4[i] >> 15) & 1;
+                int exponent = (half4[i] >> 10) & 31;
+                int mantissa = half4[i] & 1023;
+
+                if (exponent == 0)
+                    colour[i] = (float)mantissa * 5.9604645e-08f;
+                else if (exponent == 31)
+                    colour[i] = 0.0f;
+                else
+                    colour[i] = (float)(1.0 + mantissa / 1024.0) * powf(2.0f,
+                                                                     (float)(exponent - 15));
+                if (sign)
+                    colour[i] = -colour[i];
+            }
+        }
+    }
+
+    /* Bounding box in the target's pixel space: mvp columns times the vertex positions, NDC to
+     * framebuffer (Metal's y-up NDC, rows top-down), then min/max over the transformed vertices. */
+    if (wire != NULL && mw_draw_buf_read(wire, draw->vertex_buffer_offset[2], mvp, sizeof(mvp)) == 0 &&
+        pipeline->attributes[0].format == 31) {
+        if (draw->flags & MW_DRAW_INDEXED) {
+            index_buffer = mw_buffer_find((struct mw_server *)s, draw->index_buffer);
+            index_count = draw->index_count < 1024 ? draw->index_count : 1024;
+            index_start = 0;
+        } else {
+            index_count = draw->vertex_count < 1024 ? draw->vertex_count : 1024;
+            index_start = draw->vertex_start;
+        }
+        for (i = 0; i < index_count; i++) {
+            float position[4];
+            uint32_t vertex = index_start + i;
+
+            if ((draw->flags & MW_DRAW_INDEXED) && index_buffer != NULL) {
+                if (draw->index_type == 1) {
+                    uint32_t index;
+                    if (mw_draw_buf_read(index_buffer,
+                                         draw->index_buffer_offset + (uint64_t)i * 4, &index, 4) < 0)
+                        break;
+                    vertex = index;
+                } else {
+                    unsigned short index;
+                    if (mw_draw_buf_read(index_buffer,
+                                         draw->index_buffer_offset + (uint64_t)i * 2, &index, 2) < 0)
+                        break;
+                    vertex = index;
+                }
+            }
+            if (mw_draw_position(s, draw, pipeline, vertex, position) < 0)
+                break;
+            {
+                float x = mvp[0] * position[0] + mvp[4] * position[1] + mvp[8] * position[2] +
+                          mvp[12] * position[3];
+                float y = mvp[1] * position[0] + mvp[5] * position[1] + mvp[9] * position[2] +
+                          mvp[13] * position[3];
+                float w = mvp[3] * position[0] + mvp[7] * position[1] + mvp[11] * position[2] +
+                          mvp[15] * position[3];
+                float fx, fy;
+
+                if (w == 0.0f)
+                    w = 1.0f;
+                fx = (x / w * 0.5f + 0.5f) * (float)draw_target->width;
+                fy = (1.0f - (y / w * 0.5f + 0.5f)) * (float)draw_target->height;
+                if (!have_bbox) {
+                    min_x = max_x = fx;
+                    min_y = max_y = fy;
+                    have_bbox = 1;
+                } else {
+                    if (fx < min_x) min_x = fx;
+                    if (fx > max_x) max_x = fx;
+                    if (fy < min_y) min_y = fy;
+                    if (fy > max_y) max_y = fy;
+                }
+            }
+        }
+    }
+
+    fprintf(draw_dump,
+            "draw seq=%" PRIu64 " frame=%" PRIu64 " pipeline=\"%s\" vertex_color=%.4f,%.4f,%.4f,%.4f "
+            "frag_uniform_buffer=%u frag_uniform_offset=%" PRIu64 " uniform16=%s uniform16_f32=%s "
+            "bbox=%d,%d,%d,%d texture=%u fetch=%d\n",
+            frame_seq, frame_index, pipeline->name, (double)colour[0], (double)colour[1],
+            (double)colour[2], (double)colour[3],
+            draw->fragment_buffer_id[1], draw->fragment_buffer_offset[1], uniform_hex,
+            uniform_f32,
+            have_bbox ? (int)floorf(min_x) : -1, have_bbox ? (int)floorf(min_y) : -1,
+            have_bbox ? (int)(ceilf(max_x) - floorf(min_x)) : 0,
+            have_bbox ? (int)(ceilf(max_y) - floorf(min_y)) : 0,
+            draw->texture_id[3], mw_pipeline_fetches(pipeline));
+}
+
 static void mw_cmd_image_barrier(VkCommandBuffer command, VkImage image, VkImageLayout old_layout,
                                  VkImageLayout new_layout, VkAccessFlags src_access,
                                  VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
@@ -4199,6 +4419,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             }
             first_draw_to_target = !target_written;
         }
+        mw_dump_draw(s, frame->seq, s->render_frames_seen, draw, pipeline, draw_target);
         /* The shader's Metal buffer arguments live in the wire buffer; the one the vertex stage
          * reads at index 2 (mvp_matrix) is the authoritative allocation for this draw. */
         wire_id = draw->vertex_buffer_id[2] != 0
@@ -4473,6 +4694,8 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         }
         vkCmdEndRendering(command);
     }
+    if (draw_dump != NULL)
+        fflush(draw_dump);
     }
 
     if (status == MW_STATUS_OK) {
@@ -5746,6 +5969,7 @@ int main(int argc, char **argv)
     const char *out_dir = NULL;
     const char *ram_path = getenv("METALWIRE_RAM");
     const char *env_crc_stride = getenv("METALWIRE_CRC_STRIDE");
+    const char *env_draw_dump = getenv("MW_DUMP_DRAWS");
     uint64_t ram_base = 0x40000000ULL;
     long crc_stride = env_crc_stride != NULL && env_crc_stride[0] != '\0'
                           ? mw_parse_long("crc-stride", env_crc_stride, 1, 4096)
@@ -5757,6 +5981,10 @@ int main(int argc, char **argv)
     int once = 0;
     int option;
 
+    if (env_draw_dump != NULL && env_draw_dump[0] != '\0' && atoi(env_draw_dump) != 0) {
+        mw_draw_dump_open();
+        atexit(mw_draw_dump_close);
+    }
     memset(&server, 0, sizeof(server));
     server.listen_fd = -1;
     server.client_fd = -1;
