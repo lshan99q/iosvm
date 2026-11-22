@@ -69,6 +69,7 @@ user network maps that to the host's loopback). The listener binds `127.0.0.1` b
 | `--port PORT` | TCP port (default `9111`; `0` picks a free one and prints it) |
 | `--bind ADDRESS` | IPv4 address to bind (default `127.0.0.1`) |
 | `--gpu INDEX` | Vulkan physical-device index (default: `$METALWIRE_GPU`, else `1`) |
+| `--pci ADDR` | choose the device by PCI id (`DOMAIN:BUS:DEVICE.FUNCTION`, e.g. `0000:05:00.0`); overrides `--gpu`, which is the stage-C rule because a vfio-bound card renumbers the indices |
 | `--shm PATH` | publish frames in glwire's format (default: `$METALWIRE_SHM`, else `/dev/shm/metalwire-frame`; `--shm ""` disables) |
 | `--frames N` | exit after N acknowledged frames (`0`, the default, runs until stopped) |
 | `--once` | shorthand for `--frames 1` |
@@ -78,7 +79,8 @@ user network maps that to the host's loopback). The listener binds `127.0.0.1` b
 | `--verbose` | log every wire message, object and Vulkan memory allocation |
 | `--help` | usage |
 
-The device is chosen explicitly and never silently falls back: index 1 means the second entry
+The device is chosen explicitly and never silently falls back. `--pci 0000:05:00.0` picks the
+V100 by its address (the stage-C rule); `--gpu 1` means the second entry
 `vkEnumeratePhysicalDevices` returns, whatever the driver. At startup the host prints the device
 name, type, Vulkan API version, vendor/device ids, PCI bus/device/function (when
 `VK_EXT_pci_bus_info` exists), and the chosen queue family. A non-existent index is an error.

@@ -127,7 +127,8 @@ HakiosMetalRenderPipelineState  subclass of _MTLRenderPipelineState  MTLRenderPi
 HakiosMetalDepthStencilState    subclass of _MTLDepthStencilState
 HakiosMetalSamplerState         subclass of _MTLSamplerState
 HakiosMetalRenderCommandEncoder subclass of _MTLRenderCommandEncoder when present, else NSObject
- └─ drawPrimitives:/drawIndexedPrimitives:           record only, counted and logged
+ └─ 29 setters + drawPrimitives:/drawIndexedPrimitives: record the calls; serialized at commit
+    (protocol 2, stage C)
 MWDrawable               plain NSObject  MTLDrawable + MWRemoteDrawable (the extension)
 ```
 
@@ -168,12 +169,12 @@ Implemented (anything else a real Metal runtime asks is logged once and answered
   reflection variants; every descriptor is answered with a placeholder, the vertex/fragment
   function names are logged. `newDepthStencilStateWithDescriptor:` and
   `newSamplerStateWithDescriptor:` are placeholders too.
-- render encoder (stage 30): `renderCommandEncoderWithDescriptor:`, 29 setters (`setRenderPipelineState:`,
-  `setVertexBuffer:offset:atIndex:`, `setFragmentTexture:atIndex:`, `setViewport:`, …),
-  `drawPrimitives:…`, `drawIndexedPrimitives:…`, `endEncoding`. **Record only:** the encoder
-  counts draws and sets, logs the first 64 draws and one line per unique (pipeline, primitive), and
-  the command buffer logs one `CA frame: N render encoders, M draws` line at commit. Nothing is
-  executed or sent on the wire.
+- render encoder (stage 30, wired in stage 31): `renderCommandEncoderWithDescriptor:`, 29 setters
+  (`setRenderPipelineState:`, `setVertexBuffer:offset:atIndex:`, `setFragmentTexture:atIndex:`,
+  `setViewport:`, …), `drawPrimitives:…`, `drawIndexedPrimitives:…`, `endEncoding`. Each call is
+  copied into a plain C record; at commit the command buffer serializes the render pass, every set
+  and every draw as protocol-2 render messages (`host/metalwire/PROTOCOL.md`). The host decodes
+  them; it does not paint yet (WP-2).
 - dealloc: classes whose superclass is a Metal private base free their own state and skip the
   base's `-dealloc` (it dereferences dispatch objects these stubs never created — `_MTLCommandQueue`
   `_submittedGroup`, `_MTLLibrary` `_cacheEntry`); that base allocation is deliberately leaked.
@@ -272,8 +273,9 @@ drawable; `-newDrawableWithTexture:` is ours, not Metal's.
 
 - **Compilation and execution.** Libraries, functions and pipeline states are placeholders: no
   AIR module is read and no shader exists on the host. Compute encoders, heaps, events, fences,
-  argument buffers and indirect command buffers are not made. A render encoder records but does not
-  translate; the metalwire protocol has no render command.
+  argument buffers and indirect command buffers are not made. A render encoder now records and
+  serializes (protocol 2); the host decodes the stream and acknowledges the frame, but executes
+  nothing until stage C's WP-2 shaders exist.
 - **A real render target.** `newTextureWithDescriptor:iosurface:plane:` accepts the display's
   IOSurface and returns a placeholder texture that does not wrap it; pixel formats other than
   2D BGRA8Unorm/RGBA8Unorm are metadata. This is why CoreAnimation's Metal frames contain no
@@ -291,13 +293,15 @@ drawable; `-newDrawableWithTexture:` is ours, not Metal's.
 
 ## CoreAnimation on this device (stage 30)
 
-`docs/stage30-ca-metal.md` is the record: with CoreAnimation's Metal renderer shown the device, the
-plug-in now gets past the renderer-library assert (the URL is answered by the injected library in
-`guest/ca-metal-inject/`), past the inherited `_MTLDevice`/`_MTLFunction`/`_MTLPipelineLibrary`
-implementations, and **records CoreAnimation's own draw calls**: three indexed triangles per frame,
-`CA draw: pipeline com.apple.coreanimation.draw.PBGRA_Xfc …`, from the `fixed_*` base functions and
-the pipeline names this boot asks for. It is a recording, not a picture: no shader is compiled, the
-IOSurface is not wrapped, and no render command goes on the wire.
+`docs/stage30-ca-metal.md` and `docs/stage31-ca-metal-wire.md` are the records: with
+CoreAnimation's Metal renderer shown the device, the plug-in gets past the renderer-library assert
+(the URL is answered by the injected library in `guest/ca-metal-inject/`), past the inherited
+`_MTLDevice`/`_MTLFunction`/`_MTLPipelineLibrary` implementations, records CoreAnimation's own
+draw calls (three indexed triangles per frame) and, since stage 31, serializes the whole render
+encoder on protocol 2: the render pass's target/load/store/clear, every set, every draw, and the
+pipeline states' base functions. The host decodes and validates them and acknowledges the frame.
+It is not a picture yet: no shader is compiled, the IOSurface is not wrapped, and nothing is
+painted (WP-2).
 
 ## The test client and its picture
 

@@ -196,6 +196,7 @@ struct mw_buffer_state {
     unsigned long options;
     void *memory;
     id label;
+    uint64_t uploaded_seq; /* the last frame this buffer's bytes went to the host */
 };
 
 struct mw_texture_state {
@@ -208,6 +209,51 @@ struct mw_texture_state {
     unsigned long storage_mode;
     id label;
 };
+
+/* One recorded render-encoder call, replayed on the wire in order (stage C). The object fields are
+ * retained so a frame's Metal objects outlive the encoder that bound them; the bytes field is a
+ * malloc'd copy for setVertexBytes:/setFragmentBytes:. stage is MW_STAGE_VERTEX/FRAGMENT for the
+ * two-stage calls and 0 otherwise. */
+enum {
+    MWR_OP_BEGIN = 1,
+    MWR_OP_SET_PIPELINE,
+    MWR_OP_SET_DEPTH_STENCIL,
+    MWR_OP_SET_VERTEX_BUFFER,
+    MWR_OP_SET_VERTEX_BYTES,
+    MWR_OP_SET_VERTEX_TEXTURE,
+    MWR_OP_SET_VERTEX_SAMPLER,
+    MWR_OP_SET_FRAGMENT_BUFFER,
+    MWR_OP_SET_FRAGMENT_BYTES,
+    MWR_OP_SET_FRAGMENT_TEXTURE,
+    MWR_OP_SET_FRAGMENT_SAMPLER,
+    MWR_OP_SET_VIEWPORT,
+    MWR_OP_SET_SCISSOR,
+    MWR_OP_SET_CULL_MODE,
+    MWR_OP_SET_WINDING,
+    MWR_OP_SET_FILL_MODE,
+    MWR_OP_SET_BLEND_COLOR,
+    MWR_OP_SET_STENCIL_REFERENCE,
+    MWR_OP_DRAW,
+    MWR_OP_END,
+};
+
+struct mw_render_op {
+    uint16_t kind;
+    uint16_t stage;
+    uint32_t index;
+    id object;  /* retained: buffer, texture, pipeline, sampler, depth-stencil */
+    id object2; /* retained: the draw's index buffer */
+    uint64_t value64;
+    int64_t signed64;
+    uint32_t values[6];
+    float fvalues[6];
+    void *bytes; /* malloc'd copy, for MWR_OP_SET_*_BYTES */
+    uint32_t length;
+    struct mw_render_draw draw; /* MWR_OP_DRAW */
+};
+
+#define MW_MAX_RENDER_ENCODERS 8
+#define MW_RENDER_MAX_OPS 256
 
 struct mw_command_buffer_state {
     int committed;
@@ -225,9 +271,12 @@ struct mw_command_buffer_state {
     int op_count;
     struct mw_op ops[8];
     const char *local_error; /* a static string, or NULL */
-    /* The CoreAnimation render path is record-only: it counts what CA records and never enters the
-     * ops array (the wire path stays the synthetic client's, byte for byte). */
+    /* CoreAnimation's render path: each ended render encoder is kept here (retained) until the
+     * command buffer commits, then its recorded calls are serialized as protocol-2 render
+     * messages. The synthetic blit client never fills this array. */
     int render_encoder_count;
+    int render_encoder_stored;
+    id render_encoders[MW_MAX_RENDER_ENCODERS];
     uint64_t render_draw_count;
     int profiling_enabled;
 };
@@ -261,8 +310,22 @@ struct mw_function_state {
     int function_type; /* MTLFunctionType, guessed from the name */
 };
 
+/* The three empty states (render pipeline, depth-stencil, sampler) plus what the protocol-2 render
+ * messages need from them: a render pipeline state carries its name, its vertex/fragment base
+ * functions, the color attachment's format and blend state, and the vertex descriptor; a sampler
+ * state carries its descriptor; a depth-stencil state carries the depth half. kind: 1 pipeline,
+ * 2 depth-stencil, 3 sampler. */
 struct mw_stub_state {
     id label; /* NSString, retained; the descriptor's label, if it had one */
+    uint32_t kind;
+    uint32_t remote_id;
+    uint32_t created_generation;
+    int captured;
+    struct mw_create_render_pipeline pipeline;
+    struct mw_vertex_attribute attributes[MW_MAX_RENDER_ATTRIBUTES];
+    struct mw_vertex_layout layouts[MW_MAX_RENDER_LAYOUTS];
+    struct mw_create_sampler sampler;
+    struct mw_create_depth_stencil depth_stencil;
 };
 
 /* The pipeline library CoreAnimation builds from QuartzCore.framework/default.pipelinelib. It is a
@@ -275,27 +338,23 @@ struct mw_pipeline_library_state {
     int disable_run_time_compilation; /* -setDisableRunTimeCompilation: */
 };
 
-/* The render command encoder records what CoreAnimation records and executes nothing. The first
- * MW_RENDER_MAX_DRAWS draws keep their details; the rest are counted only. */
-#define MW_RENDER_MAX_DRAWS 64
-
-struct mw_render_draw {
-    id pipeline_label; /* NSString copy, retained */
-    unsigned long primitive_type;
-    unsigned long vertex_count;
-    unsigned long index_count;
-    unsigned long instance_count;
-    int indexed;
-};
-
+/* The render command encoder: the calls CoreAnimation makes are recorded here, in order, and the
+ * command buffer serializes them at commit (protocol 2). BEGIN is kept as the frame's render-pass
+ * record rather than in the op array. */
 struct mw_render_encoder_state {
     id command_buffer; /* not retained: the encoder dies before its command buffer */
     int ended;
     id label;
-    id pipeline; /* not retained: the client keeps it alive while it binds it */
+    id pipeline;      /* not retained: the client keeps it alive while it binds it */
+    id target;        /* retained: the render pass's color attachment 0 texture */
+    id depth_target;  /* retained: its depth attachment, when it has one */
     uint64_t set_count;
     uint64_t draw_count;
-    struct mw_render_draw draws[MW_RENDER_MAX_DRAWS];
+    uint32_t encoder_index;
+    struct mw_render_begin begin;
+    int op_count;
+    int dropped_count;
+    struct mw_render_op ops[MW_RENDER_MAX_OPS];
 };
 
 static uint32_t mw_next_object_id(void)
@@ -408,6 +467,11 @@ static void mw_free_library(struct mw_library_state *state);
 static void mw_free_function(struct mw_function_state *state);
 static void mw_free_stub(struct mw_stub_state *state);
 static void mw_free_pipeline_library(struct mw_pipeline_library_state *state);
+static struct mw_stub_state *mw_stub_state_of_object(id object);
+static int mw_send_render_frame(struct mw_command_buffer_state *state);
+static void mw_render_capture_pipeline(struct mw_stub_state *state, id descriptor);
+static void mw_render_capture_sampler(struct mw_stub_state *state, id descriptor);
+static void mw_render_capture_depth_stencil(struct mw_stub_state *state, id descriptor);
 static void mw_free_render_encoder(struct mw_render_encoder_state *state);
 
 static void mw_object_dealloc(id self, SEL _cmd)
@@ -938,6 +1002,81 @@ static int mw_wire_ensure_texture(struct mw_texture_state *texture)
     return 0;
 }
 
+/* The three render objects: one message each, cached per connection like buffers and textures. */
+static int mw_wire_ensure_pipeline(struct mw_stub_state *pipeline)
+{
+    struct {
+        struct mw_create_render_pipeline header;
+        struct mw_vertex_attribute attributes[MW_MAX_RENDER_ATTRIBUTES];
+        struct mw_vertex_layout layouts[MW_MAX_RENDER_LAYOUTS];
+    } message;
+    uint32_t attribute_bytes;
+    uint32_t layout_bytes;
+
+    if (pipeline == NULL || pipeline->kind != 1) {
+        return -1;
+    }
+    if (pipeline->created_generation == gGeneration) {
+        return 0;
+    }
+    memset(&message, 0, sizeof(message));
+    memcpy(&message.header, &pipeline->pipeline, sizeof(message.header));
+    message.header.id = pipeline->remote_id;
+    attribute_bytes = pipeline->pipeline.vertex_attribute_count *
+                      (uint32_t)sizeof(struct mw_vertex_attribute);
+    layout_bytes =
+        pipeline->pipeline.vertex_layout_count * (uint32_t)sizeof(struct mw_vertex_layout);
+    if (attribute_bytes > sizeof(message.attributes) || layout_bytes > sizeof(message.layouts)) {
+        return -1;
+    }
+    memcpy(message.attributes, pipeline->attributes, attribute_bytes);
+    memcpy(message.layouts, pipeline->layouts, layout_bytes);
+    if (mw_send(&gWire, MW_CREATE_RENDER_PIPELINE, &message,
+                (uint32_t)(sizeof(message.header) + attribute_bytes + layout_bytes)) != 0) {
+        return -1;
+    }
+    pipeline->created_generation = gGeneration;
+    return 0;
+}
+
+static int mw_wire_ensure_sampler(struct mw_stub_state *sampler)
+{
+    struct mw_create_sampler message;
+
+    if (sampler == NULL || sampler->kind != 3) {
+        return -1;
+    }
+    if (sampler->created_generation == gGeneration) {
+        return 0;
+    }
+    memcpy(&message, &sampler->sampler, sizeof(message));
+    message.id = sampler->remote_id;
+    if (mw_send(&gWire, MW_CREATE_SAMPLER, &message, sizeof(message)) != 0) {
+        return -1;
+    }
+    sampler->created_generation = gGeneration;
+    return 0;
+}
+
+static int mw_wire_ensure_depth_stencil(struct mw_stub_state *depth)
+{
+    struct mw_create_depth_stencil message;
+
+    if (depth == NULL || depth->kind != 2) {
+        return -1;
+    }
+    if (depth->created_generation == gGeneration) {
+        return 0;
+    }
+    memcpy(&message, &depth->depth_stencil, sizeof(message));
+    message.id = depth->remote_id;
+    if (mw_send(&gWire, MW_CREATE_DEPTH_STENCIL, &message, sizeof(message)) != 0) {
+        return -1;
+    }
+    depth->created_generation = gGeneration;
+    return 0;
+}
+
 /*
  * How many rows apart the frame's CRC samples: 1 = every row (the default, full verification),
  * N = every Nth row. The host must be given the same stride (--crc-stride N). It is an env
@@ -1248,13 +1387,14 @@ static void mw_cb_commit(id self, SEL _cmd)
         mw_note_timing(state->encoded_ns, 0);
         return;
     }
-    /* CoreAnimation's render path is record-only: say what this command buffer recorded, then let
-     * the empty-buffer completion below stand (nothing enters the ops array, nothing is sent). */
-    if (state->render_encoder_count != 0 || state->render_draw_count != 0) {
-        mw_log("CA frame: %d render encoders, %llu draws (record only; not on the wire)",
-               state->render_encoder_count, (unsigned long long)state->render_draw_count);
+    /* CoreAnimation's render path: the encoders it ended are recorded in plain C and serialized
+     * here, as protocol-2 render messages. A command buffer with no render encoder is the
+     * synthetic client's blit path, unchanged. */
+    if (state->render_encoder_stored != 0) {
+        mw_log("CA frame: %d render encoders, %llu draws (serializing on the wire)",
+               state->render_encoder_stored, (unsigned long long)state->render_draw_count);
     }
-    if (state->op_count == 0) {
+    if (state->render_encoder_stored == 0 && state->op_count == 0) {
         /* Metal allows an empty command buffer; there is nothing for a host to execute */
         state->status = MTLCommandBufferStatusCompleted;
         return;
@@ -1292,7 +1432,7 @@ static void mw_cb_commit(id self, SEL _cmd)
         gHelloGeneration = gGeneration;
         mw_log("hello to %s: pid %u, program %s", gWire.target, (unsigned)getpid(), getprogname());
     }
-    sent = mw_send_frame(state);
+    sent = state->render_encoder_stored != 0 ? mw_send_render_frame(state) : mw_send_frame(state);
     if (sent != 0) {
         mw_wire_offline(gWire.last_error);
     }
@@ -2289,11 +2429,12 @@ static id mw_texture_object(id descriptor, const char *selector_name)
     storage_mode = [texture_descriptor storageMode];
     wire_format = texture_type == MTLTextureType2D && width != 0 && height != 0 && depth <= 1 &&
                   (pixel_format == MTLPixelFormatBGRA8Unorm ||
-                   pixel_format == MTLPixelFormatRGBA8Unorm);
+                   pixel_format == MTLPixelFormatRGBA8Unorm ||
+                   pixel_format == MTLPixelFormatR8Unorm);
     if (!wire_format &&
         mw_note_texture_format((unsigned long)texture_type, (unsigned long)pixel_format)) {
-        mw_log("%s: placeholder texture for format %lu type %lu (%lux%lux%lu; not in the v1 wire "
-               "path, which carries only BGRA8Unorm/RGBA8Unorm 2D)",
+        mw_log("%s: placeholder texture for format %lu type %lu (%lux%lux%lu; not in the wire "
+               "subset, which carries only BGRA8Unorm/RGBA8Unorm/R8Unorm 2D)",
                selector_name, (unsigned long)pixel_format, (unsigned long)texture_type,
                (unsigned long)width, (unsigned long)height, (unsigned long)depth);
     }
@@ -2541,6 +2682,24 @@ static id mw_stub_object(Class cls, const char *what, id label)
         return nil;
     }
     state->label = [label copy];
+    state->remote_id = mw_next_object_id();
+    if (cls == gPipelineStateClass) {
+        state->kind = 1;
+        state->pipeline.id = state->remote_id;
+        if (label != nil && [label isKindOfClass:[NSString class]]) {
+            const char *utf8 = [(NSString *)label UTF8String];
+
+            if (utf8 != NULL) {
+                strncpy(state->pipeline.pipeline_name, utf8, MW_NAME_MAX - 1);
+            }
+        }
+    } else if (cls == gDepthStencilStateClass) {
+        state->kind = 2;
+        state->depth_stencil.id = state->remote_id;
+    } else if (cls == gSamplerStateClass) {
+        state->kind = 3;
+        state->sampler.id = state->remote_id;
+    }
     *slot = state;
     return object;
 }
@@ -3006,6 +3165,18 @@ static id mw_render_pipeline_object(const char *selector_name, id descriptor, NS
            selector_name, mw_text(mw_safe_function_name(vertex)),
            mw_text(mw_safe_function_name(fragment)), (unsigned long)options);
     pipeline = mw_stub_object(gPipelineStateClass, "render pipeline state", label);
+    if (pipeline != nil) {
+        struct mw_stub_state *pipeline_state = mw_stub_state_of_object(pipeline);
+
+        mw_render_capture_pipeline(pipeline_state, descriptor);
+        if (pipeline_state != NULL) {
+            mw_log("%s: serialized pipeline %u name \"%.*s\" vertex \"%.*s\" fragment \"%.*s\"",
+                   selector_name, pipeline_state->remote_id, MW_NAME_MAX,
+                   pipeline_state->pipeline.pipeline_name, MW_NAME_MAX,
+                   pipeline_state->pipeline.vertex_function, MW_NAME_MAX,
+                   pipeline_state->pipeline.fragment_function);
+        }
+    }
     if (pipeline == nil && error != NULL) {
         *error = mw_nserror("the placeholder render pipeline state could not be made");
     }
@@ -3120,8 +3291,17 @@ static id mw_device_new_depth_stencil_state(id self, SEL _cmd, id descriptor)
     (void)self;
     (void)_cmd;
     state = mw_stub_object(gDepthStencilStateClass, "depth stencil state", label);
-    mw_log("newDepthStencilStateWithDescriptor: label %s -> placeholder depth-stencil state",
-           mw_text(label));
+    if (state != nil) {
+        struct mw_stub_state *stub = mw_stub_state_of_object(state);
+
+        mw_render_capture_depth_stencil(stub, descriptor);
+        if (stub != NULL) {
+            mw_log("newDepthStencilStateWithDescriptor: label %s -> depth-stencil state %u "
+                   "(compare %u, write %u)",
+                   mw_text(label), stub->remote_id, stub->depth_stencil.depth_compare,
+                   stub->depth_stencil.depth_write);
+        }
+    }
     return state;
 }
 
@@ -3133,7 +3313,18 @@ static id mw_device_new_sampler_state(id self, SEL _cmd, id descriptor)
     (void)self;
     (void)_cmd;
     state = mw_stub_object(gSamplerStateClass, "sampler state", label);
-    mw_log("newSamplerStateWithDescriptor: label %s -> placeholder sampler state", mw_text(label));
+    if (state != nil) {
+        struct mw_stub_state *stub = mw_stub_state_of_object(state);
+
+        mw_render_capture_sampler(stub, descriptor);
+        if (stub != NULL) {
+            mw_log("newSamplerStateWithDescriptor: label %s -> sampler state %u (min %u mag %u "
+                   "mip %u address %u/%u/%u)",
+                   mw_text(label), stub->remote_id, stub->sampler.min_filter,
+                   stub->sampler.mag_filter, stub->sampler.mip_filter, stub->sampler.address_s,
+                   stub->sampler.address_t, stub->sampler.address_r);
+        }
+    }
     return state;
 }
 
@@ -3345,8 +3536,21 @@ static id mw_pipeline_library_render_pipeline(id self, SEL _cmd, id name, NSUInt
     }
     mw_note_pipeline_name(name, "render", options);
     /* the name becomes the state's label, so the render encoder's record says which CA pipeline
-     * a draw used */
+     * a draw used; the pipeline state's wire record keeps the same name */
     pipeline = mw_stub_object(gPipelineStateClass, "render pipeline state", name);
+    if (pipeline != nil) {
+        struct mw_stub_state *pipeline_state = mw_stub_state_of_object(pipeline);
+
+        if (pipeline_state != NULL) {
+            const char *utf8 = [(NSString *)name UTF8String];
+
+            if (utf8 != NULL) {
+                strncpy(pipeline_state->pipeline.pipeline_name, utf8, MW_NAME_MAX - 1);
+            }
+            mw_log("CA pipeline state %u: %s (serialized by name; no shader yet)",
+                   pipeline_state->remote_id, mw_text(name));
+        }
+    }
     if (pipeline == nil && error != NULL) {
         *error = mw_nserror("the placeholder render pipeline state could not be made");
     }
@@ -3492,16 +3696,396 @@ static id mw_device_new_pipeline_library_file(id self, SEL _cmd, id file_path, N
 }
 
 /* -------------------------------------------------------------------------------------------------
- * The render command encoder: CoreAnimation's render path, recorded and never executed.
+ * The render command encoder: CoreAnimation's render calls, recorded and serialized (stage C).
  *
  * -[HakiosMetalCommandBuffer renderCommandEncoderWithDescriptor:] answers this object instead of
- * letting Apple's _MTLCommandBuffer implementation run. The encoder keeps counters and the first
- * MW_RENDER_MAX_DRAWS draws, logs each unique (pipeline label, primitive type) once, and logs a
- * summary at -endEncoding; the command buffer logs its totals at -commit. Nothing enters the
- * wire's ops array, so the synthetic metal_frame path stays byte-identical.
+ * letting Apple's _MTLCommandBuffer implementation run. Every render-pass field and every set/
+ * draw call is copied out of CoreAnimation's objects into a plain C record (the same defensive
+ * @try contract the rest of this file uses); at -commit the command buffer sends the encoders'
+ * records as protocol-2 render messages, and the host replays them against its Vulkan device.
+ * The synthetic metal_frame blit path still never enters this code.
  * ---------------------------------------------------------------------------------------------- */
 
-#define MW_DRAW_LOG_LIMIT 256
+#define MW_CA_SET_LOG_LIMIT 200
+static int gCaSetLogCount;
+
+/* Copies an NSString's UTF-8 into a wire field (zero-padded, MW_NAME_MAX bytes). */
+static void mw_copy_name(NSString *text, char *field, size_t size)
+{
+    const char *utf8;
+    size_t length;
+
+    memset(field, 0, size);
+    if (text == nil || ![text isKindOfClass:[NSString class]] || size == 0) {
+        return;
+    }
+    utf8 = [text UTF8String];
+    if (utf8 == NULL) {
+        return;
+    }
+    length = strlen(utf8);
+    if (length >= size) {
+        length = size - 1;
+    }
+    memcpy(field, utf8, length);
+}
+
+static int mw_read_uint(id object, const char *selector_name, NSUInteger *value)
+{
+    SEL selector;
+
+    if (object == nil) {
+        return 0;
+    }
+    selector = sel_registerName(selector_name);
+    if (![object respondsToSelector:selector]) {
+        return 0;
+    }
+    *value = ((NSUInteger(*)(id, SEL))objc_msgSend)(object, selector);
+    return 1;
+}
+
+static int mw_read_bool(id object, const char *selector_name, BOOL *value)
+{
+    SEL selector;
+
+    if (object == nil) {
+        return 0;
+    }
+    selector = sel_registerName(selector_name);
+    if (![object respondsToSelector:selector]) {
+        return 0;
+    }
+    *value = ((BOOL(*)(id, SEL))objc_msgSend)(object, selector);
+    return 1;
+}
+
+static int mw_read_float(id object, const char *selector_name, float *value)
+{
+    SEL selector;
+
+    if (object == nil) {
+        return 0;
+    }
+    selector = sel_registerName(selector_name);
+    if (![object respondsToSelector:selector]) {
+        return 0;
+    }
+    *value = ((float(*)(id, SEL))objc_msgSend)(object, selector);
+    return 1;
+}
+
+static id mw_read_object(id object, const char *selector_name)
+{
+    SEL selector;
+
+    if (object == nil) {
+        return nil;
+    }
+    selector = sel_registerName(selector_name);
+    if (![object respondsToSelector:selector]) {
+        return nil;
+    }
+    return ((id(*)(id, SEL))objc_msgSend)(object, selector);
+}
+
+static id mw_element(id container, NSUInteger index)
+{
+    if (container != nil && [container respondsToSelector:@selector(objectAtIndexedSubscript:)]) {
+        return ((id(*)(id, SEL, NSUInteger))objc_msgSend)(
+            container, @selector(objectAtIndexedSubscript:), index);
+    }
+    return nil;
+}
+
+static void mw_read_clear_color(id attachment, float out[4])
+{
+    SEL selector = sel_registerName("clearColor");
+    MTLClearColor color;
+
+    out[0] = out[1] = out[2] = out[3] = 0.0f;
+    if (attachment == nil || ![attachment respondsToSelector:selector]) {
+        return;
+    }
+    color = ((MTLClearColor(*)(id, SEL))objc_msgSend)(attachment, selector);
+    out[0] = (float)color.red;
+    out[1] = (float)color.green;
+    out[2] = (float)color.blue;
+    out[3] = (float)color.alpha;
+}
+
+/* Fills the encoder's render-pass record from CoreAnimation's MTLRenderPassDescriptor. */
+static void mw_render_capture_pass(struct mw_render_encoder_state *state, id descriptor)
+{
+    struct mw_render_begin *begin = &state->begin;
+    NSUInteger value;
+
+    @try {
+        id attachments = mw_read_object(descriptor, "colorAttachments");
+        id attachment = mw_element(attachments, 0);
+        id texture = mw_read_object(attachment, "texture");
+        struct mw_texture_state *texture_state = mw_texture_state_of(texture);
+        id depth = mw_read_object(descriptor, "depthAttachment");
+        id depth_texture = mw_read_object(depth, "texture");
+        struct mw_texture_state *depth_state = mw_texture_state_of(depth_texture);
+
+        if (texture_state != NULL) {
+            state->target = [texture retain];
+            begin->target_texture = texture_state->remote_id;
+            begin->width = texture_state->width;
+            begin->height = texture_state->height;
+            begin->pixel_format = texture_state->pixel_format;
+        }
+        if (mw_read_uint(attachment, "loadAction", &value)) {
+            begin->load_action = (uint32_t)value;
+        }
+        if (mw_read_uint(attachment, "storeAction", &value)) {
+            begin->store_action = (uint32_t)value;
+        }
+        mw_read_clear_color(attachment, begin->clear_color);
+        if (depth_state != NULL) {
+            state->depth_target = [depth_texture retain];
+            begin->has_depth = 1;
+            begin->depth_texture = depth_state->remote_id;
+        }
+        if (mw_read_uint(depth, "loadAction", &value)) {
+            begin->depth_load_action = (uint32_t)value;
+        }
+        if (mw_read_uint(depth, "storeAction", &value)) {
+            begin->depth_store_action = (uint32_t)value;
+        }
+        begin->clear_depth = 1.0f;
+        {
+            SEL selector = sel_registerName("clearDepth");
+
+            if (depth != nil && [depth respondsToSelector:selector]) {
+                begin->clear_depth = (float)((double(*)(id, SEL))objc_msgSend)(depth, selector);
+            }
+        }
+    } @catch (NSException *exception) {
+        mw_log("renderCommandEncoderWithDescriptor: reading the pass raised %s; recorded empty",
+               mw_text([exception reason]));
+    }
+    mw_log("CA render pass: encoder %u target texture %u %ux%u format %u load %u store %u "
+           "clear %.2f,%.2f,%.2f,%.2f%s",
+           state->encoder_index, begin->target_texture, begin->width, begin->height,
+           begin->pixel_format, begin->load_action, begin->store_action, begin->clear_color[0],
+           begin->clear_color[1], begin->clear_color[2], begin->clear_color[3],
+           begin->has_depth ? " (depth attachment present)" : "");
+}
+
+/* Fills a render pipeline state's wire record from its MTLRenderPipelineDescriptor. */
+static void mw_render_capture_pipeline(struct mw_stub_state *state, id descriptor)
+{
+    NSUInteger value;
+    BOOL flag;
+    id color_attachment;
+    id vertex_descriptor;
+    id attributes;
+    id layouts;
+
+    if (state == NULL || descriptor == nil) {
+        return;
+    }
+    state->captured = 1;
+    state->pipeline.id = state->remote_id;
+    @try {
+        if (state->label != nil) {
+            mw_copy_name((NSString *)state->label, state->pipeline.pipeline_name, MW_NAME_MAX);
+        }
+        if (mw_read_uint(descriptor, "sampleCount", &value)) {
+            state->pipeline.sample_count = (uint32_t)value;
+        }
+        mw_copy_name(mw_safe_function_name(mw_read_object(descriptor, "vertexFunction")),
+                     state->pipeline.vertex_function, MW_NAME_MAX);
+        mw_copy_name(mw_safe_function_name(mw_read_object(descriptor, "fragmentFunction")),
+                     state->pipeline.fragment_function, MW_NAME_MAX);
+        color_attachment = mw_element(mw_read_object(descriptor, "colorAttachments"), 0);
+        if (mw_read_uint(color_attachment, "pixelFormat", &value)) {
+            state->pipeline.color_format = (uint32_t)value;
+        }
+        if (mw_read_bool(color_attachment, "blendingEnabled", &flag)) {
+            state->pipeline.blend_enabled = flag ? 1 : 0;
+        }
+        if (mw_read_uint(color_attachment, "rgbBlendOperation", &value)) {
+            state->pipeline.rgb_blend_operation = (uint32_t)value;
+        }
+        if (mw_read_uint(color_attachment, "alphaBlendOperation", &value)) {
+            state->pipeline.alpha_blend_operation = (uint32_t)value;
+        }
+        if (mw_read_uint(color_attachment, "sourceRGBBlendFactor", &value)) {
+            state->pipeline.src_rgb_blend_factor = (uint32_t)value;
+        }
+        if (mw_read_uint(color_attachment, "destinationRGBBlendFactor", &value)) {
+            state->pipeline.dst_rgb_blend_factor = (uint32_t)value;
+        }
+        if (mw_read_uint(color_attachment, "sourceAlphaBlendFactor", &value)) {
+            state->pipeline.src_alpha_blend_factor = (uint32_t)value;
+        }
+        if (mw_read_uint(color_attachment, "destinationAlphaBlendFactor", &value)) {
+            state->pipeline.dst_alpha_blend_factor = (uint32_t)value;
+        }
+        if (mw_read_uint(color_attachment, "writeMask", &value)) {
+            state->pipeline.write_mask = (uint32_t)value;
+        }
+        vertex_descriptor = mw_read_object(descriptor, "vertexDescriptor");
+        attributes = mw_read_object(vertex_descriptor, "attributes");
+        layouts = mw_read_object(vertex_descriptor, "layouts");
+        for (NSUInteger i = 0; i < MW_MAX_RENDER_ATTRIBUTES; i++) {
+            id attribute = mw_element(attributes, i);
+            struct mw_vertex_attribute *out;
+
+            if (attribute == nil) {
+                break;
+            }
+            out = &state->attributes[state->pipeline.vertex_attribute_count];
+            if (mw_read_uint(attribute, "format", &value)) {
+                out->format = (uint32_t)value;
+            }
+            if (mw_read_uint(attribute, "offset", &value)) {
+                out->offset = (uint32_t)value;
+            }
+            if (mw_read_uint(attribute, "bufferIndex", &value)) {
+                out->buffer_index = (uint32_t)value;
+            }
+            state->pipeline.vertex_attribute_count++;
+        }
+        for (NSUInteger i = 0; i < MW_MAX_RENDER_LAYOUTS; i++) {
+            id layout = mw_element(layouts, i);
+            struct mw_vertex_layout *out;
+
+            if (layout == nil) {
+                break;
+            }
+            out = &state->layouts[state->pipeline.vertex_layout_count];
+            if (mw_read_uint(layout, "stride", &value)) {
+                out->stride = (uint32_t)value;
+            }
+            if (mw_read_uint(layout, "stepFunction", &value)) {
+                out->step_function = (uint32_t)value;
+            }
+            if (mw_read_uint(layout, "stepRate", &value)) {
+                out->step_rate = (uint32_t)value;
+            }
+            state->pipeline.vertex_layout_count++;
+        }
+    } @catch (NSException *exception) {
+        mw_log("render pipeline: reading the descriptor raised %s; the state is recorded empty",
+               mw_text([exception reason]));
+    }
+}
+
+static void mw_render_capture_sampler(struct mw_stub_state *state, id descriptor)
+{
+    NSUInteger value;
+    float number;
+    BOOL flag;
+
+    if (state == NULL || descriptor == nil) {
+        return;
+    }
+    state->captured = 1;
+    @try {
+        if (mw_read_uint(descriptor, "minFilter", &value)) {
+            state->sampler.min_filter = (uint32_t)value;
+        }
+        if (mw_read_uint(descriptor, "magFilter", &value)) {
+            state->sampler.mag_filter = (uint32_t)value;
+        }
+        if (mw_read_uint(descriptor, "mipFilter", &value)) {
+            state->sampler.mip_filter = (uint32_t)value;
+        }
+        if (mw_read_uint(descriptor, "sAddressMode", &value)) {
+            state->sampler.address_s = (uint32_t)value;
+        }
+        if (mw_read_uint(descriptor, "tAddressMode", &value)) {
+            state->sampler.address_t = (uint32_t)value;
+        }
+        if (mw_read_uint(descriptor, "rAddressMode", &value)) {
+            state->sampler.address_r = (uint32_t)value;
+        }
+        if (mw_read_bool(descriptor, "normalizedCoordinates", &flag)) {
+            state->sampler.normalized_coords = flag ? 1 : 0;
+        }
+        if (mw_read_uint(descriptor, "compareFunction", &value)) {
+            state->sampler.compare_function = (uint32_t)value;
+        }
+        if (mw_read_float(descriptor, "lodMinClamp", &number)) {
+            state->sampler.lod_min = number;
+        }
+        if (mw_read_float(descriptor, "lodMaxClamp", &number)) {
+            state->sampler.lod_max = number;
+        }
+        if (mw_read_uint(descriptor, "maxAnisotropy", &value)) {
+            state->sampler.max_anisotropy = (uint32_t)value;
+        }
+    } @catch (NSException *exception) {
+        mw_log("sampler state: reading the descriptor raised %s; the state is recorded empty",
+               mw_text([exception reason]));
+    }
+}
+
+static void mw_render_capture_depth_stencil(struct mw_stub_state *state, id descriptor)
+{
+    NSUInteger value;
+    BOOL flag;
+
+    if (state == NULL || descriptor == nil) {
+        return;
+    }
+    state->captured = 1;
+    @try {
+        if (mw_read_uint(descriptor, "depthCompareFunction", &value)) {
+            state->depth_stencil.depth_compare = (uint32_t)value;
+        }
+        if (mw_read_bool(descriptor, "depthWriteEnabled", &flag)) {
+            state->depth_stencil.depth_write = flag ? 1 : 0;
+        }
+    } @catch (NSException *exception) {
+        mw_log("depth-stencil state: reading the descriptor raised %s; recorded empty",
+               mw_text([exception reason]));
+    }
+}
+
+/* The encoder's op array: append one operation, or count a dropped one. */
+static struct mw_render_op *mw_render_op_new(struct mw_render_encoder_state *state, uint16_t kind)
+{
+    struct mw_render_op *op;
+
+    if (state == NULL || state->ended) {
+        return NULL;
+    }
+    if (state->op_count >= MW_RENDER_MAX_OPS) {
+        state->dropped_count++;
+        return NULL;
+    }
+    op = &state->ops[state->op_count++];
+    memset(op, 0, sizeof(*op));
+    op->kind = kind;
+    return op;
+}
+
+static void mw_render_op_take(struct mw_render_op *op, id object)
+{
+    if (op != NULL && object != nil) {
+        op->object = [object retain];
+    }
+}
+
+/* One line per recorded call (bounded), so the boot log names every set as it is serialized. */
+static void mw_render_log_set(const char *what, id object, NSUInteger index)
+{
+    if (__atomic_fetch_add(&gCaSetLogCount, 1, __ATOMIC_RELAXED) >= MW_CA_SET_LOG_LIMIT) {
+        return;
+    }
+    if (object != nil) {
+        mw_log("CA set: %s %s (index %lu)", what, mw_text(mw_safe_label(object)),
+               (unsigned long)index);
+    } else {
+        mw_log("CA set: %s (index %lu)", what, (unsigned long)index);
+    }
+}
+
 static NSMutableSet *gLoggedDrawCombinations; /* NSString "pipeline/primitive", under gStubLock */
 
 static struct mw_render_encoder_state *mw_render_encoder_state_of(id object)
@@ -3516,15 +4100,25 @@ static struct mw_render_encoder_state *mw_render_encoder_state_of(id object)
     return slot != NULL ? *slot : NULL;
 }
 
+static void mw_release_render_op(struct mw_render_op *op)
+{
+    [op->object release];
+    [op->object2 release];
+    free(op->bytes);
+    memset(op, 0, sizeof(*op));
+}
+
 static void mw_free_render_encoder(struct mw_render_encoder_state *state)
 {
     if (state == NULL) {
         return;
     }
-    for (int i = 0; i < MW_RENDER_MAX_DRAWS; i++) {
-        [state->draws[i].pipeline_label release];
+    for (int i = 0; i < state->op_count; i++) {
+        mw_release_render_op(&state->ops[i]);
     }
     [state->label release];
+    [state->target release];
+    [state->depth_target release];
     free(state);
 }
 
@@ -3557,6 +4151,8 @@ static id mw_cb_render_encoder(id self, SEL _cmd, id descriptor)
         return nil;
     }
     encoder_state->command_buffer = self;
+    encoder_state->encoder_index = (uint32_t)state->render_encoder_count;
+    mw_render_capture_pass(encoder_state, descriptor);
     *slot = encoder_state;
     state->render_encoder_count++;
     return [encoder autorelease];
@@ -3569,12 +4165,350 @@ static void mw_render_note_set(struct mw_render_encoder_state *state)
     }
 }
 
-static void mw_render_record_draw(id self, unsigned long primitive_type,
+static void mw_render_set_pipeline(id self, SEL _cmd, id pipeline)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    if (state == NULL) {
+        return;
+    }
+    state->pipeline = pipeline; /* not retained: the client keeps it alive while encoding */
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_PIPELINE);
+    mw_render_op_take(op, pipeline);
+    mw_log("CA set: setRenderPipelineState: %s", mw_text(mw_safe_label(pipeline)));
+}
+
+static void mw_render_set_depth_stencil(id self, SEL _cmd, id depth_stencil)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_DEPTH_STENCIL);
+    mw_render_op_take(op, depth_stencil);
+    mw_log("CA set: setDepthStencilState: %s", mw_text(mw_safe_label(depth_stencil)));
+}
+
+static void mw_render_set_cull_mode(id self, SEL _cmd, NSUInteger cull_mode)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_CULL_MODE);
+    if (op != NULL) {
+        op->values[0] = (uint32_t)cull_mode;
+    }
+    mw_log("CA set: setCullMode: %lu", (unsigned long)cull_mode);
+}
+
+static void mw_render_set_winding(id self, SEL _cmd, NSUInteger winding)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_WINDING);
+    if (op != NULL) {
+        op->values[0] = (uint32_t)winding;
+    }
+    mw_log("CA set: setFrontFacingWinding: %lu", (unsigned long)winding);
+}
+
+static void mw_render_set_fill_mode(id self, SEL _cmd, NSUInteger fill_mode)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FILL_MODE);
+    if (op != NULL) {
+        op->values[0] = (uint32_t)fill_mode;
+    }
+    mw_log("CA set: setTriangleFillMode: %lu", (unsigned long)fill_mode);
+}
+
+static void mw_render_set_viewport(id self, SEL _cmd, MTLViewport viewport)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VIEWPORT);
+    if (op != NULL) {
+        op->fvalues[0] = (float)viewport.originX;
+        op->fvalues[1] = (float)viewport.originY;
+        op->fvalues[2] = (float)viewport.width;
+        op->fvalues[3] = (float)viewport.height;
+        op->fvalues[4] = (float)viewport.znear;
+        op->fvalues[5] = (float)viewport.zfar;
+    }
+    mw_log("CA set: setViewport: %.1fx%.1f at %.1f,%.1f", viewport.width, viewport.height,
+           viewport.originX, viewport.originY);
+}
+
+static void mw_render_set_scissor(id self, SEL _cmd, MTLScissorRect rect)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_SCISSOR);
+    if (op != NULL) {
+        op->values[0] = (uint32_t)rect.x;
+        op->values[1] = (uint32_t)rect.y;
+        op->values[2] = (uint32_t)rect.width;
+        op->values[3] = (uint32_t)rect.height;
+    }
+    mw_log("CA set: setScissorRect: %lux%lu at %lu,%lu", (unsigned long)rect.width,
+           (unsigned long)rect.height, (unsigned long)rect.x, (unsigned long)rect.y);
+}
+
+static void mw_render_set_blend_color(id self, SEL _cmd, float red, float green, float blue,
+                                      float alpha)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_BLEND_COLOR);
+    if (op != NULL) {
+        op->fvalues[0] = red;
+        op->fvalues[1] = green;
+        op->fvalues[2] = blue;
+        op->fvalues[3] = alpha;
+    }
+    mw_log("CA set: setBlendColorRed:%.3f green:%.3f blue:%.3f alpha:%.3f", red, green, blue,
+           alpha);
+}
+
+static void mw_render_set_stencil_reference(id self, SEL _cmd, uint32_t reference)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_STENCIL_REFERENCE);
+    if (op != NULL) {
+        op->values[0] = reference;
+    }
+    mw_log("CA set: setStencilReferenceValue: %u", reference);
+}
+
+static void mw_render_set_vertex_buffer(id self, SEL _cmd, id buffer, NSUInteger offset,
+                                        NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VERTEX_BUFFER);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        op->value64 = offset;
+        mw_render_op_take(op, buffer);
+    }
+    mw_render_log_set("setVertexBuffer:offset:atIndex:", buffer, index);
+}
+
+static void mw_render_set_vertex_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
+                                       NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VERTEX_BYTES);
+    if (op != NULL) {
+        op->stage = MW_STAGE_VERTEX;
+        op->index = (uint32_t)index;
+        op->length = (uint32_t)length;
+        if (bytes != NULL && length != 0) {
+            op->bytes = malloc((size_t)length);
+            if (op->bytes != NULL) {
+                memcpy(op->bytes, bytes, (size_t)length);
+            }
+        }
+    }
+    mw_render_log_set("setVertexBytes:length:atIndex:", nil, index);
+}
+
+static void mw_render_set_vertex_texture(id self, SEL _cmd, id texture, NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VERTEX_TEXTURE);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        mw_render_op_take(op, texture);
+    }
+    mw_render_log_set("setVertexTexture:atIndex:", texture, index);
+}
+
+static void mw_render_set_vertex_sampler(id self, SEL _cmd, id sampler, NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VERTEX_SAMPLER);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        mw_render_op_take(op, sampler);
+    }
+    mw_render_log_set("setVertexSamplerState:atIndex:", sampler, index);
+}
+
+static void mw_render_set_vertex_sampler_lod(id self, SEL _cmd, id sampler, float lod_min,
+                                             float lod_max, NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_VERTEX_SAMPLER);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        op->fvalues[0] = lod_min;
+        op->fvalues[1] = lod_max;
+        mw_render_op_take(op, sampler);
+    }
+    mw_render_log_set("setVertexSamplerState:lodMinClamp:lodMaxClamp:atIndex:", sampler, index);
+}
+
+static void mw_render_set_fragment_buffer(id self, SEL _cmd, id buffer, NSUInteger offset,
+                                          NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FRAGMENT_BUFFER);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        op->value64 = offset;
+        mw_render_op_take(op, buffer);
+    }
+    mw_render_log_set("setFragmentBuffer:offset:atIndex:", buffer, index);
+}
+
+static void mw_render_set_fragment_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
+                                         NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FRAGMENT_BYTES);
+    if (op != NULL) {
+        op->stage = MW_STAGE_FRAGMENT;
+        op->index = (uint32_t)index;
+        op->length = (uint32_t)length;
+        if (bytes != NULL && length != 0) {
+            op->bytes = malloc((size_t)length);
+            if (op->bytes != NULL) {
+                memcpy(op->bytes, bytes, (size_t)length);
+            }
+        }
+    }
+    mw_render_log_set("setFragmentBytes:length:atIndex:", nil, index);
+}
+
+static void mw_render_set_fragment_texture(id self, SEL _cmd, id texture, NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FRAGMENT_TEXTURE);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        mw_render_op_take(op, texture);
+    }
+    mw_render_log_set("setFragmentTexture:atIndex:", texture, index);
+}
+
+static void mw_render_set_fragment_sampler(id self, SEL _cmd, id sampler, NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FRAGMENT_SAMPLER);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        mw_render_op_take(op, sampler);
+    }
+    mw_render_log_set("setFragmentSamplerState:atIndex:", sampler, index);
+}
+
+static void mw_render_set_fragment_sampler_lod(id self, SEL _cmd, id sampler, float lod_min,
+                                               float lod_max, NSUInteger index)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_render_op *op;
+
+    (void)_cmd;
+    mw_render_note_set(state);
+    op = mw_render_op_new(state, MWR_OP_SET_FRAGMENT_SAMPLER);
+    if (op != NULL) {
+        op->index = (uint32_t)index;
+        op->fvalues[0] = lod_min;
+        op->fvalues[1] = lod_max;
+        mw_render_op_take(op, sampler);
+    }
+    mw_render_log_set("setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:", sampler, index);
+}
+
+static void mw_render_push_debug_group(id self, SEL _cmd, id name)
+{
+    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+
+    (void)_cmd;
+    (void)state;
+    mw_log("CA set: pushDebugGroup: %s (not a draw state; not serialized)", mw_text(name));
+}
+
+static void mw_render_pop_debug_group(id self, SEL _cmd)
+{
+    (void)_cmd;
+    mw_log("CA set: popDebugGroup (not a draw state; not serialized)");
+}
+
+/* One draw: the state snapshot is the encoder's ordered op stream, so a draw only needs its own
+ * arguments plus the index buffer; the pipeline is the one most recently bound. */
+static void mw_render_record_draw(id self, unsigned long primitive_type, unsigned long vertex_start,
                                   unsigned long vertex_count, unsigned long index_count,
-                                  unsigned long instance_count, int indexed)
+                                  NSUInteger index_type, id index_buffer,
+                                  NSUInteger index_buffer_offset, NSUInteger instance_count,
+                                  NSInteger base_vertex, NSUInteger base_instance, int indexed)
 {
     struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
     struct mw_command_buffer_state *command_buffer;
+    struct mw_render_op *op;
+    struct mw_render_draw *draw;
     id pipeline_label;
     NSString *key;
     BOOL first = NO;
@@ -3588,23 +4522,43 @@ static void mw_render_record_draw(id self, unsigned long primitive_type,
     if (command_buffer != NULL) {
         command_buffer->render_draw_count++;
     }
-    if (state->draw_count <= MW_RENDER_MAX_DRAWS) {
-        struct mw_render_draw *draw = &state->draws[state->draw_count - 1];
-
-        draw->pipeline_label = [pipeline_label copy];
-        draw->primitive_type = primitive_type;
-        draw->vertex_count = vertex_count;
-        draw->index_count = index_count;
-        draw->instance_count = instance_count;
-        draw->indexed = indexed;
+    op = mw_render_op_new(state, MWR_OP_DRAW);
+    if (op == NULL) {
+        return;
     }
+    draw = &op->draw;
+    draw->primitive_type = (uint32_t)primitive_type;
+    draw->flags = indexed ? MW_DRAW_INDEXED : 0;
+    if (instance_count > 1) {
+        draw->flags |= MW_DRAW_INSTANCED;
+    }
+    if (indexed) {
+        draw->index_type = (uint32_t)index_type;
+        draw->index_count = index_count;
+        draw->index_buffer_offset = index_buffer_offset;
+        op->object2 = [index_buffer retain];
+    } else {
+        draw->vertex_start = vertex_start;
+        draw->vertex_count = vertex_count;
+    }
+    if (base_vertex > 0) {
+        draw->flags |= MW_DRAW_BASE_VERTEX;
+        draw->base_vertex = base_vertex;
+    }
+    if (base_instance > 0) {
+        draw->flags |= MW_DRAW_BASE_INSTANCE;
+        draw->base_instance = (uint32_t)base_instance;
+    }
+    draw->instance_count = (uint32_t)instance_count;
+    mw_render_op_take(op, state->pipeline);
+
     key = [[NSString alloc] initWithFormat:@"%s/%lu", mw_text(pipeline_label), primitive_type];
     pthread_mutex_lock(&gStubLock);
     if (gLoggedDrawCombinations == nil) {
         gLoggedDrawCombinations = [[NSMutableSet alloc] init];
     }
     if (![gLoggedDrawCombinations containsObject:key] &&
-        [gLoggedDrawCombinations count] < MW_DRAW_LOG_LIMIT) {
+        [gLoggedDrawCombinations count] < 256) {
         [gLoggedDrawCombinations addObject:key];
         first = YES;
     }
@@ -3612,7 +4566,7 @@ static void mw_render_record_draw(id self, unsigned long primitive_type,
     [key release];
     if (first) {
         mw_log("CA draw: pipeline %s prim %lu %s (vertices %lu, indices %lu, instances %lu; "
-               "record only)",
+               "serialized)",
                mw_text(pipeline_label), primitive_type, indexed ? "indexed" : "non-indexed",
                vertex_count, index_count, instance_count);
     }
@@ -3621,6 +4575,8 @@ static void mw_render_record_draw(id self, unsigned long primitive_type,
 static void mw_render_end_encoding(id self, SEL _cmd)
 {
     struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
+    struct mw_command_buffer_state *command_buffer;
+    struct mw_render_op *end;
     id pipeline_label;
 
     (void)_cmd;
@@ -3628,17 +4584,33 @@ static void mw_render_end_encoding(id self, SEL _cmd)
         return;
     }
     state->ended = 1;
+    end = mw_render_op_new(state, MWR_OP_END);
+    if (end != NULL) {
+        end->values[0] = (uint32_t)state->draw_count;
+        end->values[1] = (uint32_t)state->set_count;
+    }
     pipeline_label = mw_safe_label(state->pipeline);
-    if (state->draw_count != 0) {
-        struct mw_render_draw *first = &state->draws[0];
-
-        mw_log("CA render encoder: %llu draws, %llu sets, pipeline %s (first: prim %lu, %lu "
-               "vertices, %lu indices, %lu instances; record only)",
-               (unsigned long long)state->draw_count, (unsigned long long)state->set_count,
-               mw_text(pipeline_label), first->primitive_type, first->vertex_count,
-               first->index_count, first->instance_count);
+    if (state->dropped_count != 0) {
+        mw_log("CA render encoder: %d recorded calls dropped (cap %d reached)", state->dropped_count,
+               MW_RENDER_MAX_OPS);
+    }
+    command_buffer = mw_command_buffer_state_of(state->command_buffer);
+    if (command_buffer == NULL) {
+        return;
+    }
+    if (command_buffer->render_encoder_stored < MW_MAX_RENDER_ENCODERS) {
+        command_buffer->render_encoders[command_buffer->render_encoder_stored++] = [self retain];
     } else {
-        mw_log("CA render encoder: 0 draws, %llu sets, pipeline %s (record only)",
+        mw_log("CA render encoder: more than %d encoders in one command buffer; not recorded",
+               MW_MAX_RENDER_ENCODERS);
+        return;
+    }
+    if (state->draw_count != 0) {
+        mw_log("CA render encoder: %llu draws, %llu sets, pipeline %s (serialized at commit)",
+               (unsigned long long)state->draw_count, (unsigned long long)state->set_count,
+               mw_text(pipeline_label));
+    } else {
+        mw_log("CA render encoder: 0 draws, %llu sets, pipeline %s (serialized at commit)",
                (unsigned long long)state->set_count, mw_text(pipeline_label));
     }
 }
@@ -3662,191 +4634,12 @@ static void mw_render_set_label(id self, SEL _cmd, id label)
     }
 }
 
-static void mw_render_set_pipeline(id self, SEL _cmd, id pipeline)
-{
-    struct mw_render_encoder_state *state = mw_render_encoder_state_of(self);
-
-    (void)_cmd;
-    if (state != NULL) {
-        state->pipeline = pipeline; /* not retained: the client keeps it alive while encoding */
-        mw_render_note_set(state);
-    }
-}
-
-static void mw_render_set_depth_stencil(id self, SEL _cmd, id depth_stencil)
-{
-    (void)_cmd;
-    (void)depth_stencil;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_cull_mode(id self, SEL _cmd, NSUInteger cull_mode)
-{
-    (void)_cmd;
-    (void)cull_mode;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_winding(id self, SEL _cmd, NSUInteger winding)
-{
-    (void)_cmd;
-    (void)winding;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_fill_mode(id self, SEL _cmd, NSUInteger fill_mode)
-{
-    (void)_cmd;
-    (void)fill_mode;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_viewport(id self, SEL _cmd, MTLViewport viewport)
-{
-    (void)_cmd;
-    (void)viewport;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_scissor(id self, SEL _cmd, MTLScissorRect rect)
-{
-    (void)_cmd;
-    (void)rect;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_blend_color(id self, SEL _cmd, float red, float green, float blue,
-                                      float alpha)
-{
-    (void)_cmd;
-    (void)red;
-    (void)green;
-    (void)blue;
-    (void)alpha;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_stencil_reference(id self, SEL _cmd, uint32_t reference)
-{
-    (void)_cmd;
-    (void)reference;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_vertex_buffer(id self, SEL _cmd, id buffer, NSUInteger offset,
-                                        NSUInteger index)
-{
-    (void)_cmd;
-    (void)buffer;
-    (void)offset;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_vertex_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
-                                       NSUInteger index)
-{
-    (void)_cmd;
-    (void)bytes;
-    (void)length;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_vertex_texture(id self, SEL _cmd, id texture, NSUInteger index)
-{
-    (void)_cmd;
-    (void)texture;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_vertex_sampler(id self, SEL _cmd, id sampler, NSUInteger index)
-{
-    (void)_cmd;
-    (void)sampler;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_vertex_sampler_lod(id self, SEL _cmd, id sampler, float lod_min,
-                                             float lod_max, NSUInteger index)
-{
-    (void)_cmd;
-    (void)sampler;
-    (void)lod_min;
-    (void)lod_max;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_fragment_buffer(id self, SEL _cmd, id buffer, NSUInteger offset,
-                                          NSUInteger index)
-{
-    (void)_cmd;
-    (void)buffer;
-    (void)offset;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_fragment_bytes(id self, SEL _cmd, const void *bytes, NSUInteger length,
-                                         NSUInteger index)
-{
-    (void)_cmd;
-    (void)bytes;
-    (void)length;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_fragment_texture(id self, SEL _cmd, id texture, NSUInteger index)
-{
-    (void)_cmd;
-    (void)texture;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_fragment_sampler(id self, SEL _cmd, id sampler, NSUInteger index)
-{
-    (void)_cmd;
-    (void)sampler;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_set_fragment_sampler_lod(id self, SEL _cmd, id sampler, float lod_min,
-                                               float lod_max, NSUInteger index)
-{
-    (void)_cmd;
-    (void)sampler;
-    (void)lod_min;
-    (void)lod_max;
-    (void)index;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_push_debug_group(id self, SEL _cmd, id name)
-{
-    (void)_cmd;
-    (void)name;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
-static void mw_render_pop_debug_group(id self, SEL _cmd)
-{
-    (void)_cmd;
-    mw_render_note_set(mw_render_encoder_state_of(self));
-}
-
 static void mw_render_draw_primitives(id self, SEL _cmd, NSUInteger primitive_type,
                                       NSUInteger vertex_start, NSUInteger vertex_count)
 {
     (void)_cmd;
-    (void)vertex_start;
-    mw_render_record_draw(self, (unsigned long)primitive_type, (unsigned long)vertex_count, 0, 1,
-                          0);
+    mw_render_record_draw(self, (unsigned long)primitive_type, (unsigned long)vertex_start,
+                          (unsigned long)vertex_count, 0, 0, nil, 0, 1, 0, 0, 0);
 }
 
 static void mw_render_draw_primitives_instanced(id self, SEL _cmd, NSUInteger primitive_type,
@@ -3854,9 +4647,9 @@ static void mw_render_draw_primitives_instanced(id self, SEL _cmd, NSUInteger pr
                                                 NSUInteger instance_count)
 {
     (void)_cmd;
-    (void)vertex_start;
-    mw_render_record_draw(self, (unsigned long)primitive_type, (unsigned long)vertex_count, 0,
-                          (unsigned long)instance_count, 0);
+    mw_render_record_draw(self, (unsigned long)primitive_type, (unsigned long)vertex_start,
+                          (unsigned long)vertex_count, 0, 0, nil, 0, (unsigned long)instance_count,
+                          0, 0, 0);
 }
 
 static void mw_render_draw_indexed(id self, SEL _cmd, NSUInteger primitive_type,
@@ -3864,10 +4657,9 @@ static void mw_render_draw_indexed(id self, SEL _cmd, NSUInteger primitive_type,
                                    NSUInteger index_buffer_offset)
 {
     (void)_cmd;
-    (void)index_type;
-    (void)index_buffer;
-    (void)index_buffer_offset;
-    mw_render_record_draw(self, (unsigned long)primitive_type, 0, (unsigned long)index_count, 1, 1);
+    mw_render_record_draw(self, (unsigned long)primitive_type, 0, 0,
+                          (unsigned long)index_count, index_type, index_buffer,
+                          index_buffer_offset, 1, 0, 0, 1);
 }
 
 static void mw_render_draw_indexed_instanced(id self, SEL _cmd, NSUInteger primitive_type,
@@ -3876,11 +4668,9 @@ static void mw_render_draw_indexed_instanced(id self, SEL _cmd, NSUInteger primi
                                              NSUInteger instance_count)
 {
     (void)_cmd;
-    (void)index_type;
-    (void)index_buffer;
-    (void)index_buffer_offset;
-    mw_render_record_draw(self, (unsigned long)primitive_type, 0, (unsigned long)index_count,
-                          (unsigned long)instance_count, 1);
+    mw_render_record_draw(self, (unsigned long)primitive_type, 0, 0,
+                          (unsigned long)index_count, index_type, index_buffer,
+                          index_buffer_offset, (unsigned long)instance_count, 0, 0, 1);
 }
 
 static void mw_render_draw_indexed_base(id self, SEL _cmd, NSUInteger primitive_type,
@@ -3890,13 +4680,305 @@ static void mw_render_draw_indexed_base(id self, SEL _cmd, NSUInteger primitive_
                                         NSUInteger base_instance)
 {
     (void)_cmd;
-    (void)index_type;
-    (void)index_buffer;
-    (void)index_buffer_offset;
-    (void)base_vertex;
-    (void)base_instance;
-    mw_render_record_draw(self, (unsigned long)primitive_type, 0, (unsigned long)index_count,
-                          (unsigned long)instance_count, 1);
+    mw_render_record_draw(self, (unsigned long)primitive_type, 0, 0,
+                          (unsigned long)index_count, index_type, index_buffer,
+                          index_buffer_offset, (unsigned long)instance_count, base_vertex,
+                          base_instance, 1);
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Serializing a recorded render frame (protocol 2). Called with gWireLock held.
+ *
+ * The order is the encoder's op order, with object creation hoisted: a buffer is created and
+ * uploaded, a texture created, a pipeline/sampler/depth-stencil state sent, each on its first use
+ * in this connection. The frame's picture is its last render pass's color attachment; the guest
+ * cannot hash it (it did not draw it), so MW_FRAME_END carries crc 0 and the host answers without
+ * a read-back until its execution half exists.
+ * ---------------------------------------------------------------------------------------------- */
+
+static int mw_send_render_buffer(struct mw_command_buffer_state *state, id object)
+{
+    struct mw_buffer_state *buffer = mw_buffer_state_of(object);
+
+    if (buffer == NULL) {
+        return -1;
+    }
+    if (buffer->uploaded_seq == state->seq) {
+        return 0;
+    }
+    if (mw_wire_ensure_buffer(buffer) != 0) {
+        return -1;
+    }
+    if (mw_send_buffer_upload(buffer) != 0) {
+        return -1;
+    }
+    buffer->uploaded_seq = state->seq;
+    return 0;
+}
+
+static int mw_send_render_frame(struct mw_command_buffer_state *state)
+{
+    struct mw_frame_begin begin;
+    struct mw_frame_end end;
+    struct mw_texture_state *last_target = NULL;
+
+    begin.seq = state->seq;
+    begin.guest_t_begin_ns = state->t_begin_ns;
+    if (mw_send(&gWire, MW_FRAME_BEGIN, &begin, sizeof(begin)) != 0) {
+        return -1;
+    }
+    for (int e = 0; e < state->render_encoder_stored; e++) {
+        struct mw_render_encoder_state *encoder =
+            mw_render_encoder_state_of(state->render_encoders[e]);
+        struct mw_texture_state *target;
+
+        if (encoder == NULL) {
+            continue;
+        }
+        target = mw_texture_state_of(encoder->target);
+        if (target == NULL) {
+            mw_log("render frame: encoder %d has no serializable render target", e);
+            return -1;
+        }
+        if (mw_wire_ensure_texture(target) != 0) {
+            return -1;
+        }
+        if (encoder->begin.has_depth && encoder->depth_target != nil) {
+            struct mw_texture_state *depth = mw_texture_state_of(encoder->depth_target);
+
+            if (depth != NULL && mw_wire_ensure_texture(depth) != 0) {
+                return -1;
+            }
+        }
+        if (mw_send(&gWire, MW_RENDER_BEGIN, &encoder->begin, sizeof(encoder->begin)) != 0) {
+            return -1;
+        }
+        for (int i = 0; i < encoder->op_count; i++) {
+            struct mw_render_op *op = &encoder->ops[i];
+
+            switch (op->kind) {
+            case MWR_OP_SET_PIPELINE: {
+                struct mw_stub_state *pipeline = mw_stub_state_of_object(op->object);
+                struct mw_render_set_pipeline message;
+
+                if (mw_wire_ensure_pipeline(pipeline) != 0) {
+                    return -1;
+                }
+                message.pipeline_id = pipeline->remote_id;
+                message.reserved = 0;
+                if (mw_send(&gWire, MW_RENDER_SET_PIPELINE, &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_DEPTH_STENCIL: {
+                struct mw_stub_state *depth = mw_stub_state_of_object(op->object);
+                struct mw_render_set_depth_stencil message;
+
+                if (depth != NULL && mw_wire_ensure_depth_stencil(depth) != 0) {
+                    return -1;
+                }
+                message.state_id = depth != NULL ? depth->remote_id : 0;
+                message.reserved = 0;
+                if (mw_send(&gWire, MW_RENDER_SET_DEPTH_STENCIL, &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_VERTEX_BUFFER:
+            case MWR_OP_SET_FRAGMENT_BUFFER: {
+                struct mw_buffer_state *buffer = mw_buffer_state_of(op->object);
+                struct mw_render_set_buffer message;
+
+                if (mw_send_render_buffer(state, op->object) != 0 || buffer == NULL) {
+                    return -1;
+                }
+                message.buffer_id = buffer->remote_id;
+                message.index = op->index;
+                message.offset = op->value64;
+                if (mw_send(&gWire,
+                            op->kind == MWR_OP_SET_VERTEX_BUFFER ? MW_RENDER_SET_VERTEX_BUFFER
+                                                                 : MW_RENDER_SET_FRAGMENT_BUFFER,
+                            &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_VERTEX_BYTES:
+            case MWR_OP_SET_FRAGMENT_BYTES: {
+                struct mw_render_set_bytes message;
+
+                message.index = op->index;
+                message.length = op->length;
+                message.stage = op->stage;
+                message.reserved = 0;
+                if (mw_send_with_body(&gWire,
+                                      op->kind == MWR_OP_SET_VERTEX_BYTES
+                                          ? MW_RENDER_SET_VERTEX_BYTES
+                                          : MW_RENDER_SET_FRAGMENT_BYTES,
+                                      &message, sizeof(message), op->bytes,
+                                      op->length) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_VERTEX_TEXTURE:
+            case MWR_OP_SET_FRAGMENT_TEXTURE: {
+                struct mw_texture_state *texture = mw_texture_state_of(op->object);
+                struct mw_render_set_texture message;
+
+                if (texture == NULL) {
+                    return -1;
+                }
+                if (mw_wire_ensure_texture(texture) != 0) {
+                    return -1;
+                }
+                message.texture_id = texture->remote_id;
+                message.index = op->index;
+                if (mw_send(&gWire,
+                            op->kind == MWR_OP_SET_VERTEX_TEXTURE ? MW_RENDER_SET_VERTEX_TEXTURE
+                                                                  : MW_RENDER_SET_FRAGMENT_TEXTURE,
+                            &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_VERTEX_SAMPLER:
+            case MWR_OP_SET_FRAGMENT_SAMPLER: {
+                struct mw_stub_state *sampler = mw_stub_state_of_object(op->object);
+                struct mw_render_set_sampler message;
+
+                if (sampler != NULL && mw_wire_ensure_sampler(sampler) != 0) {
+                    return -1;
+                }
+                message.sampler_id = sampler != NULL ? sampler->remote_id : 0;
+                message.index = op->index;
+                if (mw_send(&gWire,
+                            op->kind == MWR_OP_SET_VERTEX_SAMPLER ? MW_RENDER_SET_VERTEX_SAMPLER
+                                                                  : MW_RENDER_SET_FRAGMENT_SAMPLER,
+                            &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_VIEWPORT: {
+                struct mw_render_set_viewport message;
+
+                message.x = op->fvalues[0];
+                message.y = op->fvalues[1];
+                message.width = op->fvalues[2];
+                message.height = op->fvalues[3];
+                message.znear = op->fvalues[4];
+                message.zfar = op->fvalues[5];
+                if (mw_send(&gWire, MW_RENDER_SET_VIEWPORT, &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_SCISSOR: {
+                struct mw_render_set_scissor message;
+
+                message.x = op->values[0];
+                message.y = op->values[1];
+                message.width = op->values[2];
+                message.height = op->values[3];
+                if (mw_send(&gWire, MW_RENDER_SET_SCISSOR, &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_CULL_MODE:
+            case MWR_OP_SET_WINDING:
+            case MWR_OP_SET_FILL_MODE:
+            case MWR_OP_SET_STENCIL_REFERENCE: {
+                struct mw_render_set_state message;
+                uint16_t type = MW_RENDER_SET_CULL_MODE;
+
+                message.value = op->values[0];
+                message.reserved = 0;
+                if (op->kind == MWR_OP_SET_WINDING) {
+                    type = MW_RENDER_SET_WINDING;
+                } else if (op->kind == MWR_OP_SET_FILL_MODE) {
+                    type = MW_RENDER_SET_FILL_MODE;
+                }
+                if (mw_send(&gWire, type, &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_SET_BLEND_COLOR: {
+                struct mw_render_set_blend_color message;
+
+                message.red = op->fvalues[0];
+                message.green = op->fvalues[1];
+                message.blue = op->fvalues[2];
+                message.alpha = op->fvalues[3];
+                if (mw_send(&gWire, MW_RENDER_SET_BLEND_COLOR, &message, sizeof(message)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_DRAW: {
+                struct mw_render_draw draw = op->draw;
+
+                if ((draw.flags & MW_DRAW_INDEXED) != 0) {
+                    struct mw_buffer_state *index;
+
+                    if (mw_send_render_buffer(state, op->object2) != 0) {
+                        return -1;
+                    }
+                    index = mw_buffer_state_of(op->object2);
+                    if (index == NULL) {
+                        return -1;
+                    }
+                    draw.index_buffer = index->remote_id;
+                }
+                if (mw_send(&gWire, MW_RENDER_DRAW, &draw, sizeof(draw)) != 0) {
+                    return -1;
+                }
+                break;
+            }
+            case MWR_OP_END:
+            default:
+                break;
+            }
+        }
+        {
+            struct mw_render_end message;
+
+            message.encoder_index = encoder->encoder_index;
+            message.draw_count = (uint32_t)encoder->draw_count;
+            message.set_count = (uint32_t)encoder->set_count;
+            message.reserved = 0;
+            if (mw_send(&gWire, MW_RENDER_END, &message, sizeof(message)) != 0) {
+                return -1;
+            }
+        }
+        last_target = target;
+    }
+    if (last_target == NULL) {
+        return -1;
+    }
+    {
+        struct mw_present present;
+
+        present.texture_id = last_target->remote_id;
+        present.flags = 0;
+        if (mw_send(&gWire, MW_PRESENT, &present, sizeof(present)) != 0) {
+            return -1;
+        }
+    }
+    memset(&end, 0, sizeof(end));
+    end.seq = state->seq;
+    end.guest_t_encoded_ns = state->encoded_ns;
+    end.crc = 0; /* no guest checksum: the host did not draw these pixels in the guest */
+    end.width = last_target->width;
+    end.height = last_target->height;
+    end.bytes_per_row = last_target->width * 4;
+    if (mw_send(&gWire, MW_FRAME_END, &end, sizeof(end)) != 0) {
+        return -1;
+    }
+    return 0;
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -4394,6 +5476,9 @@ static void mw_free_command_buffer(struct mw_command_buffer_state *state)
 {
     if (state == NULL) {
         return;
+    }
+    for (int i = 0; i < state->render_encoder_stored; i++) {
+        [state->render_encoders[i] release];
     }
     [state->error release];
     [state->queue release];

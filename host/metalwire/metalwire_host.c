@@ -141,6 +141,27 @@ struct mw_frame_state {
     size_t copy_count;
     int has_present;
     uint32_t present_texture;
+    /* stage C: the frame carries render encoders instead of a blit. Until the host execution half
+     * exists the frame is counted and acknowledged, not executed. */
+    int render_mode;
+    uint32_t render_target;
+    uint32_t render_pipeline;
+    uint32_t render_encoders;
+    uint64_t render_draw_count;
+    uint64_t render_set_count;
+};
+
+/* A render pipeline state the guest created; WP-2 resolves its shaders from this record. */
+struct mw_render_pipeline {
+    uint32_t id;
+    uint32_t color_format;
+    uint32_t sample_count;
+    uint32_t blend_enabled;
+    uint32_t vertex_attribute_count;
+    uint32_t vertex_layout_count;
+    char name[MW_NAME_MAX];
+    char vertex_function[MW_NAME_MAX];
+    char fragment_function[MW_NAME_MAX];
 };
 
 struct mw_timing {
@@ -188,6 +209,11 @@ struct mw_server {
     struct mw_image **images;
     size_t image_count;
     size_t image_cap;
+    struct mw_render_pipeline **pipelines;
+    size_t pipeline_count;
+    size_t pipeline_cap;
+    uint64_t render_frames_seen;
+    uint64_t render_draws_logged;
 
     int listen_fd;
     int client_fd;
@@ -721,12 +747,44 @@ static int mw_create_host_buffer(struct mw_vulkan *vk, VkDeviceSize size, VkBuff
     return 0;
 }
 
-static VkFormat mw_vk_format(uint32_t format)
+static uint32_t mw_format_bytes(uint32_t format)
 {
-    return format == MW_FORMAT_RGBA8_UNORM ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+    return format == MW_FORMAT_R8_UNORM ? 1u : MW_PIXEL_BYTES;
 }
 
-static int mw_vulkan_init(struct mw_vulkan *vk, int gpu_index, int verbose)
+static VkFormat mw_vk_format(uint32_t format)
+{
+    if (format == MW_FORMAT_RGBA8_UNORM)
+        return VK_FORMAT_R8G8B8A8_UNORM;
+    if (format == MW_FORMAT_R8_UNORM)
+        return VK_FORMAT_R8_UNORM;
+    return VK_FORMAT_B8G8R8A8_UNORM;
+}
+
+static int mw_parse_pci_address(const char *text, uint32_t *domain, uint32_t *bus,
+                                uint32_t *device, uint32_t *function)
+{
+    unsigned d = 0, b = 0, dev = 0, fn = 0;
+
+    if (sscanf(text, "%x:%x:%x.%x", &d, &b, &dev, &fn) == 4) {
+        *domain = d;
+        *bus = b;
+        *device = dev;
+        *function = fn;
+        return 0;
+    }
+    if (sscanf(text, "%x:%x.%x", &b, &dev, &fn) == 3) {
+        *domain = 0;
+        *bus = b;
+        *device = dev;
+        *function = fn;
+        return 0;
+    }
+    return -1;
+}
+
+static int mw_vulkan_init(struct mw_vulkan *vk, int gpu_index, const char *pci_address,
+                          int verbose)
 {
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO};
     VkInstanceCreateInfo instance_info = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -771,16 +829,50 @@ static int mw_vulkan_init(struct mw_vulkan *vk, int gpu_index, int verbose)
         mw_log("vulkan: no physical devices (result %d)", (int)result);
         goto out;
     }
-    if (gpu_index < 0 || (uint32_t)gpu_index >= count) {
-        mw_log("vulkan: physical device %d requested, only %u present", gpu_index, count);
-        goto out;
-    }
     devices = calloc(count, sizeof(*devices));
     if (devices == NULL)
         goto out;
     result = vkEnumeratePhysicalDevices(vk->instance, &count, devices);
     if (result != VK_SUCCESS || count == 0) {
         mw_log("vulkan: vkEnumeratePhysicalDevices failed: %d", (int)result);
+        goto out;
+    }
+    /* The stage-C rule: pick the card by PCI id, never by index. The other V100 can be bound to
+     * another experiment's VM (vfio-pci), which renumbers every index below it. */
+    if (pci_address != NULL) {
+        uint32_t want_domain = 0, want_bus = 0, want_device = 0, want_function = 0;
+        int found = 0;
+
+        if (mw_parse_pci_address(pci_address, &want_domain, &want_bus, &want_device,
+                                 &want_function) != 0) {
+            mw_log("vulkan: --pci \"%s\" is not DOMAIN:BUS:DEVICE.FUNCTION or "
+                   "BUS:DEVICE.FUNCTION",
+                   pci_address);
+            goto out;
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            VkPhysicalDevicePCIBusInfoPropertiesEXT info = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT};
+            VkPhysicalDeviceProperties2 properties = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+
+            properties.pNext = &info;
+            vkGetPhysicalDeviceProperties2(devices[i], &properties);
+            if (info.pciDomain == want_domain && info.pciBus == want_bus &&
+                info.pciDevice == want_device && info.pciFunction == want_function) {
+                gpu_index = (int)i;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            mw_log("vulkan: no physical device at PCI %s (it may be bound to vfio-pci for another "
+                   "experiment)",
+                   pci_address);
+            goto out;
+        }
+    } else if (gpu_index < 0 || (uint32_t)gpu_index >= count) {
+        mw_log("vulkan: physical device %d requested, only %u present", gpu_index, count);
         goto out;
     }
     vk->physical = devices[gpu_index];
@@ -1174,7 +1266,8 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
         return -1;
     }
     if (request->pixel_format != MW_FORMAT_BGRA8_UNORM &&
-        request->pixel_format != MW_FORMAT_RGBA8_UNORM) {
+        request->pixel_format != MW_FORMAT_RGBA8_UNORM &&
+        request->pixel_format != MW_FORMAT_R8_UNORM) {
         mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "texture %u: unknown pixel format %u", request->id,
                       request->pixel_format);
         return -1;
@@ -1198,7 +1291,8 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
     image->height = request->height;
     image->format = request->pixel_format;
     {
-        uint64_t bytes = (uint64_t)request->width * request->height * MW_PIXEL_BYTES;
+        uint64_t bytes = (uint64_t)request->width * request->height *
+                         mw_format_bytes(request->pixel_format);
 
         if (bytes > UINT32_MAX || bytes > s->vk.max_buffer_size) {
             mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
@@ -1221,6 +1315,14 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    /* Metal's MTLTextureUsage bits: 1 shaderRead, 2 shaderWrite, 4 renderTarget. Stage C's render
+     * target needs the color-attachment bit; a texture sampled by a later pass needs sampled. */
+    if ((request->usage & 1u) != 0)
+        info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if ((request->usage & 2u) != 0)
+        info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if ((request->usage & 4u) != 0)
+        info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     result = vkCreateImage(s->vk.device, &info, NULL, &image->image);
@@ -1320,6 +1422,371 @@ static int mw_handle_copy(struct mw_server *s, const struct mw_copy_buffer_to_te
         mw_log("frame %" PRIu64 ": copy buffer %u -> texture %u (%ux%u at %u,%u, row %u)",
                s->frame.seq, copy->buffer_id, copy->texture_id, copy->width, copy->height,
                copy->origin_x, copy->origin_y, copy->bytes_per_row);
+    return 0;
+}
+
+/* ---- protocol: render encoders (stage C) ----------------------------------------------------
+ *
+ * Protocol 2 carries a recorded MTLRenderCommandEncoder. The host validates the object graph
+ * (every texture/buffer/pipeline a call names exists) and counts what the frame recorded. The
+ * execution half -- Vulkan pipelines from the shaders of WP-2 -- is deliberately not here yet:
+ * an acknowledged render frame means the commands crossed and decoded, not that pixels were
+ * drawn.
+ */
+
+static struct mw_render_pipeline *mw_pipeline_find(struct mw_server *s, uint32_t id)
+{
+    for (size_t i = 0; i < s->pipeline_count; i++) {
+        if (s->pipelines[i]->id == id)
+            return s->pipelines[i];
+    }
+    return NULL;
+}
+
+static void mw_pipeline_destroy(struct mw_server *s, struct mw_render_pipeline *pipeline)
+{
+    for (size_t i = 0; i < s->pipeline_count; i++) {
+        if (s->pipelines[i] == pipeline) {
+            memmove(&s->pipelines[i], &s->pipelines[i + 1],
+                    (s->pipeline_count - i - 1) * sizeof(s->pipelines[0]));
+            s->pipeline_count--;
+            break;
+        }
+    }
+    free(pipeline);
+}
+
+static int mw_pipeline_add(struct mw_server *s, struct mw_render_pipeline *pipeline)
+{
+    if (s->pipeline_count == s->pipeline_cap) {
+        size_t cap = s->pipeline_cap == 0 ? 16 : s->pipeline_cap * 2;
+        struct mw_render_pipeline **grown =
+            realloc(s->pipelines, cap * sizeof(*grown));
+
+        if (grown == NULL)
+            return -1;
+        s->pipelines = grown;
+        s->pipeline_cap = cap;
+    }
+    s->pipelines[s->pipeline_count++] = pipeline;
+    return 0;
+}
+
+static void mw_pipeline_name(char *field, size_t size)
+{
+    field[size - 1] = '\0';
+}
+
+static int mw_handle_create_render_pipeline(struct mw_server *s, const unsigned char *payload,
+                                            uint32_t len)
+{
+    struct mw_create_render_pipeline request;
+    struct mw_render_pipeline *pipeline;
+    size_t attribute_bytes;
+    size_t layout_bytes;
+    size_t expected;
+
+    if (len < sizeof(request)) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_CREATE_RENDER_PIPELINE (%u bytes)", len);
+        return -1;
+    }
+    memcpy(&request, payload, sizeof(request));
+    if (request.vertex_attribute_count > MW_MAX_RENDER_ATTRIBUTES ||
+        request.vertex_layout_count > MW_MAX_RENDER_LAYOUTS) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                      "render pipeline %u: %u attributes / %u layouts over the limit", request.id,
+                      request.vertex_attribute_count, request.vertex_layout_count);
+        return -1;
+    }
+    attribute_bytes = (size_t)request.vertex_attribute_count * sizeof(struct mw_vertex_attribute);
+    layout_bytes = (size_t)request.vertex_layout_count * sizeof(struct mw_vertex_layout);
+    expected = sizeof(request) + attribute_bytes + layout_bytes;
+    if (len != expected) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                      "render pipeline %u: %u-byte message for %zu expected", request.id, len,
+                      expected);
+        return -1;
+    }
+    if (mw_pipeline_find(s, request.id) != NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "render pipeline id %u already exists",
+                      request.id);
+        return -1;
+    }
+    pipeline = calloc(1, sizeof(*pipeline));
+    if (pipeline == NULL) {
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "out of host memory for render pipeline %u",
+                      request.id);
+        return -1;
+    }
+    pipeline->id = request.id;
+    pipeline->color_format = request.color_format;
+    pipeline->sample_count = request.sample_count;
+    pipeline->blend_enabled = request.blend_enabled;
+    pipeline->vertex_attribute_count = request.vertex_attribute_count;
+    pipeline->vertex_layout_count = request.vertex_layout_count;
+    memcpy(pipeline->name, request.pipeline_name, MW_NAME_MAX);
+    memcpy(pipeline->vertex_function, request.vertex_function, MW_NAME_MAX);
+    memcpy(pipeline->fragment_function, request.fragment_function, MW_NAME_MAX);
+    mw_pipeline_name(pipeline->name, sizeof(pipeline->name));
+    mw_pipeline_name(pipeline->vertex_function, sizeof(pipeline->vertex_function));
+    mw_pipeline_name(pipeline->fragment_function, sizeof(pipeline->fragment_function));
+    if (mw_pipeline_add(s, pipeline) < 0) {
+        free(pipeline);
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "pipeline table growth failed");
+        return -1;
+    }
+    mw_log("render pipeline %u: name \"%s\", vertex \"%s\", fragment \"%s\", format %u, "
+           "blend %u, %u attributes",
+           pipeline->id, pipeline->name, pipeline->vertex_function, pipeline->fragment_function,
+           pipeline->color_format, pipeline->blend_enabled, pipeline->vertex_attribute_count);
+    return 0;
+}
+
+static int mw_handle_create_sampler(struct mw_server *s, const struct mw_create_sampler *request)
+{
+    (void)s;
+    mw_log("render sampler %u: min %u mag %u mip %u address %u/%u/%u normalized %u",
+           request->id, request->min_filter, request->mag_filter, request->mip_filter,
+           request->address_s, request->address_t, request->address_r,
+           request->normalized_coords);
+    return 0;
+}
+
+static int mw_handle_create_depth_stencil(struct mw_server *s,
+                                          const struct mw_create_depth_stencil *request)
+{
+    (void)s;
+    mw_log("render depth-stencil %u: compare %u write %u", request->id, request->depth_compare,
+           request->depth_write);
+    return 0;
+}
+
+static int mw_handle_render_begin(struct mw_server *s, const struct mw_render_begin *request)
+{
+    struct mw_image *target;
+
+    if (!s->frame.active) {
+        mw_log("warning: MW_RENDER_BEGIN outside a frame ignored");
+        return 0;
+    }
+    target = mw_image_find(s, request->target_texture);
+    if (target == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "render encoder targets unknown texture %u",
+                      request->target_texture);
+        return -1;
+    }
+    s->frame.render_mode = 1;
+    s->frame.render_encoders++;
+    s->frame.render_target = request->target_texture;
+    s->frame.present_texture = request->target_texture;
+    if (s->render_frames_seen == 0) {
+        mw_log("render: encoder %u: target texture %u (%ux%u format %u), load %u store %u, "
+               "clear %.3f %.3f %.3f %.3f, depth %u",
+               request->encoder_index, request->target_texture, request->width, request->height,
+               request->pixel_format, request->load_action, request->store_action,
+               request->clear_color[0], request->clear_color[1], request->clear_color[2],
+               request->clear_color[3], request->has_depth);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_pipeline(struct mw_server *s,
+                                         const struct mw_render_set_pipeline *request)
+{
+    struct mw_render_pipeline *pipeline;
+
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_SET_PIPELINE outside a render encoder ignored");
+        return 0;
+    }
+    s->frame.render_set_count++;
+    pipeline = mw_pipeline_find(s, request->pipeline_id);
+    if (pipeline == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw pipeline %u was never created",
+                      request->pipeline_id);
+        return -1;
+    }
+    s->frame.render_pipeline = request->pipeline_id;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: pipeline %u \"%s\"", pipeline->id, pipeline->name);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_state(struct mw_server *s, const char *what,
+                                      const struct mw_render_set_state *request)
+{
+    (void)request;
+    if (!s->frame.render_mode) {
+        mw_log("warning: %s outside a render encoder ignored", what);
+        return 0;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: %s %u", what, request->value);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_buffer(struct mw_server *s, const char *what,
+                                       const struct mw_render_set_buffer *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: %s outside a render encoder ignored", what);
+        return 0;
+    }
+    if (mw_buffer_find(s, request->buffer_id) == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "%s names unknown buffer %u", what,
+                      request->buffer_id);
+        return -1;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: %s buffer %u offset %" PRIu64 " index %u", what, request->buffer_id,
+               (uint64_t)request->offset, request->index);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_texture(struct mw_server *s, const char *what,
+                                        const struct mw_render_set_texture *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: %s outside a render encoder ignored", what);
+        return 0;
+    }
+    if (mw_image_find(s, request->texture_id) == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "%s names unknown texture %u", what,
+                      request->texture_id);
+        return -1;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: %s texture %u index %u", what, request->texture_id, request->index);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_sampler(struct mw_server *s, const char *what,
+                                        const struct mw_render_set_sampler *request)
+{
+    (void)what;
+    if (!s->frame.render_mode) {
+        mw_log("warning: %s outside a render encoder ignored", what);
+        return 0;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: %s sampler %u index %u", what, request->sampler_id, request->index);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_bytes(struct mw_server *s, const struct mw_render_set_bytes *request,
+                                      uint32_t len)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_SET_*_BYTES outside a render encoder ignored");
+        return 0;
+    }
+    if (len != sizeof(*request) + request->length) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "set-bytes message is %u bytes for %u payload",
+                      len, request->length);
+        return -1;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: stage %u bytes index %u length %u", request->stage, request->index,
+               request->length);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_viewport(struct mw_server *s,
+                                         const struct mw_render_set_viewport *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_SET_VIEWPORT outside a render encoder ignored");
+        return 0;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: viewport %.1f %.1f %.1fx%.1f z %.3f..%.3f", request->x, request->y,
+               request->width, request->height, request->znear, request->zfar);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_scissor(struct mw_server *s,
+                                        const struct mw_render_set_scissor *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_SET_SCISSOR outside a render encoder ignored");
+        return 0;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: scissor %ux%u at %u,%u", request->width, request->height, request->x,
+               request->y);
+    }
+    return 0;
+}
+
+static int mw_handle_render_set_blend_color(struct mw_server *s,
+                                            const struct mw_render_set_blend_color *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_SET_BLEND_COLOR outside a render encoder ignored");
+        return 0;
+    }
+    s->frame.render_set_count++;
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: blend color %.3f %.3f %.3f %.3f", request->red, request->green,
+               request->blue, request->alpha);
+    }
+    return 0;
+}
+
+static int mw_handle_render_draw(struct mw_server *s, const struct mw_render_draw *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_DRAW outside a render encoder ignored");
+        return 0;
+    }
+    if (s->frame.render_pipeline == 0) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw before any pipeline was bound");
+        return -1;
+    }
+    if ((request->flags & MW_DRAW_INDEXED) != 0 && request->index_buffer != 0 &&
+        mw_buffer_find(s, request->index_buffer) == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw names unknown index buffer %u",
+                      request->index_buffer);
+        return -1;
+    }
+    s->frame.render_draw_count++;
+    if (s->render_draws_logged < 64) {
+        s->render_draws_logged++;
+        mw_log("CA draw: pipeline %u prim %u %s%s (indices %" PRIu64 ", vertices %" PRIu64
+               ", instances %u, base vertex %" PRId64 ")",
+               s->frame.render_pipeline, request->primitive_type,
+               (request->flags & MW_DRAW_INDEXED) ? "indexed" : "non-indexed",
+               (request->flags & MW_DRAW_INSTANCED) ? " instanced" : "",
+               (uint64_t)request->index_count, (uint64_t)request->vertex_count,
+               request->instance_count, (int64_t)request->base_vertex);
+    }
+    return 0;
+}
+
+static int mw_handle_render_end(struct mw_server *s, const struct mw_render_end *request)
+{
+    if (!s->frame.render_mode) {
+        mw_log("warning: MW_RENDER_END outside a render encoder ignored");
+        return 0;
+    }
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("render: encoder %u ended: %u draws, %u sets", request->encoder_index,
+               request->draw_count, request->set_count);
+    }
     return 0;
 }
 
@@ -1716,6 +2183,41 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
     frame->bytes_per_row = request->bytes_per_row;
     frame->seq = request->seq;
 
+    /* Stage C: a frame the guest recorded from CoreAnimation's render encoders. The commands are
+     * decoded and validated above; execution waits for WP-2's shaders. The guest cannot checksum a
+     * picture it did not draw, so the ack reports crc_ok without a read-back (crc 0). */
+    if (frame->render_mode) {
+        struct mw_ack ack;
+
+        memset(&ack, 0, sizeof(ack));
+        ack.magic = MW_ACK_MAGIC;
+        ack.version = MW_VERSION;
+        ack.status = (uint16_t)(frame->error != 0 ? frame->error : MW_STATUS_OK);
+        ack.seq = frame->seq;
+        ack.guest_t_commit_ns = frame->guest_t_encoded_ns;
+        ack.host_t_done_ns = mw_now_ns();
+        ack.crc = 0;
+        ack.crc_ok = 1;
+        ack.width = frame->width;
+        ack.height = frame->height;
+        ack.bytes_per_row = frame->bytes_per_row;
+        mw_log("render frame %" PRIu64 ": %u encoder(s), %" PRIu64 " draws, %" PRIu64
+               " sets, target texture %u %ux%u (decoded and acknowledged; no execution until the "
+               "WP-2 shaders exist)",
+               frame->seq, frame->render_encoders, frame->render_draw_count,
+               frame->render_set_count, frame->render_target, frame->width, frame->height);
+        s->render_frames_seen++;
+        if (mw_send_all(s->client_fd, &ack, sizeof(ack)) < 0) {
+            mw_frame_reset(s);
+            return -1;
+        }
+        s->frames_done++;
+        mw_frame_reset(s);
+        if (s->frames_target != 0 && s->frames_done >= s->frames_target)
+            s->done = 1;
+        return 0;
+    }
+
     memset(&timing, 0, sizeof(timing));
     timing.recv_ns = t_end > frame->begin_ns ? t_end - frame->begin_ns : 0;
     status = mw_run_frame(s, frame, &result);
@@ -1853,6 +2355,50 @@ static const char *mw_type_name(uint16_t type)
         return "MW_FRAME_BEGIN";
     case MW_FRAME_END:
         return "MW_FRAME_END";
+    case MW_RENDER_BEGIN:
+        return "MW_RENDER_BEGIN";
+    case MW_RENDER_SET_PIPELINE:
+        return "MW_RENDER_SET_PIPELINE";
+    case MW_RENDER_SET_DEPTH_STENCIL:
+        return "MW_RENDER_SET_DEPTH_STENCIL";
+    case MW_RENDER_SET_VERTEX_BUFFER:
+        return "MW_RENDER_SET_VERTEX_BUFFER";
+    case MW_RENDER_SET_VERTEX_BYTES:
+        return "MW_RENDER_SET_VERTEX_BYTES";
+    case MW_RENDER_SET_VERTEX_TEXTURE:
+        return "MW_RENDER_SET_VERTEX_TEXTURE";
+    case MW_RENDER_SET_VERTEX_SAMPLER:
+        return "MW_RENDER_SET_VERTEX_SAMPLER";
+    case MW_RENDER_SET_FRAGMENT_BUFFER:
+        return "MW_RENDER_SET_FRAGMENT_BUFFER";
+    case MW_RENDER_SET_FRAGMENT_BYTES:
+        return "MW_RENDER_SET_FRAGMENT_BYTES";
+    case MW_RENDER_SET_FRAGMENT_TEXTURE:
+        return "MW_RENDER_SET_FRAGMENT_TEXTURE";
+    case MW_RENDER_SET_FRAGMENT_SAMPLER:
+        return "MW_RENDER_SET_FRAGMENT_SAMPLER";
+    case MW_RENDER_SET_VIEWPORT:
+        return "MW_RENDER_SET_VIEWPORT";
+    case MW_RENDER_SET_SCISSOR:
+        return "MW_RENDER_SET_SCISSOR";
+    case MW_RENDER_SET_CULL_MODE:
+        return "MW_RENDER_SET_CULL_MODE";
+    case MW_RENDER_SET_WINDING:
+        return "MW_RENDER_SET_WINDING";
+    case MW_RENDER_SET_FILL_MODE:
+        return "MW_RENDER_SET_FILL_MODE";
+    case MW_RENDER_SET_BLEND_COLOR:
+        return "MW_RENDER_SET_BLEND_COLOR";
+    case MW_RENDER_DRAW:
+        return "MW_RENDER_DRAW";
+    case MW_RENDER_END:
+        return "MW_RENDER_END";
+    case MW_CREATE_RENDER_PIPELINE:
+        return "MW_CREATE_RENDER_PIPELINE";
+    case MW_CREATE_SAMPLER:
+        return "MW_CREATE_SAMPLER";
+    case MW_CREATE_DEPTH_STENCIL:
+        return "MW_CREATE_DEPTH_STENCIL";
     default:
         return "unknown";
     }
@@ -2025,6 +2571,202 @@ static int mw_handle_message(struct mw_server *s, uint16_t type, const unsigned 
         }
         memcpy(&request, payload, sizeof(request));
         return mw_handle_frame_end(s, &request);
+    }
+    /* ---- stage C: render encoders and their objects ---- */
+    case MW_CREATE_RENDER_PIPELINE:
+        mw_handle_create_render_pipeline(s, payload, len);
+        break;
+    case MW_CREATE_SAMPLER: {
+        struct mw_create_sampler request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_CREATE_SAMPLER (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_create_sampler(s, &request);
+        break;
+    }
+    case MW_CREATE_DEPTH_STENCIL: {
+        struct mw_create_depth_stencil request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_CREATE_DEPTH_STENCIL (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_create_depth_stencil(s, &request);
+        break;
+    }
+    case MW_RENDER_BEGIN: {
+        struct mw_render_begin request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_BEGIN (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_begin(s, &request);
+        break;
+    }
+    case MW_RENDER_SET_PIPELINE: {
+        struct mw_render_set_pipeline request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_PIPELINE (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_pipeline(s, &request);
+        break;
+    }
+    case MW_RENDER_SET_DEPTH_STENCIL: {
+        struct mw_render_set_depth_stencil request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_DEPTH_STENCIL (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_state(s, "depth-stencil",
+                                   (const struct mw_render_set_state *)&request);
+        break;
+    }
+    case MW_RENDER_SET_VERTEX_BUFFER:
+    case MW_RENDER_SET_FRAGMENT_BUFFER: {
+        struct mw_render_set_buffer request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_*_BUFFER (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_buffer(s,
+                                    type == MW_RENDER_SET_VERTEX_BUFFER ? "vertex buffer"
+                                                                        : "fragment buffer",
+                                    &request);
+        break;
+    }
+    case MW_RENDER_SET_VERTEX_BYTES:
+    case MW_RENDER_SET_FRAGMENT_BYTES: {
+        struct mw_render_set_bytes request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_*_BYTES (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_bytes(s, &request, len);
+        break;
+    }
+    case MW_RENDER_SET_VERTEX_TEXTURE:
+    case MW_RENDER_SET_FRAGMENT_TEXTURE: {
+        struct mw_render_set_texture request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_*_TEXTURE (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_texture(s,
+                                     type == MW_RENDER_SET_VERTEX_TEXTURE ? "vertex texture"
+                                                                         : "fragment texture",
+                                     &request);
+        break;
+    }
+    case MW_RENDER_SET_VERTEX_SAMPLER:
+    case MW_RENDER_SET_FRAGMENT_SAMPLER: {
+        struct mw_render_set_sampler request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_*_SAMPLER (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_sampler(s,
+                                     type == MW_RENDER_SET_VERTEX_SAMPLER ? "vertex sampler"
+                                                                         : "fragment sampler",
+                                     &request);
+        break;
+    }
+    case MW_RENDER_SET_VIEWPORT: {
+        struct mw_render_set_viewport request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_VIEWPORT (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_viewport(s, &request);
+        break;
+    }
+    case MW_RENDER_SET_SCISSOR: {
+        struct mw_render_set_scissor request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_SCISSOR (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_scissor(s, &request);
+        break;
+    }
+    case MW_RENDER_SET_CULL_MODE:
+    case MW_RENDER_SET_WINDING:
+    case MW_RENDER_SET_FILL_MODE: {
+        struct mw_render_set_state request;
+        const char *what = type == MW_RENDER_SET_CULL_MODE   ? "cull mode"
+                           : type == MW_RENDER_SET_WINDING ? "winding"
+                                                           : "fill mode";
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_STATE (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_state(s, what, &request);
+        break;
+    }
+    case MW_RENDER_SET_BLEND_COLOR: {
+        struct mw_render_set_blend_color request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_SET_BLEND_COLOR (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_blend_color(s, &request);
+        break;
+    }
+    case MW_RENDER_DRAW: {
+        struct mw_render_draw request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_DRAW (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_draw(s, &request);
+        break;
+    }
+    case MW_RENDER_END: {
+        struct mw_render_end request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_RENDER_END (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_end(s, &request);
+        break;
     }
     default:
         if (s->frame.active)
@@ -2291,8 +3033,11 @@ static void mw_server_cleanup(struct mw_server *s)
         mw_image_destroy(s, s->images[0]);
     while (s->buffer_count > 0)
         mw_buffer_destroy(s, s->buffers[0]);
+    while (s->pipeline_count > 0)
+        mw_pipeline_destroy(s, s->pipelines[0]);
     free(s->images);
     free(s->buffers);
+    free(s->pipelines);
     free(s->payload);
     free(s->rgb_scratch);
     free(s->bgra_scratch);
@@ -2316,6 +3061,8 @@ static void mw_usage(FILE *out, const char *program)
         "  --port PORT       TCP port (default %d; 0 picks a free one and prints it)\n"
         "  --bind ADDRESS    IPv4 address to bind (default 127.0.0.1)\n"
         "  --gpu INDEX       Vulkan physical-device index (default: $METALWIRE_GPU else 1)\n"
+        "  --pci ADDR        choose the device by PCI id instead of index, e.g. 0000:05:00.0\n"
+        "                    (stage C; a vfio-bound card renumbers the indices)\n"
         "  --shm PATH        publish frames in glwire's shared-memory format\n"
         "                    (default: $METALWIRE_SHM else %s; \"\" disables)\n"
         "  --frames N        exit after N acknowledged frames (0 = until stopped)\n"
@@ -2358,10 +3105,12 @@ int main(int argc, char **argv)
         {"out", required_argument, NULL, 'o'},      {"png-every", required_argument, NULL, 'P'},
         {"csv", required_argument, NULL, 'c'},      {"ram", required_argument, NULL, 'r'},
         {"ram-base", required_argument, NULL, 'R'}, {"crc-stride", required_argument, NULL, 1000},
+        {"pci", required_argument, NULL, 1002},
         {"byte-check", no_argument, NULL, 1001},    {"verbose", no_argument, NULL, 'v'},
         {"help", no_argument, NULL, 'h'},           {NULL, 0, NULL, 0},
     };
     const char *env_gpu = getenv("METALWIRE_GPU");
+    const char *pci_address = getenv("METALWIRE_PCI");
     const char *env_shm = getenv("METALWIRE_SHM");
     const char *csv_path = NULL;
     const char *out_dir = NULL;
@@ -2425,6 +3174,9 @@ int main(int argc, char **argv)
         case 1001:
             server.byte_check = 1;
             break;
+        case 1002:
+            pci_address = optarg;
+            break;
         case 'v':
             server.verbose = 1;
             break;
@@ -2487,7 +3239,7 @@ int main(int argc, char **argv)
     signal(SIGINT, mw_on_signal);
     signal(SIGTERM, mw_on_signal);
 
-    if (mw_vulkan_init(&server.vk, (int)gpu_index, server.verbose) < 0) {
+    if (mw_vulkan_init(&server.vk, (int)gpu_index, pci_address, server.verbose) < 0) {
         mw_server_cleanup(&server);
         return 1;
     }

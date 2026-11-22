@@ -64,3 +64,44 @@ When the host is given `--shm PATH` it publishes each frame in glwire's format, 
     uint32 bytes, uint32 pad, uint64 CLOCK_MONOTONIC ns, then width*height*4 bytes of BGRA
 
 The file is grown once and rewritten in place; `webview.py` re-encodes whenever `seq` changes.
+
+## Protocol 2: render encoders (stage C)
+
+`MW_VERSION` is 2. The v1 messages are unchanged (the synthetic blit client is the same path it
+was), and the new opcodes replay an `MTLRenderCommandEncoder` that the guest's device recorded:
+
+| opcode | payload | meaning |
+|---|---|---|
+| `MW_CREATE_RENDER_PIPELINE` 0x0073 | `mw_create_render_pipeline` + `mw_vertex_attribute[]` + `mw_vertex_layout[]` | one render pipeline state: name, vertex/fragment base functions, color format, blend state, vertex descriptor |
+| `MW_CREATE_SAMPLER` 0x0074 | `mw_create_sampler` | one sampler state's descriptor |
+| `MW_CREATE_DEPTH_STENCIL` 0x0075 | `mw_create_depth_stencil` | one depth-stencil state's depth half |
+| `MW_RENDER_BEGIN` 0x0060 | `mw_render_begin` | an encoder starts on its render target (color attachment 0, optional depth), with load/store actions and clear values |
+| `MW_RENDER_SET_PIPELINE` 0x0061 | `mw_render_set_pipeline` | `setRenderPipelineState:` |
+| `MW_RENDER_SET_DEPTH_STENCIL` 0x0062 | `mw_render_set_depth_stencil` | `setDepthStencilState:` |
+| `MW_RENDER_SET_VERTEX_BUFFER` / `..._FRAGMENT_BUFFER` 0x0063 / 0x0067 | `mw_render_set_buffer` | `set*Buffer:offset:atIndex:` |
+| `MW_RENDER_SET_VERTEX_BYTES` / `..._FRAGMENT_BYTES` 0x0064 / 0x0068 | `mw_render_set_bytes` + the bytes | `set*Bytes:length:atIndex:`, body inside the message like `MW_UPLOAD_BUFFER` |
+| `MW_RENDER_SET_VERTEX_TEXTURE` / `..._FRAGMENT_TEXTURE` 0x0065 / 0x0069 | `mw_render_set_texture` | `set*Texture:atIndex:` |
+| `MW_RENDER_SET_VERTEX_SAMPLER` / `..._FRAGMENT_SAMPLER` 0x0066 / 0x006A | `mw_render_set_sampler` | `set*SamplerState:atIndex:` |
+| `MW_RENDER_SET_VIEWPORT` 0x006B | `mw_render_set_viewport` | `setViewport:` |
+| `MW_RENDER_SET_SCISSOR` 0x006C | `mw_render_set_scissor` | `setScissorRect:` |
+| `MW_RENDER_SET_CULL_MODE` / `..._WINDING` / `..._FILL_MODE` 0x006D / 0x006E / 0x006F | `mw_render_set_state` | the small enum setters |
+| `MW_RENDER_SET_BLEND_COLOR` 0x0070 | `mw_render_set_blend_color` | `setBlendColorRed:...` |
+| `MW_RENDER_DRAW` 0x0071 | `mw_render_draw` | one draw (primitive, indexed/non-indexed, instances, base vertex), with the state the encoder held when it was recorded |
+| `MW_RENDER_END` 0x0072 | `mw_render_end` | the encoder ends; draw/set counts for the log |
+
+Rules the two ends rely on:
+
+- **Object creation is hoisted, not repeated per frame.** A pipeline/sampler/depth state, a
+  texture and a buffer each have their create message before the first render message naming
+  them in a connection. Buffers are uploaded by reference when the kernel supports `hakios_vtop`
+  (the same `MW_UPLOAD_BUFFER_PHYS` as v1), by body otherwise.
+- **The ops are applied in arrival order.** `MW_RENDER_BEGIN` opens an encoder; the set/draw
+  messages are the calls in the order CoreAnimation made them; `MW_RENDER_END` closes it. A frame
+  may carry several encoders.
+- **A render frame has no guest CRC.** The guest did not draw the pixels, so `MW_FRAME_END.crc` is
+  0 and `width`/`height` are the render target's. The host answers `crc_ok = 1` without a
+  read-back; in protocol 2 the host decodes and validates the commands, and paints only once the
+  WP-2 shaders exist. A `MW_PRESENT` naming the last render target follows the last
+  `MW_RENDER_END`, so the frame's picture is well-defined for the execution half.
+- **One render frame means one acknowledged frame.** The v1 ack path is unchanged: one
+  `struct mw_ack` per `MW_FRAME_END`.

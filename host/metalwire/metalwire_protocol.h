@@ -27,7 +27,10 @@
 
 #define MW_MAGIC 0x4D575452u     /* "MWTR" */
 #define MW_ACK_MAGIC 0x4D57414Bu /* "MWAK" */
-#define MW_VERSION 1u
+/* 1: the blit/present contract (stage 29). 2: adds the render-encoder opcodes (stage C); a v2
+ * guest may still use every v1 message unchanged, and the guest's synthetic blit client is the
+ * same path it was in v1. */
+#define MW_VERSION 2u
 
 /* the message header, on the wire as it is in memory (little-endian hosts only; the translator
  * refuses a big-endian one) */
@@ -39,7 +42,8 @@ struct mw_msg {
     uint32_t reserved; /* zero */
 };
 
-/* message types: 0x0* control, 0x1* objects, 0x2* drawing, 0x3* frames */
+/* message types: 0x0* control, 0x1* objects, 0x3* drawing, 0x5* frames, 0x6* render encoders,
+ * 0x7* render objects */
 enum mw_type {
     MW_HELLO = 0x0001,
     MW_BYE = 0x0002,
@@ -62,6 +66,37 @@ enum mw_type {
 
     MW_FRAME_BEGIN = 0x0050,
     MW_FRAME_END = 0x0051,
+
+    /* A render encoder, replayed call by call (stage C). The messages arrive in the order
+     * CoreAnimation recorded them; an object is created (MW_CREATE_* above / 0x0073-0x0075)
+     * before the first message that names it. MW_RENDER_BEGIN starts an encoder on its render
+     * target; MW_RENDER_END closes it. The frame that carries render messages uses
+     * MW_FRAME_END with crc == 0 and no guest checksum: the guest did not draw the picture, so
+     * it cannot hash it, and the host answers crc_ok = 1 without a read-back until the host
+     * execution half of stage C exists. */
+    MW_RENDER_BEGIN = 0x0060,
+    MW_RENDER_SET_PIPELINE = 0x0061,
+    MW_RENDER_SET_DEPTH_STENCIL = 0x0062,
+    MW_RENDER_SET_VERTEX_BUFFER = 0x0063,
+    MW_RENDER_SET_VERTEX_BYTES = 0x0064,
+    MW_RENDER_SET_VERTEX_TEXTURE = 0x0065,
+    MW_RENDER_SET_VERTEX_SAMPLER = 0x0066,
+    MW_RENDER_SET_FRAGMENT_BUFFER = 0x0067,
+    MW_RENDER_SET_FRAGMENT_BYTES = 0x0068,
+    MW_RENDER_SET_FRAGMENT_TEXTURE = 0x0069,
+    MW_RENDER_SET_FRAGMENT_SAMPLER = 0x006A,
+    MW_RENDER_SET_VIEWPORT = 0x006B,
+    MW_RENDER_SET_SCISSOR = 0x006C,
+    MW_RENDER_SET_CULL_MODE = 0x006D,
+    MW_RENDER_SET_WINDING = 0x006E,
+    MW_RENDER_SET_FILL_MODE = 0x006F,
+    MW_RENDER_SET_BLEND_COLOR = 0x0070,
+    MW_RENDER_DRAW = 0x0071,
+    MW_RENDER_END = 0x0072,
+
+    MW_CREATE_RENDER_PIPELINE = 0x0073,
+    MW_CREATE_SAMPLER = 0x0074,
+    MW_CREATE_DEPTH_STENCIL = 0x0075,
 };
 
 enum mw_status {
@@ -76,6 +111,7 @@ enum mw_status {
 enum mw_pixel_format {
     MW_FORMAT_BGRA8_UNORM = 80, /* MTLPixelFormatBGRA8Unorm */
     MW_FORMAT_RGBA8_UNORM = 70, /* MTLPixelFormatRGBA8Unorm */
+    MW_FORMAT_R8_UNORM = 10,    /* MTLPixelFormatR8Unorm: CoreAnimation's luma-boost ramp */
 };
 
 /* MW_HELLO */
@@ -175,6 +211,201 @@ struct mw_ack {
     uint32_t width;
     uint32_t height;
     uint32_t bytes_per_row;
+    uint32_t reserved;
+};
+
+/* ---- render encoders (stage C, protocol 2) --------------------------------------------------
+ *
+ * The guest records an MTLRenderCommandEncoder as the calls CoreAnimation made, in order, and
+ * sends them between MW_FRAME_BEGIN and MW_FRAME_END. Object creation is hoisted: the pipeline
+ * state, buffers and textures a call names have their own message first, so the host can apply
+ * the stream in one pass. The host keeps per-encoder state (pipeline, bound buffers/textures,
+ * viewport, ...) and executes a draw with the state that preceded it, exactly like Metal does.
+ *
+ * The names in these structures are UTF-8, zero-padded and not guaranteed terminated: a reader
+ * uses strnlen(name, MW_NAME_MAX).
+ */
+#define MW_NAME_MAX 64
+#define MW_MAX_RENDER_ATTRIBUTES 16
+#define MW_MAX_RENDER_LAYOUTS 8
+
+#define MW_DRAW_INDEXED 0x0001u
+#define MW_DRAW_INSTANCED 0x0002u
+#define MW_DRAW_BASE_VERTEX 0x0004u
+#define MW_DRAW_BASE_INSTANCE 0x0008u
+
+#define MW_STAGE_VERTEX 1u
+#define MW_STAGE_FRAGMENT 2u
+
+/* MW_RENDER_BEGIN: one render encoder, its render pass's color attachment 0, and an optional
+ * depth attachment. CoreAnimation's draw pipelines use one color target, 750x1624 BGRA8, no
+ * depth; the structure carries the general shape so a later client does not need a new opcode. */
+struct mw_render_begin {
+    uint32_t encoder_index;
+    uint32_t target_texture;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+    uint32_t load_action;
+    uint32_t store_action;
+    float clear_color[4];
+    uint32_t has_depth;
+    uint32_t depth_texture;
+    uint32_t depth_load_action;
+    uint32_t depth_store_action;
+    float clear_depth;
+    uint32_t clear_stencil;
+    uint32_t reserved;
+};
+
+struct mw_render_set_pipeline {
+    uint32_t pipeline_id;
+    uint32_t reserved;
+};
+
+struct mw_render_set_depth_stencil {
+    uint32_t state_id;
+    uint32_t reserved;
+};
+
+struct mw_render_set_buffer {
+    uint32_t buffer_id;
+    uint32_t index;
+    uint64_t offset;
+};
+
+/* MW_RENDER_SET_VERTEX_BYTES / MW_RENDER_SET_FRAGMENT_BYTES: the length bytes follow this
+ * structure inside the same mw_msg, the same convention MW_UPLOAD_BUFFER uses. */
+struct mw_render_set_bytes {
+    uint32_t index;
+    uint32_t length;
+    uint32_t stage; /* MW_STAGE_* */
+    uint32_t reserved;
+};
+
+struct mw_render_set_texture {
+    uint32_t texture_id;
+    uint32_t index;
+};
+
+struct mw_render_set_sampler {
+    uint32_t sampler_id;
+    uint32_t index;
+};
+
+struct mw_render_set_viewport {
+    float x;
+    float y;
+    float width;
+    float height;
+    float znear;
+    float zfar;
+};
+
+struct mw_render_set_scissor {
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+};
+
+struct mw_render_set_state {
+    uint32_t value;
+    uint32_t reserved;
+};
+
+struct mw_render_set_blend_color {
+    float red;
+    float green;
+    float blue;
+    float alpha;
+};
+
+/* MW_RENDER_DRAW: one draw call with the state that the encoder holds when it arrives. */
+struct mw_render_draw {
+    uint32_t primitive_type; /* MTLPrimitiveType */
+    uint32_t flags;          /* MW_DRAW_* */
+    uint32_t index_type;     /* MTLIndexType, when indexed */
+    uint32_t index_buffer;   /* wire buffer id, when indexed */
+    uint32_t instance_count;
+    uint32_t base_instance;
+    uint64_t vertex_start;
+    uint64_t vertex_count;
+    uint64_t index_count;
+    uint64_t index_buffer_offset;
+    int64_t base_vertex;
+};
+
+struct mw_render_end {
+    uint32_t encoder_index;
+    uint32_t draw_count;
+    uint32_t set_count;
+    uint32_t reserved;
+};
+
+/* MW_CREATE_RENDER_PIPELINE: the pipeline state's identity and the descriptor fields a Vulkan
+ * pipeline needs. A pipeline that came from the pipeline library by name carries the name and no
+ * functions (the library's function modules are stage C's WP-2); a pipeline made from a descriptor
+ * carries the base function names. The variable part follows as
+ * mw_vertex_attribute[vertex_attribute_count] then mw_vertex_layout[vertex_layout_count]. */
+struct mw_create_render_pipeline {
+    uint32_t id;
+    uint32_t color_format; /* MTLPixelFormat, 0 when the descriptor did not say */
+    uint32_t sample_count;
+    uint32_t blend_enabled;
+    uint32_t rgb_blend_operation;
+    uint32_t alpha_blend_operation;
+    uint32_t src_rgb_blend_factor;
+    uint32_t dst_rgb_blend_factor;
+    uint32_t src_alpha_blend_factor;
+    uint32_t dst_alpha_blend_factor;
+    uint32_t write_mask;
+    uint32_t vertex_attribute_count;
+    uint32_t vertex_layout_count;
+    uint32_t reserved;
+    char pipeline_name[MW_NAME_MAX];
+    char vertex_function[MW_NAME_MAX];
+    char fragment_function[MW_NAME_MAX];
+};
+
+struct mw_vertex_attribute {
+    uint32_t format; /* MTLVertexFormat */
+    uint32_t offset;
+    uint32_t buffer_index;
+    uint32_t reserved;
+};
+
+struct mw_vertex_layout {
+    uint32_t stride;
+    uint32_t step_function; /* MTLVertexStepFunction */
+    uint32_t step_rate;
+    uint32_t reserved;
+};
+
+/* MW_CREATE_SAMPLER: MTL.SamplerDescriptor's fields, as CoreAnimation's samplers carry them. */
+struct mw_create_sampler {
+    uint32_t id;
+    uint32_t min_filter;
+    uint32_t mag_filter;
+    uint32_t mip_filter;
+    uint32_t address_s;
+    uint32_t address_t;
+    uint32_t address_r;
+    uint32_t normalized_coords;
+    uint32_t compare_function;
+    float lod_min;
+    float lod_max;
+    uint32_t max_anisotropy;
+    uint32_t reserved;
+};
+
+/* MW_CREATE_DEPTH_STENCIL: MTLDepthStencilDescriptor's depth half (the depth state CoreAnimation
+ * binds; the render pass has no depth attachment in this stage's boots, but the state is recorded
+ * so a later pass can use it). */
+struct mw_create_depth_stencil {
+    uint32_t id;
+    uint32_t depth_compare;
+    uint32_t depth_write;
     uint32_t reserved;
 };
 
