@@ -297,6 +297,28 @@ struct mw_render_pipeline {
     VkPipeline vk_pipeline[5];
     int vk_attempted[5];
     int vk_failed;
+    /* WP-4: the library ids a v4 guest reports for the two functions (0 = not known), the
+     * "no shader for this base function" verdict, and how many draws it cost. A pipeline is
+     * marked unsupported once, logged once, and every draw that names it is skipped instead of
+     * failing the frame. */
+    uint32_t vertex_library_id;
+    uint32_t fragment_library_id;
+    int unsupported;
+    int unsupported_logged;
+    uint64_t skipped_draws;
+};
+
+/* WP-4: what a v4 guest says about a Metal library: its provenance, hash and entry functions. The
+ * host never sees the AIR bytes and cannot compile them; this record is what a skipped pipeline is
+ * traced back to. */
+struct mw_library {
+    uint32_t id;
+    uint32_t kind; /* enum mw_library_kind */
+    uint64_t hash;
+    uint64_t byte_length;
+    uint32_t function_count;
+    char functions[MW_MAX_LIBRARY_FUNCTIONS][MW_NAME_MAX];
+    uint64_t function_hashes[MW_MAX_LIBRARY_FUNCTIONS];
 };
 
 struct mw_timing {
@@ -315,6 +337,10 @@ struct mw_frame_result {
     uint64_t gpu_ns;
     uint64_t readback_ns;
     uint64_t publish_ns;
+    /* WP-4 fallback: a frame is never failed because one of its pipelines has no shader. These
+     * are the counts that turn "the picture is missing an icon" into a number in the log. */
+    uint64_t draws_executed;
+    uint64_t draws_skipped;
 };
 
 struct mw_vulkan {
@@ -351,6 +377,14 @@ struct mw_server {
     struct mw_sampler_state **samplers;
     size_t sampler_count;
     size_t sampler_cap;
+    /* WP-4: the libraries a v4 guest described (hash + entry functions). */
+    struct mw_library **libraries;
+    size_t library_count;
+    size_t library_cap;
+    /* WP-4: where --missing-report writes the pipelines without a shader, and the totals. */
+    char *missing_path;
+    uint64_t missing_draws_total;
+    uint64_t missing_pipeline_total;
     struct mw_render_vk render;
     uint64_t render_frames_seen;
     uint64_t render_draws_logged;
@@ -924,14 +958,16 @@ static int mw_create_host_buffer(struct mw_vulkan *vk, VkDeviceSize size, VkBuff
 
 static uint32_t mw_format_bytes(uint32_t format)
 {
-    return format == MW_FORMAT_R8_UNORM ? 1u : MW_PIXEL_BYTES;
+    if (format == MW_FORMAT_R8_UNORM || format == MW_FORMAT_A8_UNORM)
+        return 1u;
+    return MW_PIXEL_BYTES;
 }
 
 static VkFormat mw_vk_format(uint32_t format)
 {
     if (format == MW_FORMAT_RGBA8_UNORM)
         return VK_FORMAT_R8G8B8A8_UNORM;
-    if (format == MW_FORMAT_R8_UNORM)
+    if (format == MW_FORMAT_R8_UNORM || format == MW_FORMAT_A8_UNORM)
         return VK_FORMAT_R8_UNORM;
     return VK_FORMAT_B8G8R8A8_UNORM;
 }
@@ -1522,10 +1558,14 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
     }
     if (request->pixel_format != MW_FORMAT_BGRA8_UNORM &&
         request->pixel_format != MW_FORMAT_RGBA8_UNORM &&
-        request->pixel_format != MW_FORMAT_R8_UNORM) {
-        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "texture %u: unknown pixel format %u", request->id,
-                      request->pixel_format);
-        return -1;
+        request->pixel_format != MW_FORMAT_R8_UNORM &&
+        request->pixel_format != MW_FORMAT_A8_UNORM) {
+        /* WP-4 fallback: a texture format the host does not know is not a frame error. The
+         * texture stays absent; every draw that names it is skipped and the rest of the frame
+         * still becomes a picture. */
+        mw_log("texture %u: pixel format %u is not implemented; its draws are skipped",
+               request->id, request->pixel_format);
+        return 0;
     }
     format = mw_vk_format(request->pixel_format);
     vkGetPhysicalDeviceFormatProperties(s->vk.physical, format, &format_props);
@@ -1670,9 +1710,9 @@ static int mw_handle_texture_replace(struct mw_server *s,
 
     image = mw_image_find(s, request->texture_id);
     if (image == NULL) {
-        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "replaceRegion names unknown texture %u",
-                      request->texture_id);
-        return -1;
+        mw_log("replaceRegion: texture %u is not on the host (unknown format?); content dropped",
+               request->texture_id);
+        return 0;
     }
     if (request->length != body_length) {
         mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "replaceRegion length %u, %u payload byte(s)",
@@ -1921,6 +1961,242 @@ static int mw_pipeline_add(struct mw_server *s, struct mw_render_pipeline *pipel
 static void mw_pipeline_name(char *field, size_t size)
 {
     field[size - 1] = '\0';
+}
+
+/* ---- WP-4: libraries and the fallback for a pipeline the host has no shader for ---- */
+
+static struct mw_library *mw_library_find(struct mw_server *s, uint32_t id)
+{
+    for (size_t i = 0; i < s->library_count; i++) {
+        if (s->libraries[i]->id == id)
+            return s->libraries[i];
+    }
+    return NULL;
+}
+
+static const char *mw_library_kind_name(uint32_t kind)
+{
+    switch (kind) {
+    case MW_LIBRARY_DATA:
+        return "data";
+    case MW_LIBRARY_URL:
+        return "url";
+    case MW_LIBRARY_FILE:
+        return "file";
+    case MW_LIBRARY_DEFAULT:
+        return "default";
+    case MW_LIBRARY_PIPELINE:
+        return "pipeline-library";
+    case MW_LIBRARY_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
+/* The two whitelists are the whole contract between the wire's base-function names and the GLSL
+ * that is embedded in this binary. A name that is not here has no implementation: the pipeline is
+ * marked unsupported, its draws are skipped and it is named in the missing report. Adding a shader
+ * means adding its name in exactly one of these lists and its file to the shaders Makefile. */
+static const char *mw_render_vertex_shader(const struct mw_render_pipeline *pipeline)
+{
+    if (strcmp(pipeline->vertex_function, "fixed_vert_lpf_spc") == 0)
+        return "fixed_vert_lpf_spc";
+    if (strcmp(pipeline->vertex_function, "std_vert1_lpf") == 0)
+        return "std_vert1_lpf";
+    return NULL;
+}
+
+static const char *mw_render_fragment_shader(const struct mw_render_pipeline *pipeline)
+{
+    if (strcmp(pipeline->fragment_function, "fixed_frag_lpf_cpf") == 0)
+        return "fixed_frag_lpf_cpf";
+    if (strcmp(pipeline->fragment_function, "luma_boost_lpf") == 0)
+        return "luma_boost_lpf";
+    return NULL;
+}
+
+static int mw_handle_create_library(struct mw_server *s, const unsigned char *payload, uint32_t len)
+{
+    struct mw_create_library request;
+    struct mw_library *library;
+    size_t expected;
+
+    if (len < sizeof(request)) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_CREATE_LIBRARY (%u bytes)", len);
+        return -1;
+    }
+    memcpy(&request, payload, sizeof(request));
+    if (request.function_count > MW_MAX_LIBRARY_FUNCTIONS) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                      "library %u: %u entry functions over the %u limit", request.id,
+                      request.function_count, MW_MAX_LIBRARY_FUNCTIONS);
+        return -1;
+    }
+    expected = sizeof(request) + (size_t)request.function_count * sizeof(struct mw_library_function);
+    if (len != expected) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                      "library %u: %u-byte message for %zu expected", request.id, len, expected);
+        return -1;
+    }
+    if (mw_library_find(s, request.id) != NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "library id %u already exists", request.id);
+        return -1;
+    }
+    library = calloc(1, sizeof(*library));
+    if (library == NULL) {
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "out of host memory for library %u", request.id);
+        return -1;
+    }
+    library->id = request.id;
+    library->kind = request.kind;
+    library->hash = request.hash;
+    library->byte_length = request.byte_length;
+    library->function_count = request.function_count;
+    for (uint32_t i = 0; i < request.function_count; i++) {
+        struct mw_library_function fn;
+
+        memcpy(&fn, payload + sizeof(request) + (size_t)i * sizeof(fn), sizeof(fn));
+        memcpy(library->functions[i], fn.name, MW_NAME_MAX);
+        library->functions[i][MW_NAME_MAX - 1] = '\0';
+        library->function_hashes[i] = fn.name_hash;
+    }
+    if (s->library_count == s->library_cap) {
+        size_t cap = s->library_cap == 0 ? 8 : s->library_cap * 2;
+        struct mw_library **grown = realloc(s->libraries, cap * sizeof(*grown));
+
+        if (grown == NULL) {
+            free(library);
+            mw_frame_fail(s, MW_STATUS_NO_MEMORY, "library table growth failed");
+            return -1;
+        }
+        s->libraries = grown;
+        s->library_cap = cap;
+    }
+    s->libraries[s->library_count++] = library;
+    mw_log("library %u: %s, %llu byte(s), hash 0x%016llx, %u entr%s", library->id,
+           mw_library_kind_name(library->kind), (unsigned long long)library->byte_length,
+           (unsigned long long)library->hash, library->function_count,
+           library->function_count == 1 ? "y" : "ies");
+    if (s->verbose) {
+        for (uint32_t i = 0; i < library->function_count; i++)
+            mw_log("library %u: function \"%s\"", library->id, library->functions[i]);
+    }
+    return 0;
+}
+
+static int mw_handle_pipeline_library_ref(struct mw_server *s, const unsigned char *payload,
+                                          uint32_t len)
+{
+    struct mw_pipeline_library_ref request;
+    struct mw_render_pipeline *pipeline;
+
+    if (len < sizeof(request)) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_PIPELINE_LIBRARY_REF (%u bytes)", len);
+        return -1;
+    }
+    memcpy(&request, payload, sizeof(request));
+    pipeline = mw_pipeline_find(s, request.pipeline_id);
+    if (pipeline == NULL) {
+        /* The reference is informative; arriving after its pipeline is the contract, but a host
+         * must not fail a frame over a diagnostic message. */
+        mw_log("warning: MW_PIPELINE_LIBRARY_REF names unknown pipeline %u; ignored",
+               request.pipeline_id);
+        return 0;
+    }
+    pipeline->vertex_library_id = request.vertex_library_id;
+    pipeline->fragment_library_id = request.fragment_library_id;
+    if (s->verbose) {
+        struct mw_library *vertex = mw_library_find(s, request.vertex_library_id);
+        struct mw_library *fragment = mw_library_find(s, request.fragment_library_id);
+
+        mw_log("pipeline %u: functions from library %u (%s hash 0x%016llx) and %u (%s hash "
+               "0x%016llx)",
+               pipeline->id, request.vertex_library_id,
+               vertex != NULL ? mw_library_kind_name(vertex->kind) : "unknown",
+               vertex != NULL ? (unsigned long long)vertex->hash : 0ull,
+               request.fragment_library_id,
+               fragment != NULL ? mw_library_kind_name(fragment->kind) : "unknown",
+               fragment != NULL ? (unsigned long long)fragment->hash : 0ull);
+    }
+    return 0;
+}
+
+/* One line per unsupported pipeline at exit, plus the libraries it names: the list the WP-4
+ * "which pipelines does the desktop need" loop reads instead of grepping a 20 MB serial log. */
+static void mw_write_missing_report(struct mw_server *s)
+{
+    FILE *file;
+
+    if (s->missing_path == NULL)
+        return;
+    file = fopen(s->missing_path, "w");
+    if (file == NULL) {
+        mw_log("missing report: cannot write %s: %s", s->missing_path, strerror(errno));
+        return;
+    }
+    fprintf(file, "# metalwire missing-pipeline report\n");
+    fprintf(file, "# frames %" PRIu64 ", pipelines %" PRIu64 ", skipped draws %" PRIu64 "\n",
+            s->frames_done, s->missing_pipeline_total, s->missing_draws_total);
+    for (size_t i = 0; i < s->pipeline_count; i++) {
+        struct mw_render_pipeline *p = s->pipelines[i];
+
+        if (!p->unsupported)
+            continue;
+        fprintf(file,
+                "pipeline %u name \"%s\" vertex \"%s\" fragment \"%s\" "
+                "vertex_library %u fragment_library %u skipped_draws %" PRIu64 "\n",
+                p->id, p->name, p->vertex_function, p->fragment_function, p->vertex_library_id,
+                p->fragment_library_id, p->skipped_draws);
+    }
+    for (size_t i = 0; i < s->library_count; i++) {
+        struct mw_library *library = s->libraries[i];
+
+        fprintf(file, "library %u kind %s bytes %llu hash 0x%016llx functions %u\n", library->id,
+                mw_library_kind_name(library->kind),
+                (unsigned long long)library->byte_length,
+                (unsigned long long)library->hash, library->function_count);
+        for (uint32_t f = 0; f < library->function_count; f++)
+            fprintf(file, "  function \"%s\"\n", library->functions[f]);
+    }
+    fclose(file);
+    mw_log("missing report: %s (%" PRIu64 " pipeline(s), %" PRIu64 " skipped draw(s))",
+           s->missing_path, s->missing_pipeline_total, s->missing_draws_total);
+}
+
+/* The pipeline has no shader: mark it, say why once, and let the draw loop skip it. Never fails
+ * the frame -- WP-4's contract is "a picture with a missing icon is better than no picture". */
+static void mw_render_mark_unsupported(struct mw_server *s, struct mw_render_pipeline *pipeline)
+{
+    struct mw_library *vertex = mw_library_find(s, pipeline->vertex_library_id);
+    struct mw_library *fragment = mw_library_find(s, pipeline->fragment_library_id);
+
+    pipeline->unsupported = 1;
+    s->missing_pipeline_total++;
+    if (pipeline->unsupported_logged)
+        return;
+    pipeline->unsupported_logged = 1;
+    if (pipeline->vertex_function[0] == '\0' && pipeline->fragment_function[0] == '\0') {
+        mw_log("render: pipeline %u \"%s\" was made by name from the pipeline library; the wire "
+               "carries no base functions for it, so its draws are skipped (the missing report "
+               "names it)",
+               pipeline->id, pipeline->name);
+        return;
+    }
+    mw_log("render: pipeline %u \"%s\": no embedded Vulkan GLSL for vertex \"%s\" / fragment "
+           "\"%s\"; its draws are skipped",
+           pipeline->id, pipeline->name,
+           pipeline->vertex_function[0] != '\0' ? pipeline->vertex_function : "(none)",
+           pipeline->fragment_function[0] != '\0' ? pipeline->fragment_function : "(none)");
+    if (pipeline->vertex_library_id != 0 || pipeline->fragment_library_id != 0) {
+        mw_log("render: pipeline %u: functions from %s %u (hash 0x%016llx) and %s %u (hash "
+               "0x%016llx)",
+               pipeline->id, vertex != NULL ? mw_library_kind_name(vertex->kind) : "unknown",
+               pipeline->vertex_library_id,
+               vertex != NULL ? (unsigned long long)vertex->hash : 0ull,
+               fragment != NULL ? mw_library_kind_name(fragment->kind) : "unknown",
+               pipeline->fragment_library_id,
+               fragment != NULL ? (unsigned long long)fragment->hash : 0ull);
+    }
 }
 
 static int mw_handle_create_render_pipeline(struct mw_server *s, const unsigned char *payload,
@@ -2285,9 +2561,9 @@ static int mw_handle_render_set_texture(struct mw_server *s, const char *what,
         return 0;
     }
     if (mw_image_find(s, request->texture_id) == NULL) {
-        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "%s names unknown texture %u", what,
-                      request->texture_id);
-        return -1;
+        mw_log("%s names texture %u which the host does not hold; the binding is ignored", what,
+               request->texture_id);
+        return 0;
     }
     s->frame.render_set_count++;
     if (request->index < MW_MAX_RENDER_BINDINGS && s->frame.encoder.active)
@@ -3241,6 +3517,14 @@ static int mw_render_ensure_pipeline(struct mw_server *s, struct mw_render_pipel
                                   .dataSize = sizeof(fconst), .pData = fconst};
     VkResult result;
 
+    if (pipeline->unsupported)
+        return -2;
+    /* Strict whitelist: an unknown base function is not silently replaced by a shader that
+     * happens to exist. WP-4's fallback is to skip the draw and say so. */
+    if (mw_render_vertex_shader(pipeline) == NULL || mw_render_fragment_shader(pipeline) == NULL) {
+        mw_render_mark_unsupported(s, pipeline);
+        return -2;
+    }
     if (pipeline->vk_attempted[index])
         return pipeline->vk_failed ? -1 : 0;
     pipeline->vk_attempted[index] = 1;
@@ -3250,11 +3534,8 @@ static int mw_render_ensure_pipeline(struct mw_server *s, struct mw_render_pipel
     }
     has_texture = strstr(pipeline->name, "Timg") != NULL || strstr(pipeline->name, "Tlub") != NULL;
     uses_fetch = mw_pipeline_fetches(pipeline);
-    vertex_name = strcmp(pipeline->vertex_function, "std_vert1_lpf") == 0 ? "std_vert1_lpf"
-                                                                          : "fixed_vert_lpf_spc";
-    fragment_name = strcmp(pipeline->fragment_function, "luma_boost_lpf") == 0
-                        ? "luma_boost_lpf"
-                        : "fixed_frag_lpf_cpf";
+    vertex_name = mw_render_vertex_shader(pipeline);
+    fragment_name = mw_render_fragment_shader(pipeline);
     vertex = mw_render_module(s, vertex_name);
     fragment = mw_render_module(s, fragment_name);
     if (vertex == VK_NULL_HANDLE || fragment == VK_NULL_HANDLE) {
@@ -3661,12 +3942,24 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             status = MW_STATUS_BAD_COMMAND;
             break;
         }
-        if (mw_render_ensure_pipeline(s, pipeline, draw->primitive_type) < 0) {
-            mw_frame_fail(s, MW_STATUS_VULKAN, "cannot create the Vulkan pipeline for \"%s\"",
-                          pipeline->name);
-            status = MW_STATUS_VULKAN;
-            break;
+        {
+            int pipeline_status = mw_render_ensure_pipeline(s, pipeline, draw->primitive_type);
+
+            if (pipeline_status != 0) {
+                /* WP-4 fallback: -2 is "no shader for this pipeline", -1 is a Vulkan pipeline
+                 * that did not build. Either way: skip this draw, keep the frame and the picture
+                 * it can still produce. */
+                if (pipeline_status != -2)
+                    mw_log("render: pipeline %u \"%s\": the Vulkan pipeline did not build; draw "
+                           "skipped",
+                           pipeline->id, pipeline->name);
+                pipeline->skipped_draws++;
+                result->draws_skipped++;
+                s->missing_draws_total++;
+                continue;
+            }
         }
+        result->draws_executed++;
         /* The shader's Metal buffer arguments live in the wire buffer; the one the vertex stage
          * reads at index 2 (mvp_matrix) is the authoritative allocation for this draw. */
         wire_id = draw->vertex_buffer_id[2] != 0
@@ -3695,10 +3988,11 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         if (draw->texture_id[3] != 0) {
             texture_image = mw_image_find(s, draw->texture_id[3]);
             if (texture_image == NULL) {
-                mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw names unknown texture %u",
-                              draw->texture_id[3]);
-                status = MW_STATUS_BAD_COMMAND;
-                break;
+                mw_log("draw names texture %u which the host does not hold; draw skipped",
+                       draw->texture_id[3]);
+                result->draws_skipped++;
+                s->missing_draws_total++;
+                continue;
             }
             if (texture_image->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
                 VkAccessFlags src_access = 0;
@@ -3719,7 +4013,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             sampler_state = mw_sampler_find(s, draw->sampler_id[0]);
         uses_fetch = mw_pipeline_fetches(pipeline);
 
-        if (uses_fetch && d > 0) {
+        if (uses_fetch && result->draws_executed > 0) {
             VkImageCopy copy = {0};
 
             mw_cmd_image_barrier(command, target->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -3759,7 +4053,8 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
             target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        } else if (d == 0 && target->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        } else if (result->draws_executed == 0 &&
+                   target->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
             VkAccessFlags src_access = 0;
             VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 
@@ -3831,7 +4126,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
         color_attachment.imageView = target->view;
         color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attachment.loadOp =
-            d > 0 ? VK_ATTACHMENT_LOAD_OP_LOAD
+            result->draws_executed > 0 ? VK_ATTACHMENT_LOAD_OP_LOAD
                   : (draw->load_action == 2
                          ? VK_ATTACHMENT_LOAD_OP_CLEAR
                          : (draw->load_action == 1 ? VK_ATTACHMENT_LOAD_OP_LOAD
@@ -3974,10 +4269,10 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                 nonzero++;
             }
         }
-        mw_log("render frame %" PRIu64 ": executed %u draw(s) on texture %u (%ux%u), "
-               "crc 0x%08x, %zu/%zu non-zero byte(s)",
-               frame->seq, frame->draw_count, target->id, target->width, target->height,
-               result->crc, nonzero, count);
+        mw_log("render frame %" PRIu64 ": executed %" PRIu64 " of %u draw(s) on texture %u "
+               "(%ux%u), crc 0x%08x, %zu/%zu non-zero byte(s)",
+               frame->seq, result->draws_executed, frame->draw_count, target->id, target->width,
+               target->height, result->crc, nonzero, count);
     }
     {
         /* WP-3: when the target is a real IOSurface, the picture goes into the guest's surface
@@ -4176,6 +4471,11 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
                status == MW_STATUS_OK
                    ? "executed on Vulkan"
                    : (status == MW_STATUS_VULKAN ? "Vulkan error" : "wire error"));
+        if (frame->render_mode && (result.draws_skipped != 0 || result.draws_executed == 0)) {
+            mw_log("render frame %" PRIu64 ": executed %" PRIu64 " draw(s), skipped %" PRIu64
+                   " (pipelines without an embedded shader are listed once, above)",
+                   frame->seq, result.draws_executed, result.draws_skipped);
+        }
         s->render_frames_seen++;
         if (mw_send_all(s->client_fd, &ack, sizeof(ack)) < 0) {
             mw_frame_reset(s);
@@ -4580,6 +4880,13 @@ static int mw_handle_message(struct mw_server *s, uint16_t type, const unsigned 
     /* ---- stage C: render encoders and their objects ---- */
     case MW_CREATE_RENDER_PIPELINE:
         mw_handle_create_render_pipeline(s, payload, len);
+        break;
+    /* ---- WP-4: dynamic pipelines and their libraries ---- */
+    case MW_CREATE_LIBRARY:
+        mw_handle_create_library(s, payload, len);
+        break;
+    case MW_PIPELINE_LIBRARY_REF:
+        mw_handle_pipeline_library_ref(s, payload, len);
         break;
     case MW_CREATE_SAMPLER: {
         struct mw_create_sampler request;
@@ -5111,6 +5418,8 @@ static void mw_usage(FILE *out, const char *program)
         "  --ram-base HEX    guest physical address of the RAM file's first byte (default "
         "0x40000000)\n"
         "  --dump DIR        write decoded buffers and object descriptors to DIR (debug aid)\n"
+        "  --missing-report FILE  write the pipelines that had no embedded shader to FILE\n"
+        "                    (one line each, with its libraries and skipped draw count)\n"
         "  --verbose         log every wire message\n"
         "  --help            this text\n",
         program, MW_DEFAULT_PORT, MW_DEFAULT_SHM);
@@ -5143,6 +5452,7 @@ int main(int argc, char **argv)
         {"pci", required_argument, NULL, 1002},
         {"byte-check", no_argument, NULL, 1001},    {"verbose", no_argument, NULL, 'v'},
         {"dump", required_argument, NULL, 1003},
+        {"missing-report", required_argument, NULL, 1004},
         {"help", no_argument, NULL, 'h'},           {NULL, 0, NULL, 0},
     };
     const char *env_gpu = getenv("METALWIRE_GPU");
@@ -5215,6 +5525,9 @@ int main(int argc, char **argv)
             break;
         case 1003:
             g_dump_dir = optarg;
+            break;
+        case 1004:
+            server.missing_path = optarg;
             break;
         case 'v':
             server.verbose = 1;
@@ -5319,6 +5632,7 @@ int main(int argc, char **argv)
         mw_serve_client(&server);
     }
     mw_print_summary(&server);
+    mw_write_missing_report(&server);
     mw_server_cleanup(&server);
     return 0;
 }

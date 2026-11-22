@@ -144,6 +144,11 @@ static unsigned gProtocolCount;
  * method CoreAnimation calls is named in the serial log instead of dying inside Apple's code. */
 static int gCensusEnabled;
 
+/* WP-4 experiment switch, parsed from the kernel's boot-args (byname=nil): the by-name pipeline
+ * factory answers nil, so CoreAnimation's runtime-specialisation path is exercised instead. Off
+ * unless the boot says so; the delivered/experiment default is the placeholder state. */
+static int gBynameFail;
+
 /* wire state */
 static struct mw_conn gWire;
 static int gWireReady;            /* mw_conn_init has run */
@@ -328,17 +333,35 @@ struct mw_encoder_state {
  * names it has been asked about, a function knows its name and the vertex/fragment guess, and the
  * pipeline/depth-stencil/sampler states hold only the label their descriptor had.
  */
+/* WP-4: one Metal library as the wire knows it. Both a library (-newLibraryWith*:) and a pipeline
+ * library carry one; a render pipeline quotes the two its functions came from. The remote id is
+ * assigned the first time the record goes on the wire, so a boot that never reports a pipeline
+ * pays nothing for it. kind is enum mw_library_kind from the protocol header. */
+struct mw_wire_library {
+    uint32_t remote_id;      /* wire id, 0 until first sent */
+    uint32_t kind;           /* enum mw_library_kind */
+    uint64_t hash;           /* FNV-1a/64 of the bytes, when the guest could read them */
+    uint64_t byte_length;    /* the bytes' length, 0 when unknown */
+    int hash_known;
+    uint32_t sent_generation; /* the connection generation MW_CREATE_LIBRARY went out on */
+    NSMutableArray *names;   /* borrowed: the function names asked of this library */
+};
+
 struct mw_library_state {
     uint32_t stub_id;
     id install_name;       /* NSString from the URL/file, retained; nil when unknown */
     id label;              /* NSString, retained */
     NSMutableArray *names; /* the function names asked for, retained */
+    struct mw_wire_library wire;
 };
 
 struct mw_function_state {
     id name;           /* NSString, retained */
     id label;          /* NSString, retained */
     int function_type; /* MTLFunctionType, guessed from the name */
+    /* WP-4: the library this function was made from (borrowed; nil for a specialised function,
+     * whose provenance is its base function). */
+    struct mw_wire_library *library;
 };
 
 /* The three empty states (render pipeline, depth-stencil, sampler) plus what the protocol-2 render
@@ -357,6 +380,9 @@ struct mw_stub_state {
     struct mw_vertex_layout layouts[MW_MAX_RENDER_LAYOUTS];
     struct mw_create_sampler sampler;
     struct mw_create_depth_stencil depth_stencil;
+    /* WP-4: the wire libraries behind the two functions of a render pipeline; borrowed. */
+    struct mw_wire_library *vertex_library;
+    struct mw_wire_library *fragment_library;
 };
 
 /* The pipeline library CoreAnimation builds from QuartzCore.framework/default.pipelinelib. It is a
@@ -367,6 +393,7 @@ struct mw_pipeline_library_state {
     id file_path; /* NSString, retained; nil when unknown */
     id label;     /* NSString, retained */
     int disable_run_time_compilation; /* -setDisableRunTimeCompilation: */
+    struct mw_wire_library wire;      /* WP-4: hash of the pipelinelib file */
 };
 
 /* The render command encoder: the calls CoreAnimation makes are recorded here, in order, and the
@@ -406,6 +433,147 @@ static uint32_t gNextStubId;
 static uint32_t mw_next_stub_id(void)
 {
     return __atomic_add_fetch(&gNextStubId, 1, __ATOMIC_RELAXED);
+}
+
+/* WP-4: FNV-1a/64, the protocol's library/function hash. The host never sees the AIR bytes; this
+ * and the entry-function names are the provenance it can print for a pipeline it cannot execute. */
+#define MW_LIBRARY_HASH_MAX (64u * 1024u * 1024u)
+
+static uint64_t mw_fnv1a64_update(uint64_t hash, const void *data, size_t length)
+{
+    const unsigned char *bytes = (const unsigned char *)data;
+
+    for (size_t i = 0; i < length; i++) {
+        hash ^= bytes[i];
+        hash *= 0x100000001b3ull;
+    }
+    return hash;
+}
+
+static uint64_t mw_fnv1a64(const void *data, size_t length)
+{
+    return mw_fnv1a64_update(0xcbf29ce484222325ull, data, length);
+}
+
+/* Dispatch data may be many regions; hash them without joining them (the AIR container can be a
+ * few hundred KiB). Stops at MW_LIBRARY_HASH_MAX and reports hash_known = 0 then. */
+static int mw_fnv1a64_dispatch(dispatch_data_t data, uint64_t *hash, uint64_t *length)
+{
+    __block uint64_t hash_value = 0xcbf29ce484222325ull;
+    __block uint64_t total = 0;
+    __block int complete = 1;
+
+    if (data == NULL) {
+        return 0;
+    }
+    dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t offset, const void *buffer,
+                                    size_t size) {
+        (void)region;
+        (void)offset;
+        if (total + size > MW_LIBRARY_HASH_MAX) {
+            complete = 0;
+            return false;
+        }
+        hash_value = mw_fnv1a64_update(hash_value, buffer, size);
+        total += size;
+        return true;
+    });
+    *hash = hash_value;
+    *length = total;
+    return complete;
+}
+
+/* A file the guest can read (a library path, or the pipelinelib). Read-only; capped. */
+static int mw_fnv1a64_file(const char *path, uint64_t *hash, uint64_t *length)
+{
+    unsigned char buffer[65536];
+    uint64_t hash_value = 0xcbf29ce484222325ull;
+    uint64_t total = 0;
+    FILE *file;
+    size_t got;
+
+    if (path == NULL) {
+        return 0;
+    }
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return 0;
+    }
+    while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (total + got > MW_LIBRARY_HASH_MAX) {
+            fclose(file);
+            return 0;
+        }
+        hash_value = mw_fnv1a64_update(hash_value, buffer, got);
+        total += got;
+    }
+    fclose(file);
+    *hash = hash_value;
+    *length = total;
+    return 1;
+}
+
+/* WP-4: the wire record of a library. Sent lazily, once per connection generation, and only for
+ * libraries a pipeline actually names. */
+static int mw_wire_ensure_library(struct mw_wire_library *library)
+{
+    struct {
+        struct mw_create_library header;
+        struct mw_library_function functions[MW_MAX_LIBRARY_FUNCTIONS];
+    } message;
+    NSArray *names = nil;
+    uint32_t count = 0;
+    pthread_mutex_t *lock = &gStubLock;
+
+    if (library == NULL || !gWireReady) {
+        return 0;
+    }
+    if (library->remote_id == 0) {
+        library->remote_id = mw_next_stub_id();
+    }
+    if (library->sent_generation == gGeneration) {
+        return 0;
+    }
+    pthread_mutex_lock(lock);
+    if (library->names != nil) {
+        names = [NSArray arrayWithArray:library->names];
+    }
+    pthread_mutex_unlock(lock);
+    for (id name in names) {
+        const char *utf8;
+
+        if (count == MW_MAX_LIBRARY_FUNCTIONS || ![name isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        utf8 = [(NSString *)name UTF8String];
+        if (utf8 == NULL) {
+            continue;
+        }
+        memset(&message.functions[count], 0, sizeof(message.functions[count]));
+        strlcpy(message.functions[count].name, utf8, MW_NAME_MAX);
+        message.functions[count].name_hash = mw_fnv1a64(utf8, strlen(utf8));
+        count++;
+    }
+    memset(&message.header, 0, sizeof(message.header));
+    message.header.id = library->remote_id;
+    message.header.kind = library->kind;
+    message.header.function_count = count;
+    message.header.hash = library->hash_known ? library->hash : 0;
+    message.header.byte_length = library->hash_known ? library->byte_length : 0;
+    if (mw_send(&gWire, MW_CREATE_LIBRARY, &message,
+                (uint32_t)(sizeof(message.header) + (size_t)count * sizeof(message.functions[0]))) !=
+        0) {
+        return -1;
+    }
+    library->sent_generation = gGeneration;
+    mw_log("library %u: %s %llu bytes hash %016llx -> the wire (%u function name(s))",
+           library->remote_id,
+           library->kind == MW_LIBRARY_PIPELINE
+               ? "pipeline library"
+               : (library->kind == MW_LIBRARY_DATA ? "data" : "library"),
+           (unsigned long long)(library->hash_known ? library->byte_length : 0),
+           (unsigned long long)(library->hash_known ? library->hash : 0), count);
+    return 0;
 }
 
 /* A C string for the log: "(nil)" for nil, and only NSStrings are read (an object whose
@@ -1145,6 +1313,27 @@ static int mw_wire_ensure_pipeline(struct mw_stub_state *pipeline)
     if (mw_send(&gWire, MW_CREATE_RENDER_PIPELINE, &message,
                 (uint32_t)(sizeof(message.header) + attribute_bytes + layout_bytes)) != 0) {
         return -1;
+    }
+    /* WP-4: where the two functions came from, and the exact library records they name. The ref
+     * is diagnostic; the pipeline itself was already sent, so a host that predates v4 reads the
+     * stream exactly as before (it would then see unknown message types, so this is sent only
+     * when the library is actually known -- which on this branch means the v4 host). */
+    if (pipeline->vertex_library != NULL || pipeline->fragment_library != NULL) {
+        struct mw_pipeline_library_ref ref;
+
+        if (mw_wire_ensure_library(pipeline->vertex_library) != 0 ||
+            mw_wire_ensure_library(pipeline->fragment_library) != 0) {
+            return -1;
+        }
+        memset(&ref, 0, sizeof(ref));
+        ref.pipeline_id = pipeline->remote_id;
+        ref.vertex_library_id =
+            pipeline->vertex_library != NULL ? pipeline->vertex_library->remote_id : 0;
+        ref.fragment_library_id =
+            pipeline->fragment_library != NULL ? pipeline->fragment_library->remote_id : 0;
+        if (mw_send(&gWire, MW_PIPELINE_LIBRARY_REF, &ref, sizeof(ref)) != 0) {
+            return -1;
+        }
     }
     pipeline->created_generation = gGeneration;
     return 0;
@@ -2875,7 +3064,7 @@ static void mw_free_stub(struct mw_stub_state *state)
 
 /* The object shells. Each is +1 (a Metal "new" method's convention), carries one _mw state, and
  * the class is the run-time class the constructor registered. */
-static id mw_library_object(const char *selector_name, id what, id install_name)
+static id mw_library_object(const char *selector_name, id what, id install_name, uint32_t kind)
 {
     struct mw_library_state *state;
     id library;
@@ -2899,13 +3088,15 @@ static id mw_library_object(const char *selector_name, id what, id install_name)
     state->stub_id = mw_next_stub_id();
     state->install_name = [install_name copy];
     state->names = [[NSMutableArray alloc] init];
+    state->wire.kind = kind;
+    state->wire.names = state->names;
     *slot = state;
-    mw_log("%s: %s -> placeholder library %u (install name %s; the library bytes are never read)",
+    mw_log("%s: %s -> placeholder library %u (install name %s; the library bytes are not parsed)",
            selector_name, mw_text(what), state->stub_id, mw_text(install_name));
     return library;
 }
 
-static id mw_function_object(NSString *name)
+static id mw_function_object(NSString *name, struct mw_wire_library *library)
 {
     struct mw_function_state *state;
     id function;
@@ -2927,6 +3118,7 @@ static id mw_function_object(NSString *name)
         return nil;
     }
     state->name = [name copy];
+    state->library = library;
     state->function_type = ([name rangeOfString:@".vert."].location != NSNotFound ||
                             [name rangeOfString:@"Vertex"].location != NSNotFound)
                                ? MTLFunctionTypeVertex
@@ -3004,7 +3196,8 @@ static id mw_library_make_function(id self, const char *selector_name, id name)
         [library->names addObject:name];
     }
     pthread_mutex_unlock(&gStubLock);
-    function = mw_function_object((NSString *)name);
+    function = mw_function_object((NSString *)name,
+                                    library != NULL ? &library->wire : NULL);
     function_state = mw_function_state_of(function);
     if (function != nil && first) {
         mw_log("%s: %s -> placeholder %s function (guessed from the name; no shader is compiled)",
@@ -3172,7 +3365,7 @@ static id mw_function_specialized_copy(id self)
     if (base_state == NULL || base_state->name == nil) {
         return nil;
     }
-    specialized = mw_function_object((NSString *)base_state->name);
+    specialized = mw_function_object((NSString *)base_state->name, NULL);
     specialized_state = mw_function_state_of(specialized);
     if (specialized_state != NULL) {
         specialized_state->function_type = base_state->function_type;
@@ -3266,7 +3459,7 @@ static id mw_function_new_specialized_name(id self, SEL _cmd, id name, id consta
                "(no shader is compiled)",
                mw_text(function_name));
     }
-    specialized = mw_function_object((NSString *)function_name);
+    specialized = mw_function_object((NSString *)function_name, NULL);
     if (specialized != nil && state != NULL) {
         struct mw_function_state *specialized_state = mw_function_state_of(specialized);
 
@@ -3320,7 +3513,23 @@ static id mw_device_new_library_url(id self, SEL _cmd, NSURL *url, NSError **err
         text = [url absoluteString];
         path = [url path];
     }
-    library = mw_library_object("newLibraryWithURL:error:", text, path);
+    library = mw_library_object("newLibraryWithURL:error:", text, path, MW_LIBRARY_URL);
+    if (library != nil) {
+        struct mw_library_state *state = mw_library_state_of(library);
+        const char *path_text = path != nil && [path isKindOfClass:[NSString class]]
+                                    ? [(NSString *)path fileSystemRepresentation]
+                                    : NULL;
+        uint64_t hash = 0;
+        uint64_t length = 0;
+
+        if (state != NULL && mw_fnv1a64_file(path_text, &hash, &length)) {
+            state->wire.hash_known = 1;
+            state->wire.hash = hash;
+            state->wire.byte_length = length;
+            mw_log("newLibraryWithURL:error: %llu byte(s) hashed, %016llx",
+                   (unsigned long long)length, (unsigned long long)hash);
+        }
+    }
     if (library == nil && error != NULL) {
         *error = mw_nserror("the placeholder library object could not be made");
     }
@@ -3333,9 +3542,23 @@ static id mw_device_new_library_data(id self, SEL _cmd, dispatch_data_t data, NS
 
     (void)self;
     (void)_cmd;
-    (void)data;
     mw_clear_error(error);
-    library = mw_library_object("newLibraryWithData:error:", @"in-memory data", nil);
+    library = mw_library_object("newLibraryWithData:error:", @"in-memory data", nil, MW_LIBRARY_DATA);
+    if (library != nil) {
+        struct mw_library_state *state = mw_library_state_of(library);
+
+        if (state != NULL && data != NULL) {
+            uint64_t hash = 0;
+            uint64_t length = 0;
+
+            state->wire.hash_known = mw_fnv1a64_dispatch(data, &hash, &length);
+            state->wire.hash = hash;
+            state->wire.byte_length = length;
+            mw_log("newLibraryWithData:error: %llu byte(s), hash %016llx%s",
+                   (unsigned long long)length, (unsigned long long)hash,
+                   state->wire.hash_known ? "" : " (over the hash cap; hash_known = 0)");
+        }
+    }
     if (library == nil && error != NULL) {
         *error = mw_nserror("the placeholder library object could not be made");
     }
@@ -3349,7 +3572,23 @@ static id mw_device_new_library_file(id self, SEL _cmd, NSString *path, NSError 
     (void)self;
     (void)_cmd;
     mw_clear_error(error);
-    library = mw_library_object("newLibraryWithFile:error:", path, path);
+    library = mw_library_object("newLibraryWithFile:error:", path, path, MW_LIBRARY_FILE);
+    if (library != nil) {
+        struct mw_library_state *state = mw_library_state_of(library);
+        const char *path_text = path != nil && [path isKindOfClass:[NSString class]]
+                                    ? [(NSString *)path fileSystemRepresentation]
+                                    : NULL;
+        uint64_t hash = 0;
+        uint64_t length = 0;
+
+        if (state != NULL && mw_fnv1a64_file(path_text, &hash, &length)) {
+            state->wire.hash_known = 1;
+            state->wire.hash = hash;
+            state->wire.byte_length = length;
+            mw_log("newLibraryWithFile:error: %llu byte(s) hashed, %016llx",
+                   (unsigned long long)length, (unsigned long long)hash);
+        }
+    }
     if (library == nil && error != NULL) {
         *error = mw_nserror("the placeholder library object could not be made");
     }
@@ -3382,7 +3621,7 @@ static id mw_device_new_default_library(id self, SEL _cmd)
 {
     (void)self;
     (void)_cmd;
-    return mw_library_object("newDefaultLibrary", @"the framework's default library", nil);
+    return mw_library_object("newDefaultLibrary", @"the framework's default library", nil, MW_LIBRARY_DEFAULT);
 }
 
 static id mw_device_new_default_library_bundle(id self, SEL _cmd, NSBundle *bundle,
@@ -3397,7 +3636,7 @@ static id mw_device_new_default_library_bundle(id self, SEL _cmd, NSBundle *bund
     if (bundle != nil && [bundle isKindOfClass:[NSBundle class]]) {
         text = [bundle bundlePath];
     }
-    library = mw_library_object("newDefaultLibraryWithBundle:error:", text, nil);
+    library = mw_library_object("newDefaultLibraryWithBundle:error:", text, nil, MW_LIBRARY_DEFAULT);
     if (library == nil && error != NULL) {
         *error = mw_nserror("the placeholder library object could not be made");
     }
@@ -3672,9 +3911,28 @@ static id mw_pipeline_library_object(const char *selector_name, id file_path)
     }
     state->stub_id = mw_next_stub_id();
     state->file_path = [file_path copy];
+    state->wire.kind = MW_LIBRARY_PIPELINE;
+    {
+        const char *path_text = file_path != nil && [file_path isKindOfClass:[NSString class]]
+                                    ? [(NSString *)file_path fileSystemRepresentation]
+                                    : NULL;
+        uint64_t hash = 0;
+        uint64_t length = 0;
+
+        if (mw_fnv1a64_file(path_text, &hash, &length)) {
+            state->wire.hash_known = 1;
+            state->wire.hash = hash;
+            state->wire.byte_length = length;
+            mw_log("%s: %s -> placeholder pipeline library %u (%llu byte(s), hash %016llx; "
+                   "the bytes are not parsed)",
+                   selector_name, mw_text(file_path), state->stub_id,
+                   (unsigned long long)length, (unsigned long long)hash);
+        } else {
+            mw_log("%s: %s -> placeholder pipeline library %u (the pipelinelib file is never read)",
+                   selector_name, mw_text(file_path), state->stub_id);
+        }
+    }
     *slot = state;
-    mw_log("%s: %s -> placeholder pipeline library %u (the pipelinelib file is never read)",
-           selector_name, mw_text(file_path), state->stub_id);
     return library; /* +1, as a Metal "new" method */
 }
 
@@ -3794,12 +4052,28 @@ static id mw_pipeline_library_device(id self, SEL _cmd)
 static id mw_pipeline_library_render_pipeline(id self, SEL _cmd, id name, NSUInteger options,
                                               id *reflection, NSError **error)
 {
+    struct mw_pipeline_library_state *library_state = mw_pipeline_library_state_of(self);
     id pipeline;
 
     (void)_cmd;
     mw_clear_error(error);
     if (reflection != NULL) {
         *reflection = nil;
+    }
+    /* WP-4 experiment switch: boot-arg byname=nil makes the precompiled-by-name path fail, so
+     * CoreAnimation takes its runtime-specialisation path for the same layer. A real device does
+     * fail this call when the pipelinelib has no such pipeline; the interesting question is
+     * whether CA then builds one from the base functions this host does have. */
+    if (gBynameFail && name != nil) {
+        static int said;
+        if (!__atomic_exchange_n(&said, 1, __ATOMIC_RELAXED)) {
+            mw_log("newRenderPipelineStateWithName: %s fails on purpose (byname=nil): testing "
+                   "CoreAnimation's runtime-specialisation fallback", mw_text(name));
+        }
+        if (error != NULL) {
+            *error = mw_nserror("the pipeline library has no such pipeline (byname=nil)");
+        }
+        return nil;
     }
     if (name == nil || ![name isKindOfClass:[NSString class]]) {
         mw_log("newRenderPipelineStateWithName:options:reflection:error: the name is nil or not a "
@@ -3821,6 +4095,10 @@ static id mw_pipeline_library_render_pipeline(id self, SEL _cmd, id name, NSUInt
 
             if (utf8 != NULL) {
                 strncpy(pipeline_state->pipeline.pipeline_name, utf8, MW_NAME_MAX - 1);
+            }
+            if (library_state != NULL) {
+                pipeline_state->vertex_library = &library_state->wire;
+                pipeline_state->fragment_library = &library_state->wire;
             }
             mw_log("CA pipeline state %u: %s (serialized by name; no shader yet)",
                    pipeline_state->remote_id, mw_text(name));
@@ -4175,6 +4453,15 @@ static void mw_render_capture_pipeline(struct mw_stub_state *state, id descripto
                      state->pipeline.vertex_function, MW_NAME_MAX);
         mw_copy_name(mw_safe_function_name(mw_read_object(descriptor, "fragmentFunction")),
                      state->pipeline.fragment_function, MW_NAME_MAX);
+        {
+            struct mw_function_state *vertex_state =
+                mw_function_state_of(mw_read_object(descriptor, "vertexFunction"));
+            struct mw_function_state *fragment_state =
+                mw_function_state_of(mw_read_object(descriptor, "fragmentFunction"));
+
+            state->vertex_library = vertex_state != NULL ? vertex_state->library : NULL;
+            state->fragment_library = fragment_state != NULL ? fragment_state->library : NULL;
+        }
         color_attachment = mw_element(mw_read_object(descriptor, "colorAttachments"), 0);
         if (mw_read_uint(color_attachment, "pixelFormat", &value)) {
             state->pipeline.color_format = (uint32_t)value;
@@ -5425,14 +5712,15 @@ static id mw_library_function_for_descriptor(id self, const char *selector_name,
                                              NSError **error)
 {
     id name = mw_descriptor_function_name(descriptor);
+    struct mw_library_state *library = mw_library_state_of(self);
+    struct mw_wire_library *wire_library = library != NULL ? &library->wire : NULL;
     id function;
 
-    (void)self;
     mw_clear_error(error);
     if (name == nil) {
-        function = mw_function_object(@"com.apple.coreanimation.frag.unnamed");
+        function = mw_function_object(@"com.apple.coreanimation.frag.unnamed", wire_library);
     } else {
-        function = mw_function_object(name);
+        function = mw_function_object(name, wire_library);
     }
     mw_log("%s: %s -> placeholder function (the descriptor's function is not compiled)", selector_name,
            mw_text(name != nil ? name : @"(no name)"));
@@ -6166,6 +6454,9 @@ static BOOL mw_process_allowed(void)
 
         if (at != NULL) {
             level = atoi(at + 6);
+        }
+        if (strstr(boot_args, "byname=nil") != NULL) {
+            gBynameFail = 1;
         }
     }
     if (strcmp(program, "metal_frame") == 0 || strcmp(program, "metal_probe") == 0) {

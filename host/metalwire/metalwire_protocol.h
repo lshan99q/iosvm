@@ -29,10 +29,12 @@
 #define MW_ACK_MAGIC 0x4D57414Bu /* "MWAK" */
 /* 1: the blit/present contract (stage 29). 2: adds the render-encoder opcodes (stage C). 3: the
  * WP-3 additions: the two per-draw buffer-offset setters CoreAnimation calls between its draws,
- * texture content (replaceRegion:) and the IOSurface binding of an existing texture. A v2 guest
- * may still use every v1 message unchanged; the host accepts both versions so the synthetic blit
- * client's v2 regression is the same path it was. */
-#define MW_VERSION 3u
+ * texture content (replaceRegion:) and the IOSurface binding of an existing texture. 4 (WP-4):
+ * dynamic-pipeline capture: a Metal library is described by its hash, size and entry-function
+ * names (MW_CREATE_LIBRARY), and a render pipeline says which library each of its functions came
+ * from (MW_PIPELINE_LIBRARY_REF). Both are optional messages a v4 guest may send; v2/v3 guests
+ * keep their exact wire shape and the host still accepts every version. */
+#define MW_VERSION 4u
 
 /* the message header, on the wire as it is in memory (little-endian hosts only; the translator
  * refuses a big-endian one) */
@@ -111,6 +113,16 @@ enum mw_type {
      * the offset of the buffer already bound at the index; it does not bind a new buffer. */
     MW_RENDER_SET_VERTEX_BUFFER_OFFSET = 0x0076,
     MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET = 0x0077,
+    /* WP-4: a Metal library the guest was handed (AIR container). The message carries the
+     * library's hash and entry-function names, never its bytes: the host cannot compile AIR, so
+     * the hash and the names are what identify a pipeline whose base function it does not have.
+     * The variable part follows as mw_library_function[function_count].
+     */
+    MW_CREATE_LIBRARY = 0x0078,
+    /* WP-4: after MW_CREATE_RENDER_PIPELINE, which library the vertex and fragment function came
+     * from. 0 means "not known". The host logs it with a skipped pipeline so the missing shader
+     * has a provenance. */
+    MW_PIPELINE_LIBRARY_REF = 0x0079,
 };
 
 enum mw_status {
@@ -123,6 +135,7 @@ enum mw_status {
 
 /* the pixel formats metalwire knows: Metal's MTLPixelFormat numbers */
 enum mw_pixel_format {
+    MW_FORMAT_A8_UNORM = 1,     /* MTLPixelFormatA8Unorm: CA's alpha-only glyph/label masks */
     MW_FORMAT_BGRA8_UNORM = 80, /* MTLPixelFormatBGRA8Unorm */
     MW_FORMAT_RGBA8_UNORM = 70, /* MTLPixelFormatRGBA8Unorm */
     MW_FORMAT_R8_UNORM = 10,    /* MTLPixelFormatR8Unorm: CoreAnimation's luma-boost ramp */
@@ -459,6 +472,46 @@ struct mw_create_depth_stencil {
     uint32_t id;
     uint32_t depth_compare;
     uint32_t depth_write;
+    uint32_t reserved;
+};
+
+/* MW_CREATE_LIBRARY: where the library came from, how big it was and what it hashed to. The hash
+ * is FNV-1a/64 of the bytes when the guest could read them (newLibraryWithData: always, a file or
+ * URL when it is readable), 0 when it could not. byte_length is 0 then. The entry-function names
+ * follow as mw_library_function[function_count]; they are the names the guest asked that library
+ * for, which is what a pipeline's vertex_function/fragment_function name. */
+enum mw_library_kind {
+    MW_LIBRARY_UNKNOWN = 0,
+    MW_LIBRARY_DATA = 1,  /* -newLibraryWithData:error: (the AIR bytes are in hand) */
+    MW_LIBRARY_URL = 2,   /* -newLibraryWithURL:error: */
+    MW_LIBRARY_FILE = 3,  /* -newLibraryWithFile:error: */
+    MW_LIBRARY_DEFAULT = 4, /* -newDefaultLibrary */
+    MW_LIBRARY_PIPELINE = 5, /* -newPipelineLibraryWithFilePath:error: */
+};
+
+#define MW_MAX_LIBRARY_FUNCTIONS 64
+
+struct mw_create_library {
+    uint32_t id;
+    uint32_t kind; /* enum mw_library_kind */
+    uint32_t function_count;
+    uint32_t reserved;
+    uint64_t hash;        /* FNV-1a/64 of the container bytes, 0 when unknown */
+    uint64_t byte_length; /* container length, 0 when unknown */
+};
+
+struct mw_library_function {
+    char name[MW_NAME_MAX];
+    uint64_t name_hash; /* FNV-1a/64 of name, so two spellings cannot collide silently */
+};
+
+/* MW_PIPELINE_LIBRARY_REF: the library ids behind a render pipeline's two functions. Sent by a v4
+ * guest right after the pipeline's MW_CREATE_RENDER_PIPELINE; the host copies them onto the
+ * pipeline record and prints them when the pipeline has no shader. */
+struct mw_pipeline_library_ref {
+    uint32_t pipeline_id;
+    uint32_t vertex_library_id;
+    uint32_t fragment_library_id;
     uint32_t reserved;
 };
 

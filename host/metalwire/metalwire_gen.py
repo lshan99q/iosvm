@@ -32,7 +32,8 @@ import zlib
 
 MW_MAGIC = 0x4D575452  # "MWTR"
 MW_ACK_MAGIC = 0x4D57414B  # "MWAK"
-MW_VERSION = 2
+MW_VERSION = 2  # the default the blit client speaks; --protocol overrides
+WIRE_VERSION = MW_VERSION
 
 MW_HELLO = 0x0001
 MW_BYE = 0x0002
@@ -188,6 +189,8 @@ class Client:
 MW_CREATE_RENDER_PIPELINE = 0x0073
 MW_CREATE_SAMPLER = 0x0074
 MW_CREATE_DEPTH_STENCIL = 0x0075
+MW_CREATE_LIBRARY = 0x0078
+MW_PIPELINE_LIBRARY_REF = 0x0079
 MW_RENDER_BEGIN = 0x0060
 MW_RENDER_SET_PIPELINE = 0x0061
 MW_RENDER_SET_DEPTH_STENCIL = 0x0062
@@ -304,6 +307,7 @@ def run_render(args):
         return 2
 
     fetch_variant = args.variant in ("fetch", "fetch-noramp")
+    unknown_variant = args.variant == "unknown"
     premultiply = fetch_variant
     background = _render_buffer(premultiply)
     seed_ramp = args.variant != "fetch-noramp"
@@ -311,7 +315,7 @@ def run_render(args):
     ramp = _luma_ramp()
     failures = 0
     try:
-        client.send(MW_HELLO, struct.pack("<II32s", MW_VERSION, os.getpid(), b"wp2-render"))
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp2-render"))
         client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 42, 0, len(background)))
         client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 44, 0, len(texture_bgra)))
         client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 47, 0, len(ramp)))
@@ -329,12 +333,35 @@ def run_render(args):
                                              "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
                                              attributes, layouts))
         blend = args.variant == "fixed"
-        pipeline_b_name = ("com.apple.coreanimation.draw.PBGRABsov_TimgXfc_Isrc"
-                           if fetch_variant
-                           else "com.apple.coreanimation.draw.PBGRA_TimgXfc_nofetch")
+        if unknown_variant:
+            pipeline_b_name = "com.apple.coreanimation.draw.PBGRABsov_MysteryXfc_Isrc"
+            pipeline_b_vertex = "mystery_vert_lpf"
+            pipeline_b_fragment = "mystery_frag_lpf"
+        else:
+            pipeline_b_name = ("com.apple.coreanimation.draw.PBGRABsov_TimgXfc_Isrc"
+                               if fetch_variant
+                               else "com.apple.coreanimation.draw.PBGRA_TimgXfc_nofetch")
+            pipeline_b_vertex = "fixed_vert_lpf_spc"
+            pipeline_b_fragment = "fixed_frag_lpf_cpf"
         client.send(MW_CREATE_RENDER_PIPELINE,
-                    _create_pipeline_payload(44, pipeline_b_name, "fixed_vert_lpf_spc",
-                                             "fixed_frag_lpf_cpf", attributes, layouts, blend))
+                    _create_pipeline_payload(44, pipeline_b_name, pipeline_b_vertex,
+                                             pipeline_b_fragment, attributes, layouts, blend))
+        if unknown_variant:
+            # WP-4: the library the two functions came from. The host cannot compile AIR; the
+            # hash and entry names are what a skipped pipeline is traced back to.
+            for library_id, names in ((1, ("mystery_vert_lpf", "mystery_frag_lpf")),
+                                      (2, ())):
+                hash_value = 0xcbf29ce484222325 ^ (library_id * 0x100000001b3)
+                payload = struct.pack("<4I2Q", library_id, 1, len(names), 0, hash_value,
+                                      4096 + library_id)
+                for name in names:
+                    encoded = name.encode()[:63].ljust(64, b"\0")
+                    name_hash = 0xcbf29ce484222325
+                    for byte in name.encode():
+                        name_hash = ((name_hash ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+                    payload += encoded + struct.pack("<Q", name_hash)
+                client.send(MW_CREATE_LIBRARY, payload)
+            client.send(MW_PIPELINE_LIBRARY_REF, struct.pack("<4I", 44, 1, 1, 0))
         client.send(MW_CREATE_RENDER_PIPELINE,
                     _create_pipeline_payload(47, "com.apple.coreanimation.draw.PBGRA_TlubXf_Isrc",
                                              "std_vert1_lpf", "luma_boost_lpf",
@@ -427,13 +454,18 @@ def main(argv):
                         help="deliberately send a wrong CRC for this frame index")
     parser.add_argument("--timeout", type=float, default=10.0,
                         help="socket timeout in seconds (default 10)")
+    parser.add_argument("--protocol", type=int, choices=(2, 3, 4), default=2,
+                        help="wire version the client opens with (default 2, the v2 regression)")
     parser.add_argument("--render", action="store_true",
                         help="send the stage-C synthetic render frame (WP-2 execution harness) "
                              "instead of the blit picture")
-    parser.add_argument("--variant", choices=("fetch", "fetch-noramp", "nofetch", "fixed"),
+    parser.add_argument("--variant",
+                        choices=("fetch", "fetch-noramp", "nofetch", "fixed", "unknown"),
                         default="fetch",
                         help="render mode: draw B's composition path (default fetch, the CA path)")
     args = parser.parse_args(argv)
+    global WIRE_VERSION
+    WIRE_VERSION = args.protocol
     if args.render:
         return run_render(args)
     if args.frames <= 0:
@@ -459,7 +491,7 @@ def main(argv):
     failures = 0
     started = time.monotonic_ns()
     try:
-        client.send(MW_HELLO, struct.pack("<II32s", MW_VERSION, os.getpid(), b"metalwire_gen"))
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"metalwire_gen"))
         client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 1, 0, picture_bytes))
         client.send(MW_CREATE_TEXTURE,
                     struct.pack("<IIIIII", 1, args.width, args.height, pixel_format, 0, 0))
@@ -488,7 +520,7 @@ def main(argv):
             expected_ok = 0 if frame == args.bad_crc_at else 1
             expected_status = MW_STATUS_CRC_MISMATCH if frame == args.bad_crc_at else MW_STATUS_OK
             problems = []
-            if magic != MW_ACK_MAGIC or version != MW_VERSION:
+            if magic != MW_ACK_MAGIC or version != WIRE_VERSION:
                 problems.append("bad ack header magic=0x%08x version=%u" % (magic, version))
             if ack_seq != seq:
                 problems.append("ack seq %d, expected %d" % (ack_seq, seq))

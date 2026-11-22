@@ -77,6 +77,76 @@ def read_ppm(path, width, height):
     return pixels
 
 
+
+def run_v4_fallback(env):
+    """WP-4: a v4 frame whose second pipeline has no shader still produces a picture.
+
+    The synthetic client names a pipeline with base functions this host does not implement. The
+    host must execute the other two draws, skip that one, acknowledge the frame with status OK and
+    write the pipeline (with the library it came from) to --missing-report. This is the whole
+    "unknown pipeline never takes the boot down" contract, without a guest.
+    """
+    work = tempfile.mkdtemp(prefix="metalwire-v4-")
+    report = os.path.join(work, "missing.txt")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "3", "--shm", "",
+         "--missing-report", report],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    try:
+        require(listening.wait(60), "v4 host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the v4 host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, str(WIDTH), str(HEIGHT), "--render", "--variant", "unknown",
+             "--protocol", "4", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+        require(gen.returncode == 0,
+                "v4 generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require(host.wait(timeout=120) == 0,
+                "v4 host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("ack status=ok" in gen.stdout,
+                "the v4 render frame was not acknowledged as OK:\n%s" % gen.stdout)
+        require('no embedded Vulkan GLSL for vertex "mystery_vert_lpf"' in output,
+                "the host did not name the missing pipeline:\n%s" % output)
+        require("executed 2 draw(s), skipped 1" in output,
+                "the host did not report 2 executed / 1 skipped draws:\n%s" % output)
+        require("library 1: data" in output, "the host did not decode MW_CREATE_LIBRARY")
+        require("library 2: data" in output, "the host did not decode the second library")
+        with open(report) as f:
+            report_text = f.read()
+        require('pipeline 44 name "com.apple.coreanimation.draw.PBGRABsov_MysteryXfc_Isrc"' in
+                report_text, "the missing report does not hold the pipeline:\n%s" % report_text)
+        require("vertex_library 1 fragment_library 1 skipped_draws 1" in report_text,
+                "the missing report does not hold the library reference and the count")
+        require('function "mystery_vert_lpf"' in report_text,
+                "the missing report does not hold the library's entry function")
+        print("PASS fallback: unknown pipeline skipped, frame acknowledged, missing report written")
+    finally:
+        if host.poll() is None:
+            host.kill()
+
+
 def main():
     if not os.path.exists(LAVAPIPE):
         print("metalwire_test: SKIP: lavapipe ICD not found at %s" % LAVAPIPE)
@@ -196,7 +266,9 @@ def main():
                     "%s has %dx%d depth %d colour %d" % (png_path, png_width, png_height,
                                                          png[24], png[25]))
         print("PASS files: %d PPM frame(s) match the sent picture, PNG headers are valid" % FRAMES)
-        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames)" % (WIDTH, HEIGHT, FRAMES))
+        run_v4_fallback(env)
+        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback)" %
+              (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)
