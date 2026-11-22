@@ -7,7 +7,7 @@
 > validation layer loaded. Branch `iosvm`, 2026-11-22. This carries out WP-3 of ENG-METAL-004 and
 > continues [`docs/stage32-ca-metal-execute.md`](stage32-ca-metal-execute.md).
 
-![the BootUI frame, rendered by CoreAnimation's three Metal draws on the host's Vulkan](demo/wp3-boot-picture.jpg)
+![the BootUI frame, rendered by CoreAnimation's three Metal draws on the host's Vulkan](demo/wp3-boot-picture.png)
 
 ## 1. What changed
 
@@ -204,4 +204,4 @@ MW_CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1" tools/metalwire/run-guest.sh ca-
 * `host/metalwire/metalwire_host.c` — decode and apply the three messages, texture upload, IOSurface
   write-back/read-back, render-frame PPM/PNG output, version negotiation, writable `--ram`.
 * `host/metalwire/PROTOCOL.md`, `host/metalwire/README.md`, `README.md`, this note, and
-  `docs/demo/wp3-boot-picture.jpg`.
+  `docs/demo/wp3-boot-picture.png`.

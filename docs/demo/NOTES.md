@@ -47,3 +47,30 @@ Two files, one frame of the experiment, taken 2026-11-21/22 23:43–23:52 on the
   `metal-translation-webview.png` sha256
   `83d0eff811ef3127914ac4ef8c057932ae0328c16188b98ab5b4fd141b16aab0`. Both are the project's own
   pixels, no Apple asset. The source frame is kept in the run log tree, not in the repository.
+
+# Metal translation acceptance capture — stage 33 / WP-3 (BootUI picture)
+
+- **Milestone**: WP-3 of ENG-METAL-004 (experiment only; not a delivered path), run `ca-metal-wp3b`
+- **Commit**: `50232e8` (the picture commit; the tree that introduced this capture)
+- **Guest firmware**: Darwin 22.5.0, 20F66, iPhone10,3 — the contributor's own IPSW; run tree
+  `/home/lshan/DSH-desktop/mt-work`, image built by `tools/metalwire/prepare-guest.sh ui`, clients
+  file `metal_frame`, `metal_probe`, `backboardd`; injected `libcainject.dylib`
+- **Host**: Linux x86_64; Vulkan device 1 = llvmpipe / lavapipe (CPU; the other V100 was left to the
+  other experiment); `host/metalwire/metalwire_host --gpu 1 --port 9111 --ram <qemu ram.img>
+  --shm /dev/shm/metalwire-frame --out /tmp/wp3-frames --png-every 1`; QEMU TCG, one vCPU,
+  `CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1"`, instance 3 (ports 4474/4475)
+- **Command**: guest `tools/metalwire/run-guest.sh ca-metal-wp3b 300`; the host executed the two
+  recorded CoreAnimation frames (`render frame 1/2: executed 3 draw(s) on texture 40/48`), wrote the
+  picture into the guest's real IOSurface and read it back by reference; the capture is a
+  downscale of `frame-000001.png`
+- **What it shows**: `wp3-boot-picture.png` — the BootUI Apple logo as CoreAnimation's three Metal
+  draws compose it on the host's Vulkan. It is the first picture from the Metal path (T1: the
+  overlay's opaque black quad, the layer image, the luma pass), not from glwire.
+- **What it does not show**: not SpringBoard's desktop and not the window server's finished frame
+  path; the three draws are a minimal subset of CA's renderer (protocol 2/3 carry no dynamic
+  pipeline or compute state), the logo layer's image is the only textured draw, and nothing is
+  claimed about frame rate on lavapipe. Do not caption it as "the iOS desktop".
+- **Notes**: converted from the run's JPEG to PNG so the provenance gate (`docs/demo/**/*.png`) can
+  declare it; `wp3-boot-picture.png` sha256
+  `acb0e075d7084b4b6d0a1bd9861859deaab329795dfe8f6f9c6601f04cd1942b`. Project's own pixels, no
+  Apple asset.
