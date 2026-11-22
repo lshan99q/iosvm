@@ -235,7 +235,7 @@ struct mw_render_vk {
     VkDeviceMemory dummy_memory;
     VkImageView dummy_view;
     VkSampler dummy_sampler;
-    VkShaderModule modules[4];
+    VkShaderModule modules[8];
     VkImage fetch_image;
     VkDeviceMemory fetch_memory;
     VkImageView fetch_view;
@@ -2133,6 +2133,8 @@ static const char *mw_render_vertex_shader(const struct mw_render_pipeline *pipe
         return "fixed_vert_lpf_spc";
     if (strcmp(pipeline->vertex_function, "std_vert1_lpf") == 0)
         return "std_vert1_lpf";
+    if (strcmp(pipeline->vertex_function, "downsample_blur_vert_lpf") == 0)
+        return "downsample_blur_vert_lpf";
     return NULL;
 }
 
@@ -2142,6 +2144,12 @@ static const char *mw_render_fragment_shader(const struct mw_render_pipeline *pi
         return "fixed_frag_lpf_cpf";
     if (strcmp(pipeline->fragment_function, "luma_boost_lpf") == 0)
         return "luma_boost_lpf";
+    if (strcmp(pipeline->fragment_function, "downsample_4_frag_lpf") == 0)
+        return "downsample_4_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_23_frag_lpf") == 0)
+        return "narrow_blur_23_frag_lpf";
+    if (strcmp(pipeline->fragment_function, "narrow_blur_15_frag_lpf") == 0)
+        return "narrow_blur_15_frag_lpf";
     return NULL;
 }
 
@@ -3329,8 +3337,14 @@ static const struct mw_spirv_blob *mw_spirv_find(const char *name)
 
 static VkShaderModule mw_render_module(struct mw_server *s, const char *name)
 {
-    static const char *const names[] = {"fixed_vert_lpf_spc", "fixed_frag_lpf_cpf", "std_vert1_lpf",
-                                        "luma_boost_lpf"};
+    static const char *const names[] = {"fixed_vert_lpf_spc",
+                                        "fixed_frag_lpf_cpf",
+                                        "std_vert1_lpf",
+                                        "luma_boost_lpf",
+                                        "downsample_blur_vert_lpf",
+                                        "downsample_4_frag_lpf",
+                                        "narrow_blur_23_frag_lpf",
+                                        "narrow_blur_15_frag_lpf"};
     struct mw_render_vk *r = &s->render;
     int slot = -1;
     const struct mw_spirv_blob *blob;
@@ -3606,6 +3620,17 @@ static int mw_pipeline_fetches(const struct mw_render_pipeline *pipeline)
     return strstr(pipeline->name, "Bsov") != NULL || strstr(pipeline->name, "Tlub") != NULL;
 }
 
+/* Which wire pipelines sample Metal fragment texture 3, as their name code says: Timg (the layer
+ * image), Tlub (the luma ramp), Tds4/Tds8 (downsample 4x/8x) and Tn11/Tn15/Tn23 (narrow blur with
+ * an 11/15/23-tap kernel). The blur family was added in WP-4 item 1.2; before it, only Timg/Tlub
+ * were known, and a `Tds*`/`Tn*` pipeline would have been created without a sampler binding. */
+static int mw_pipeline_has_texture(const struct mw_render_pipeline *pipeline)
+{
+    return strstr(pipeline->name, "Timg") != NULL || strstr(pipeline->name, "Tlub") != NULL ||
+           strstr(pipeline->name, "Tds4") != NULL || strstr(pipeline->name, "Tn23") != NULL ||
+           strstr(pipeline->name, "Tn15") != NULL;
+}
+
 static int mw_render_ensure_pipeline(struct mw_server *s, struct mw_render_pipeline *pipeline,
                                      uint32_t primitive)
 {
@@ -3666,7 +3691,7 @@ static int mw_render_ensure_pipeline(struct mw_server *s, struct mw_render_pipel
         pipeline->vk_failed = 1;
         return -1;
     }
-    has_texture = strstr(pipeline->name, "Timg") != NULL || strstr(pipeline->name, "Tlub") != NULL;
+    has_texture = mw_pipeline_has_texture(pipeline);
     uses_fetch = mw_pipeline_fetches(pipeline);
     vertex_name = mw_render_vertex_shader(pipeline);
     fragment_name = mw_render_fragment_shader(pipeline);

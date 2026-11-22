@@ -253,6 +253,117 @@ def run_format115(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def run_blur_pipelines(env):
+    """WP-4 1.2: the three blur pipelines execute instead of being skipped.
+
+    boot wp4-v4 reported `downsample_blur_vert_lpf` + `downsample_4_frag_lpf` /
+    `narrow_blur_23_frag_lpf` / `narrow_blur_15_frag_lpf` as unsupported (674 skipped draws, the
+    wallpaper/background band black). This runs the synthetic blur fixture: a 256x256 source is
+    downsampled 4x, then blurred by the 23-tap and 15-tap passes, one pipeline per frame. The host
+    has to execute 1 of 1 draw in each frame, write nothing to --missing-report, and produce the
+    pictures the same kernels predict in the test (a 4x4 box, then two binomial blurs).
+    """
+    size = metalwire_gen.BLUR_TARGET
+    source, expected = metalwire_gen.blur_fixture_reference()
+    work = tempfile.mkdtemp(prefix="metalwire-blur-")
+    out_dir = os.path.join(work, "frames")
+    report = os.path.join(work, "missing.txt")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "4", "--shm", "", "--out", out_dir,
+         "--png-every", "1", "--missing-report", report, "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "blur host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the blur host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--blur-pipelines", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+        require(gen.returncode == 0,
+                "blur generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require("wire error" not in gen.stderr,
+                "blur generator saw a wire error:\n%s" % gen.stderr)
+        require(host.wait(timeout=120) == 0,
+                "blur host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        for seq in (1, 2, 3):
+            require("blur frame %d: ack status=ok" % seq in gen.stdout,
+                    "blur frame %d was not acknowledged:\n%s" % (seq, gen.stdout))
+        require(output.count("executed 1 of 1 draw(s) on texture") == 3,
+                "the three blur frames did not each execute their draw:\n%s" % output)
+        require("no embedded Vulkan GLSL for vertex \"downsample_blur_vert_lpf\"" not in output,
+                "the host still has no shader for the blur family:\n%s" % output)
+        for name in ("com.apple.coreanimation.draw.PBGRA_Tds4Xf_Isrc",
+                     "com.apple.coreanimation.draw.PBGRA_Tn23Xf_Isrc",
+                     "com.apple.coreanimation.draw.PBGRA_Tn15Xf_Isrc"):
+            require("-> Vulkan pipeline" in output and name in output,
+                    "the host did not build a Vulkan pipeline for %s:\n%s" % (name, output))
+        with open(report) as f:
+            report_text = f.read()
+        require("# frames 4, pipelines 0, skipped draws 0" in report_text,
+                "the blur pipelines are still in the missing report:\n%s" % report_text)
+        require("downsample_blur_vert_lpf" not in report_text and
+                "narrow_blur_23_frag_lpf" not in report_text and
+                "narrow_blur_15_frag_lpf" not in report_text,
+                "the missing report still names the blur family:\n%s" % report_text)
+        for index, picture in enumerate(expected, start=1):
+            ppm_path = os.path.join(out_dir, "frame-%06d.ppm" % index)
+            require(os.path.exists(ppm_path), "%s was not written" % ppm_path)
+            with open(ppm_path, "rb") as f:
+                data = f.read()
+            header = b"P6\n%d %d\n255\n" % (size, size)
+            require(data.startswith(header), "%s: bad P6 header" % ppm_path)
+            pixels = data[len(header):]
+            require(len(pixels) == len(picture),
+                    "%s: %d pixel bytes, expected %d" % (ppm_path, len(pixels), len(picture)))
+            worst = max(abs(a - b) for a, b in zip(pixels, picture))
+            require(worst <= 2,
+                    "%s: blur output differs from the predicted kernel by %d (allowed 2)" %
+                    (ppm_path, worst))
+            png_path = os.path.join(out_dir, "frame-%06d.png" % index)
+            require(os.path.exists(png_path), "%s was not written" % png_path)
+            with open(png_path, "rb") as f:
+                png = f.read(33)
+            require(png.startswith(b"\x89PNG\r\n\x1a\n") and png[12:16] == b"IHDR",
+                    "%s is not a PNG" % png_path)
+            require((int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big"),
+                     png[24], png[25]) == (size, size, 8, 2),
+                    "%s has the wrong header" % png_path)
+        print("PASS blur: 3 pipelines executed, 0 skipped, pictures match the predicted kernels")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- blur host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     if not os.path.exists(LAVAPIPE):
         print("metalwire_test: SKIP: lavapipe ICD not found at %s" % LAVAPIPE)
@@ -374,7 +485,8 @@ def main():
         print("PASS files: %d PPM frame(s) match the sent picture, PNG headers are valid" % FRAMES)
         run_v4_fallback(env)
         run_format115(env)
-        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115)" %
+        run_blur_pipelines(env)
+        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur)" %
               (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:

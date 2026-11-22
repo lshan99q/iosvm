@@ -109,8 +109,9 @@ Rules the two ends rely on:
 ## Protocol 2 execution (WP-2)
 
 The host now executes the render encoder instead of only decoding it. The mapping is in
-[`README.md`](README.md#render-encoders-stage-c-wp-2) and the four base functions are in
-[`shaders/`](shaders/). Two facts about the wire matter to the execution half:
+[`README.md`](README.md#render-encoders-stage-c-wp-2) and the base functions are in
+[`shaders/`](shaders/) (four from WP-2, four blur functions from WP-4). Two facts about the wire
+matter to the execution half:
 
 - **The encoder state that reaches a draw is the state of the set/draw stream.** A `MW_RENDER_DRAW`
   carries only its own arguments; the pipeline, buffers, textures, sampler, viewport and scissor
@@ -175,7 +176,10 @@ The host-side contract (and the reason the messages exist):
   exists". A name outside the whitelist marks the pipeline unsupported, logs it once with its
   library hashes, and **skips every draw that names it**. The frame still executes its other draws,
   still reads the picture back and is still acknowledged `MW_STATUS_OK`. This is the WP-4 rule:
-  a missing icon is a missing icon, not a dead boot.
+  a missing icon is a missing icon, not a dead boot. The whitelist is the eight base functions in
+  [`shaders/`](shaders/): WP-2's `fixed_vert_lpf_spc`, `fixed_frag_lpf_cpf`, `std_vert1_lpf`,
+  `luma_boost_lpf`, and WP-4's `downsample_blur_vert_lpf`, `downsample_4_frag_lpf`,
+  `narrow_blur_23_frag_lpf`, `narrow_blur_15_frag_lpf`.
 * **A texture format the host does not implement is not a frame error.** The texture stays absent;
   its draws are skipped and the frame continues. The formats the host does implement:
   `BGRA8Unorm` (80), `RGBA8Unorm` (70), `R8Unorm` (10) and `A8Unorm` (1, the alpha masks the

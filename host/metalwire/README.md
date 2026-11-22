@@ -22,11 +22,12 @@ frame as a real GPU transfer (buffer → image → read-back buffer), checks the
 the guest's, publishes the picture in the same shared-memory format `tools/glwire` already uses, and
 answers one acknowledgement per frame. There is no window, no surface and no swapchain.
 
-Since WP-2 it also executes **protocol 2 render encoders**: the wire's three CA pipelines are
-created as real Vulkan pipelines from the four hand-written base functions in
-[`shaders/`](shaders/), and the recorded draws are replayed with the wire's buffers, textures,
-sampler, viewport and scissor. The blit path is unchanged and is what `make test` still measures;
-see [`../../docs/stage32-ca-metal-execute.md`](../../docs/stage32-ca-metal-execute.md).
+Since WP-2 it also executes **protocol 2 render encoders**: the wire's CA pipelines are created
+as real Vulkan pipelines from the eight hand-written base functions in [`shaders/`](shaders/) (the
+four WP-2 layer/luma functions and the four WP-4 blur functions), and the recorded draws are
+replayed with the wire's buffers, textures, sampler, viewport and scissor. The blit path is
+unchanged and is what `make test` still measures; see
+[`../../docs/stage32-ca-metal-execute.md`](../../docs/stage32-ca-metal-execute.md).
 
 WP-3 (protocol 3) closes the two gaps that kept WP-2 from a picture: the per-draw buffer-offset
 setters are on the wire, and a texture's `replaceRegion:` bytes are uploaded to the Vulkan image
@@ -43,7 +44,11 @@ texture format the host does not implement (and `A8Unorm`, which CoreAnimation's
 costs its draws, not the frame, and `--missing-report` writes the work list. `RGBA16Float` (Metal
 115, the colour ramp the desktop boot reported as unimplemented) is a real
 `VK_FORMAT_R16G16B16A16_SFLOAT` image, 8 bytes a texel, and its own regression in `make test`. The
-desktop run itself is [`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-wp4-desktop.md).
+background/Dock blur family (`downsample_blur_vert_lpf` + `downsample_4_frag_lpf` /
+`narrow_blur_23_frag_lpf` / `narrow_blur_15_frag_lpf`, the 674 skipped draws of boot wp4-v4) now
+has its four hand-written shaders and a fixture that executes all three pipelines; the kernel
+weights are `[INFERRED]` binomial kernels and each file says so. The desktop run itself is
+[`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-wp4-desktop.md).
 
 ## Files
 
@@ -54,7 +59,7 @@ desktop run itself is [`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-w
 | [`metalwire_test.py`](metalwire_test.py) | the test behind `make test`; runs the host on lavapipe and checks frames, CRC, CSV, SHM and image files |
 | [`Makefile`](Makefile) | `make`, `make test`, `make clean` |
 | [`metalwire_protocol.h`](metalwire_protocol.h), [`PROTOCOL.md`](PROTOCOL.md) | the wire contract, shared with the guest |
-| [`shaders/`](shaders/) | the four WP-2 Vulkan GLSL base functions and their provenance note |
+| [`shaders/`](shaders/) | the eight Vulkan GLSL base functions (four WP-2, four WP-4 blur) and their provenance note |
 | [`embed_spirv.py`](embed_spirv.py) | build step: embeds the compiled SPIR-V into `build/wp2_shaders.h` |
 | [`wp2_spike.py`](wp2_spike.py) | the WP-2 spike: four composition variants on lavapipe, PASS/FAIL |
 
@@ -64,7 +69,7 @@ Needs a C compiler, the Vulkan loader and headers (`libvulkan-dev`) and Python 3
 only) for the tools:
 
 ```sh
-make            # builds the four shaders (glslangValidator + spirv-val), then ./metalwire_host
+make            # builds the eight shaders (glslangValidator + spirv-val), then ./metalwire_host
 make shaders    # only the SPIR-V and the generated build/wp2_shaders.h
 make test       # builds, then runs the lavapipe test (skips cleanly without lavapipe)
 make spike      # builds, then runs the four-variant WP-2 spike on lavapipe
@@ -189,7 +194,11 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   buffer→texture blit and presented; the ack's CRC covers the raw 2048 half-float bytes, the
   `--byte-check` memcmp says the read-back is byte-identical, the PPM/PNG hold the ramp converted
   to 8 bits, no wire error occurs, and an unknown format in the same frame still takes the
-  skip-draw fallback.
+  skip-draw fallback,
+* the blur family: one seed frame and three render frames drive `downsample_4`, `narrow_blur_23`
+  and `narrow_blur_15` over a 256x256 source; every frame executes 1 of 1 draw (0 skipped), the
+  missing report is empty, and the three pictures match the kernels the shaders document (4x4 box,
+  then two binomial blurs) to within 2/255.
 
 No GPU is needed. If the lavapipe ICD is absent the test prints `SKIP` and exits 0, so `make test`
 stays green on a machine with only a proprietary driver or no Vulkan at all.
@@ -274,7 +283,7 @@ A protocol 2 frame that carries `MW_RENDER_*` messages is executed on Vulkan ins
 The execution half:
 
 * creates one `VkPipeline` per wire pipeline (and per primitive topology) on first use, from the
-  four embedded shader modules; the wire's base-function names choose the modules, the pipeline
+  eight embedded shader modules; the wire's base-function names choose the modules, the pipeline
   name chooses the specialization constants (texture, destination fetch, texture matrix);
 * builds the vertex input from the wire's 16-attribute descriptor (only attributes with a real
   format are bound) and the instance/stride information from the layouts;

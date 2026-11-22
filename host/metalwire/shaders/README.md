@@ -1,10 +1,13 @@
-# The WP-2 shaders: four CoreAnimation base functions in Vulkan GLSL
+# The metalwire shaders: eight CoreAnimation base functions in Vulkan GLSL
 
-These four files are hand-written Vulkan GLSL. They are the WP-2 rewrite of the four Metal base
-functions the metalwire wire names (`fixed_vert_lpf_spc`, `fixed_frag_lpf_cpf`, `std_vert1_lpf`,
-`luma_boost_lpf`), and they are what `metalwire_host` uses to execute a protocol-2 render frame.
-The build compiles them with `glslangValidator -V --target-env vulkan1.1`, validates the SPIR-V
-with `spirv-val`, and embeds it into the host binary (`../embed_spirv.py`).
+These eight files are hand-written Vulkan GLSL. The first four are the WP-2 rewrite of the four
+Metal base functions the BootUI frame names (`fixed_vert_lpf_spc`, `fixed_frag_lpf_cpf`,
+`std_vert1_lpf`, `luma_boost_lpf`); the second four are the WP-4 rewrite of the background/Dock
+blur family (`downsample_blur_vert_lpf`, `downsample_4_frag_lpf`, `narrow_blur_23_frag_lpf`,
+`narrow_blur_15_frag_lpf`), which the desktop boot (wp4-v4, 674 skipped draws) reported as
+missing. Together they are what `metalwire_host` uses to execute a render frame. The build
+compiles them with `glslangValidator -V --target-env vulkan1.1`, validates the SPIR-V with
+`spirv-val`, and embeds it into the host binary (`../embed_spirv.py`).
 
 ## Provenance
 
@@ -25,6 +28,13 @@ Nothing here is Apple code and nothing here is copied from an Apple binary.
   contributor's disk).
 - `std_vert1_lpf` and `luma_boost_lpf` are **not** in the guest image. Their GLSL is a minimal
   reconstruction from the wire and is marked `[INFERRED]` in the file header.
+- The four WP-4 blur functions are reconstructed from the recorded render calls and the names
+  alone: the wp4-v4 guest log (the same read-only serial log the stage records cite) gives each
+  blur pipeline's draw -- target size and scissor, the bound fragment texture 3, the absent
+  sampler, vertex buffers 1/2/3, and the index count (1, 2 or 25 quads). The kernel weights are
+  **not** in that record, so they are standard binomial (Pascal) kernels and every inferred part
+  is marked `[INFERRED]` in the file headers. Nothing is decompiled and no Apple byte is copied;
+  if QuartzCore's `default.metallib` ever becomes available, these four are the files to revisit.
 
 If the project ever obtains the missing `default.metallib`, the inferred two should be revisited
 first; everything else can be checked against the record.
@@ -64,3 +74,16 @@ EDR scale is zero it is the identity, which is what the wire's BootUI frame asks
 | [`fixed_frag_lpf_cpf.frag`](fixed_frag_lpf_cpf.frag) | `fixed_frag_lpf_cpf` |
 | [`std_vert1_lpf.vert`](std_vert1_lpf.vert) | `std_vert1_lpf` `[INFERRED]` |
 | [`luma_boost_lpf.frag`](luma_boost_lpf.frag) | `luma_boost_lpf` `[INFERRED]` |
+
+### WP-4: the background/Dock blur family
+
+| file | base function | what the recorded draw says |
+|---|---|---|
+| [`downsample_blur_vert_lpf.vert`](downsample_blur_vert_lpf.vert) | `downsample_blur_vert_lpf` | one vertex function for five pipelines (`downsample_4/8`, `narrow_blur_11/15/23`); the blur draws bind vertex buffers 1/2/3 as the layer draws do, so it is the ordinary transform `[INFERRED]` |
+| [`downsample_4_frag_lpf.frag`](downsample_4_frag_lpf.frag) | `downsample_4_frag_lpf` | renders a 180x72 target from `com.apple.coreanimation.framebuffer-surface`, no sampler bound; a 4x4 box average `[INFERRED]` |
+| [`narrow_blur_23_frag_lpf.frag`](narrow_blur_23_frag_lpf.frag) | `narrow_blur_23_frag_lpf` | samples `com.apple.coreanimation.surface`, no sampler, 1-10 quads per region; a 23-tap-per-axis binomial Gaussian evaluated in one pass `[INFERRED]` |
+| [`narrow_blur_15_frag_lpf.frag`](narrow_blur_15_frag_lpf.frag) | `narrow_blur_15_frag_lpf` | the same, 15 taps per axis `[INFERRED]` |
+
+The blur fragment shaders use texel-exact access (`texelFetch`) because the recorded draws bind no
+sampler; they do not read the wire buffer. Their specialization constants carry the ids the host
+maps for every fragment base function, so one pipeline-specialization record works everywhere.
