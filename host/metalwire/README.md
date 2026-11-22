@@ -1,6 +1,6 @@
 # metalwire host — executing a guest Metal frame on Vulkan (blits, and CA's render encoder)
 
-Status: experimental, branch `iosvm` (WP-3). This is the host half of the
+Status: experimental, branch `experiment/ca-metal-device` (WP-4). This is the host half of the
 metalwire experiment (see [`PROTOCOL.md`](PROTOCOL.md) and
 [ADR-002](../../docs/adr/ADR-002-api-translation.md)); the guest half is
 `guest/metal-plugin/`. Nothing here is Apple code, and nothing here is a Metal implementation: a
@@ -34,6 +34,14 @@ setters are on the wire, and a texture's `replaceRegion:` bytes are uploaded to 
 segments with `hakios_vtop`, the host writes the executed picture into the guest's surface and
 reads it back by reference for the browser. A boot frame now renders as the BootUI Apple logo —
 the picture path is in [`../../docs/stage33-ca-metal-picture.md`](../../docs/stage33-ca-metal-picture.md).
+
+WP-4 (protocol 4) is about the desktop, where the wire sees pipeline and texture kinds the BootUI
+never did: `MW_CREATE_LIBRARY`/`MW_PIPELINE_LIBRARY_REF` carry a library's hash and entry-function
+names (the AIR bytes cannot be compiled here), and the host no longer turns an unknown base function
+into a wrong shader — it marks the pipeline unsupported, skips its draws and keeps the frame. A
+texture format the host does not implement (and `A8Unorm`, which CoreAnimation's desktop masks use)
+costs its draws, not the frame, and `--missing-report` writes the work list. The desktop run itself
+is [`../../docs/stage34-wp4-desktop.md`](../../docs/stage34-wp4-desktop.md).
 
 ## Files
 
@@ -96,6 +104,7 @@ user network maps that to the host's loopback). The listener binds `127.0.0.1` b
 | `--png-every N` | also save every Nth frame as `DIR/frame-%06u.png` (default `0` = never) |
 | `--csv FILE` | write the per-frame timing table |
 | `--dump DIR` | write decoded buffers and pipeline/sampler/texture descriptors to `DIR` (debug aid) |
+| `--missing-report FILE` | write the pipelines that had no embedded shader, with their library hashes and skipped draw counts (WP-4 work list) |
 | `--verbose` | log every wire message, object and Vulkan memory allocation |
 | `--help` | usage |
 

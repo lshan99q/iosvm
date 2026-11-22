@@ -160,7 +160,7 @@ struct mw_copy {
 /* ---- stage C render execution -------------------------------------------------------------- */
 
 #define MW_MAX_RENDER_BINDINGS 16
-#define MW_MAX_RENDER_DRAWS 64
+#define MW_MAX_RENDER_DRAWS 512
 
 /* The state an MTLRenderCommandEncoder holds between calls, as the host must replay it. Offsets
  * are wire (Metal) offsets into the named buffer. */

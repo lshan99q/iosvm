@@ -155,3 +155,33 @@ The execution consequences:
   (~5 MB); the host writes the executed picture into those bytes and reads them back for the browser.
   A guest that cannot resolve the surface sends `segment_count = 0`; the host keeps the metadata and
   publishes its Vulkan read-back, so a missing vtop answer is a fallback, not a failure.
+
+
+## Protocol 4: dynamic pipelines and the no-shader fallback (WP-4)
+
+`MW_VERSION` is 4. The host accepts **2, 3 and 4**; every acknowledgement still echoes the version
+the peer opened with, and no earlier message changed shape. A v2 or v3 guest sees the wire it saw
+before; a v4 guest adds two messages, both about *provenance*, because the host cannot compile AIR
+and must not pretend an unknown base function is a known one.
+
+| opcode | payload | meaning |
+|---|---|---|
+| `MW_CREATE_LIBRARY` 0x0078 | `mw_create_library` + `mw_library_function[function_count]` | a Metal library the guest was handed: kind (`data`, `url`, `file`, `default`, `pipeline-library`), FNV-1a/64 of the container bytes when the guest could read them, the byte length, and the entry-function names with their name hashes. The AIR bytes never cross the wire; the hash and the names are what identify a shader. |
+| `MW_PIPELINE_LIBRARY_REF` 0x0079 | `mw_pipeline_library_ref` | which two libraries a render pipeline's vertex and fragment function came from. 0 means "not known". Sent right after that pipeline's `MW_CREATE_RENDER_PIPELINE`; a host that does not know the message ignores it outside a frame. |
+
+The host-side contract (and the reason the messages exist):
+
+* **A pipeline's shader is chosen by an explicit whitelist**, not by "the first base function that
+  exists". A name outside the whitelist marks the pipeline unsupported, logs it once with its
+  library hashes, and **skips every draw that names it**. The frame still executes its other draws,
+  still reads the picture back and is still acknowledged `MW_STATUS_OK`. This is the WP-4 rule:
+  a missing icon is a missing icon, not a dead boot.
+* **A texture format the host does not implement is not a frame error.** The texture stays absent;
+  its draws are skipped and the frame continues. `A8Unorm` (Metal format 1, the alpha masks the
+  desktop's label pass uses) is implemented as an R8 image.
+* **`--missing-report FILE`** writes one line per unsupported pipeline (name, vertex/fragment base
+  function, the two library ids, skipped draw count) plus the library records themselves. That file
+  is the work list for WP-4's rewrite loop; the serial log keeps the first sighting of each.
+* `MW_MAX_RENDER_DRAWS` is 512. The 64 of stage 32 rejected the desktop's first six-encoder
+  composites (80–88 draws) as a wire error; raising the cap lets them execute (the host stores the
+  state per frame and the wire already sends one message per draw).

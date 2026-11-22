@@ -74,3 +74,38 @@ Two files, one frame of the experiment, taken 2026-11-21/22 23:43–23:52 on the
   declare it; `wp3-boot-picture.png` sha256
   `acb0e075d7084b4b6d0a1bd9861859deaab329795dfe8f6f9c6601f04cd1942b`. Project's own pixels, no
   Apple asset.
+
+# Metal translation acceptance capture — stage 34 / WP-4 (desktop composites)
+
+Two frames of the same hybrid boot (`wp4-desk`), taken 2026-11-22 09:34 UTC (17:34 +08) on the
+branch `experiment/ca-metal-device`.
+
+- **Milestone**: WP-4 of ENG-METAL-006 (experiment only; not a delivered path)
+- **Commit**: the tree that carries `docs/stage34-wp4-desktop.md` (stage 34)
+- **Guest firmware**: Darwin 22.5.0, 20F66, iPhone10,3 — the contributor's own IPSW; run tree
+  `/home/lshan/DSH-desktop/mt-work`, image built by `tools/metalwire/prepare-guest.sh ui` plus
+  `bin/glremote_on`, clients `metal_frame`, `metal_probe`, `backboardd`; injected
+  `libcainject.dylib`
+- **Host**: Linux x86_64; **both** host programs on device 1 = llvmpipe/lavapipe (the V100 was not
+  used): `metalwire_host --gpu 1 --port 9111 --ram <ram.img> --out /tmp/wp4-desk-frames
+  --png-every 1`, and `host_glwire --no-panel 9210 <ram.img>` with `GLWIRE_SOFTWARE_GL=1` and the
+  Mesa EGL vendor; QEMU TCG, one vCPU, `CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1"`, instance 3
+- **Command**: `MW_CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1" tools/metalwire/run-guest.sh
+  wp4-desk 1300`; the captures are `frame-000014.png` and `frame-000652.png` of that run's
+  `--out` tree
+- **What it shows**: `wp4-desktop-composite.png` — the first 55-draw home-screen composite
+  CoreAnimation produced after the BootUI shell-changed event, executed on the host's Vulkan: the
+  icon grid's geometry, the dock band and the white glyph/label masks are in their recorded places.
+  `wp4-desktop-late.png` — a later steady-state composite (10 draws) of the same boot: the desktop
+  path is still executing after the BootUI overlay was removed (09:34:18 UTC).
+- **What it does not show**: a correct desktop. The wallpaper/background layers are
+  transparent-black and icons/labels are white: the host's four hand-written GLSL base functions
+  implement only a slice of the function-constant behaviour CA's composite pipelines select. The
+  images are evidence of the path (record → wire → Vulkan → the guest's own IOSurface), not of a
+  translated picture. No frame-rate claim, no V100.
+- **Notes**: both images are downscaled (375x812) from the run's 750x1624 PNGs and are the
+  project's own pixels; sha256 `7b237925dfa7b2c456e06f6ef9863ad1c349e7dc16f6b401a482b49dc0cbbd7d`
+  (`wp4-desktop-composite.png`, the 55-draw composite) and
+  `3bf3a5e3acef7ec51aa36e0b3ad33f537ce14454dcaa1ec0d498bc7e9d7b4d9b` (`wp4-desktop-late.png`).
+  The run's file names count acknowledged frames, so the 55-draw composite (render frame 14) is
+  `frame-000013.png`.
