@@ -113,7 +113,7 @@ desktop-sized recording, not that the desktop is translated.
 ### 3.3 Dynamic-pipeline capture is exercised, and the fallback is proven elsewhere
 
 In these boots no pipeline lacked a base function, so the missing report is empty and the fallback
-was not needed. It is proven by the CI-safe test instead (`metalwire_test.py`): a v4 frame with a
+was not needed (boot `wp4-v4` adds the real-guest protocol-4 evidence, §3.6). It is proven by the CI-safe test instead (`metalwire_test.py`): a v4 frame with a
 pipeline whose vertex/fragment names are `mystery_vert_lpf`/`mystery_frag_lpf` is acknowledged
 status OK, executes 2 of its 3 draws, logs the missing pipeline once with its library, and writes it
 (with the library's name hash) to `--missing-report`. `make test` PASS — provenance, proto, the
@@ -137,6 +137,29 @@ composites (`texture 70: unknown pixel format 1`, `replaceRegion names unknown t
 `fragment texture names unknown texture 70`). With `A8Unorm` mapped to R8 and the no-fatal-texture
 path: 652/655 frames executed, zero wire errors except the three 80–88-draw frames the old 64-draw
 cap rejected. That is the measured justification for both changes.
+
+### 3.6 Protocol 4 against the real guest (boot `wp4-v4`)
+
+The same hybrid boot with the v4 guest plug-in exercises the capture on CoreAnimation itself. The
+guest hashes the library it is handed for the renderer (`newLibraryWithFile:error:` → 64 bytes,
+`0472d062082ed7b7`) and sends the record when the first descriptor pipeline that came from it is
+serialized:
+
+```
+guest: metalwire: library 6: library 64 bytes hash 0472d062082ed7b7 -> the wire (0 function name(s))
+host:  metalwire: library 6: url, 64 byte(s), hash 0x0472d062082ed7b7, 0 entries
+```
+
+The record can only be sent from the pipeline-reference path (a library is sent when a pipeline
+names it), so this boot also proves the v4 messages interleave with the render messages the way the
+host expects — no bad header, no unknown message type, the two BootUI frames still execute.
+
+Two measured limits of the capture, recorded so they are not mistaken later: (a) the pipelinelib
+path resolves into the dyld shared cache, so the guest's `fopen` reads 0 bytes and its hash is the
+empty-string basis — the pipeline-library record is sent with `byte_length = 0`, and the *name*
+CoreAnimation asked for is still on the pipeline state; (b) a library's entry-function names are
+those the guest asked *it* for, so a library that CoreAnimation assigns functions to through
+specialisation may arrive with 0 names. Both are provenance detail; neither changes what executes.
 
 ## 4. What this does not establish
 
