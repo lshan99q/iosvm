@@ -130,3 +130,21 @@ nearest 缩放（`drawRows` 的 scale 分支，2.7M 像素/帧）→ 更贵。
 - 残影原因（下一步）：还有少量非 750x1 的同类绘制（如高 2–3 px 或宽度 <200 px）；计划把阈值放宽到「高 ≤3、宽 ≥120」再验证一次，
   并检查状态栏/分隔线等真实 1 px 元素是否被误伤。
 - 若验证通过：把该规则做成默认（限定在主表面 + 1–3 px 高 + 宽度≥120 px），同时保留开关可回退。
+
+## 十三、2026-11-22 19:10 收口状态（本轮工作结束，交接下一位 agent）
+### 已修好并默认生效
+1. **文字下方虚线**：`tools/glwire/host_glwire.c` + `dispatch.inc` 默认跳过“全宽 1–2 px quad”（`GLWIRE_SKIP_THIN_LINES`，默认 2，可设 0 关闭）。
+   `thin3` 验证：文字完整、下划线基本消失。根因：2x 渲染路径把 label 下划线画成一条 1 px 全宽线。
+2. **开机绿块**：`GLWIRE_CLEAN_GREEN=1` 把 `(0,254,0)` 未定义像素清黑；绿块来自 guest 首帧的面板内存（补丁图也被污染过，
+   干净补丁在 `logs/stage24/full-patch/host-picture-clean.bgra`，启动器 `PATCH_FILE=` 可选）。
+3. **黑块/空洞**：`GLWIRE_KEEP_PREV=1` + `GLWIRE_SEED_PATCH=1`（补丁预填“上一帧”）+ 清屏感知（记录本帧 glClear 矩形，补洞时跳过被清区域）。
+   `keep6` 验证：dock 补齐、无黑洞、无虚线；重影已大幅减少。
+### 已知残留（交给下一位）
+- 右半屏有一条**橄榄绿残块**：绿像素被 keep-prev 反复混合后不再是纯 (0,254,0)，`CLEAN_GREEN` 阈值漏掉。
+  建议：① 把阈值放宽到“G>120 且 R、B<80”；② 或把 clean 放到 keep_previous **之后**再跑一次。
+- 少数标签下方仍有极淡短段（残影），可接受。
+- **注意**：以上三个开关目前都要**显式传环境变量**（`GLWIRE_SKIP_THIN_LINES` 默认已开；`KEEP_PREV`/`SEED_PATCH`/`CLEAN_GREEN` 需手动开）。
+  交付默认建议：`SKIP_THIN_LINES=2 KEEP_PREV=1 SEED_PATCH=1 CLEAN_GREEN=1 PATCH_FILE=host-picture-clean.bgra PATCH_COV=0.10`。
+- 录像器 `tools/glwire/record-screen.py`（= /tmp/s27-record.py）已修：分辨率自适应、H.264 偶数尺寸、`time_base=1/1000`、100 ms 补帧。
+- 启动器 `/tmp/s25-smp-pin.sh`（重建版）支持 `TAG/NCPU/CORES/FBSCALE/EXTRA/PATCH_COV/SKIP_CLEAR/PATCH_FILE/HOST_ENV_EXTRA`。
+- 关键结论：**2x（750×1624）是交付路径**（3x 干净但慢约 2.6 倍）；三处瑕疵都源于 2x 路径的合成方式，与字形/图集无关。
