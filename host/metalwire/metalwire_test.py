@@ -370,6 +370,109 @@ def run_blur_pipelines(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def run_labels(env):
+    """WP-4 D4: an A8 glyph mask must modulate the label colour, not become the colour.
+
+    boot wp4-v6 drew every icon label from an A8Unorm mask (Metal's alpha-only glyph format,
+    protocol 1) modulated by a colour constant; the host's single-channel image view handed the
+    fragment stage (coverage, 0, 0), so every label pixel was (R, 0, 0) -- red glyphs, the whole
+    D4 defect. The host now creates A8 views with a (1, 1, 1, coverage) swizzle, so a white label
+    over black comes out as grey coverage in R, G and B, with the same value in the SHM alpha.
+    """
+    size = metalwire_gen.LABEL_MASK
+    coverage = metalwire_gen.LABEL_COVERAGE
+    work = tempfile.mkdtemp(prefix="metalwire-labels-")
+    out_dir = os.path.join(work, "frames")
+    shm_path = os.path.join(work, "frame.shm")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "1", "--shm", shm_path, "--out", out_dir,
+         "--png-every", "1", "--missing-report", os.path.join(work, "missing.txt"), "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "labels host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the labels host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--labels", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        require(gen.returncode == 0,
+                "labels generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require(host.wait(timeout=60) == 0,
+                "labels host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("labels frame 1: ack status=ok" in gen.stdout,
+                "the labels frame was not acknowledged:\n%s" % gen.stdout)
+        require("executed 1 of 1 draw(s) on texture 91" in output,
+                "the labels draw did not execute:\n%s" % output)
+        ppm_path = os.path.join(out_dir, "frame-000000.ppm")
+        with open(ppm_path, "rb") as f:
+            data = f.read()
+        header = b"P6\n%d %d\n255\n" % (size, size)
+        require(data.startswith(header), "%s: bad P6 header" % ppm_path)
+        pixels = data[len(header):]
+        red_only = 0
+        worst = 0
+        for y in range(size):
+            for x in range(size):
+                at = (y * size + x) * 3
+                r, g, b = pixels[at], pixels[at + 1], pixels[at + 2]
+                expected = coverage[y * size + x]
+                if r != g or g != b:
+                    red_only += 1
+                worst = max(worst, abs(r - expected), abs(g - expected), abs(b - expected))
+        require(red_only == 0,
+                "%d label pixels kept the mask in the red channel only (the D4 defect)" % red_only)
+        require(worst <= 1,
+                "the label picture is not the mask coverage in all channels (worst %d)" % worst)
+        with open(shm_path, "rb") as f:
+            shm = f.read()
+        require(len(shm) >= 40 + size * size * 4, "%s is %d bytes" % (shm_path, len(shm)))
+        body = shm[40:40 + size * size * 4]
+        worst_alpha = 0
+        for index in range(size * size):
+            b, g, r, a = body[index * 4:index * 4 + 4]
+            expected = coverage[index]
+            require(r == g == b,
+                    "SHM pixel %d is (%d, %d, %d), not grey" % (index, r, g, b))
+            worst_alpha = max(worst_alpha, abs(a - expected))
+        require(worst_alpha <= 1,
+                "the SHM alpha is not the mask coverage (worst %d)" % worst_alpha)
+        print("PASS labels: A8 glyph mask modulates a white colour -- grey coverage in RGB, mask in "
+              "alpha (D4 red labels fixed)")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- labels host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def read_png_rgb(path):
     """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
     with open(path, "rb") as f:
@@ -648,9 +751,10 @@ def main():
         run_v4_fallback(env)
         run_format115(env)
         run_blur_pipelines(env)
+        run_labels(env)
         run_orientation(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
-              "orientation)" % (WIDTH, HEIGHT, FRAMES))
+              "labels, orientation)" % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)

@@ -1781,6 +1781,23 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
         view_info.image = image->image;
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = format;
+        /*
+         * WP-4 D4: Metal's A8Unorm is CA's glyph/label mask (see MW_FORMAT_A8_UNORM). Its single
+         * byte is coverage that Metal's A8 view exposes as alpha with an undefined (zero) colour;
+         * the host creates the image as R8, so a plain view would hand the fragment stage
+         * (coverage, 0, 0) and a label drawn as `texture * colour` came out red (boot wp4-v6:
+         * every icon label's glyph pixels are (R, 0, 0)). Swizzle the view to (1, 1, 1, coverage)
+         * -- one opaque white in RGB and the mask byte in alpha -- so the fixed fragment function
+         * modulates the vertex colour by the coverage and composites premultiplied text the way
+         * CA's mask base functions (Ired/Ialp) do. R8 textures (the luma ramp, format 10) keep a
+         * plain view and still read the ramp from .r.
+         */
+        if (image->format == MW_FORMAT_A8_UNORM) {
+            view_info.components.r = VK_COMPONENT_SWIZZLE_ONE;
+            view_info.components.g = VK_COMPONENT_SWIZZLE_ONE;
+            view_info.components.b = VK_COMPONENT_SWIZZLE_ONE;
+            view_info.components.a = VK_COMPONENT_SWIZZLE_R;
+        }
         view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         view_info.subresourceRange.baseMipLevel = 0;
         view_info.subresourceRange.levelCount = 1;

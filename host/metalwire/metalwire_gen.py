@@ -201,6 +201,7 @@ MW_RENDER_SET_VERTEX_TEXTURE = 0x0065
 MW_RENDER_SET_VERTEX_SAMPLER = 0x0066
 MW_RENDER_SET_FRAGMENT_BUFFER = 0x0067
 MW_RENDER_SET_FRAGMENT_BYTES = 0x0068
+MW_TEXTURE_REPLACE_REGION = 0x0022
 MW_TEXTURE_SET_IOSURFACE = 0x0023
 MW_RENDER_SET_FRAGMENT_TEXTURE = 0x0069
 MW_RENDER_SET_FRAGMENT_SAMPLER = 0x006A
@@ -773,6 +774,104 @@ def run_blur_pipelines(args):
     return 0 if failures == 0 else 1
 
 
+
+# WP-4 D4: the labels fixture. CA's text labels are drawn from an A8Unorm glyph mask (Metal's
+# alpha-only format, protocol 1) modulated by a colour constant; boot wp4-v6's host picture had
+# every label pixel as (coverage, 0, 0) -- red glyphs -- because the host's single-channel image
+# view fed the mask byte through the red channel. The host now swizzles A8 views to
+# (1, 1, 1, coverage), so a white label over black must come out as grey coverage in all three
+# channels, and the SHM alpha must carry the same coverage.
+LABEL_MASK = 32
+LABEL_COVERAGE = bytes(((x * 8) & 0xFF) for y in range(LABEL_MASK) for x in range(LABEL_MASK))
+
+
+def run_labels(args):
+    """One render frame that draws an A8 glyph mask with a white colour.
+
+    The mask is uploaded with MW_TEXTURE_REPLACE_REGION in the same frame (Metal's replaceRegion is
+    what CA uses for layer contents), then the frame draws it over a cleared target.
+    """
+    wire = bytearray(262144)
+    wire[72] = 1  # Uniform.premultiply: CA's label sources are premultiplied
+    mvp = ((2.0 / LABEL_MASK, 0.0, 0.0, 0.0),
+           (0.0, -2.0 / LABEL_MASK, 0.0, 0.0),
+           (0.0, 0.0, 0.0, 0.0),
+           (-1.0, 1.0, 0.0, 1.0))
+    for row, values in enumerate(mvp):
+        struct.pack_into("<4f", wire, 240 + 16 * row, *values)
+    for vertex, (x, y) in enumerate(((0.0, 0.0), (LABEL_MASK, 0.0),
+                                     (LABEL_MASK, LABEL_MASK), (0.0, LABEL_MASK))):
+        at = 336 + vertex * 48
+        struct.pack_into("<4f", wire, at, x, y, 0.0, 1.0)
+        struct.pack_into("<2f", wire, at + 16, x, y)
+        struct.pack_into("<2f", wire, at + 24, 0.0, 0.0)
+        struct.pack_into("<4e", wire, at + 32, 1.0, 1.0, 1.0, 1.0)  # white label colour
+    struct.pack_into("<6H", wire, 528, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<4f", wire, 544, 1.0 / LABEL_MASK, 1.0 / LABEL_MASK, 0.0, 0.0)
+    wire = bytes(wire)
+    attributes = [(31, 0, 1), (29, 16, 1), (29, 24, 1), (27, 32, 1)] + [(0, 0, 0)] * 12
+    layouts = [(0, 1, 1), (48, 1, 1)] + [(0, 1, 1)] * 6
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-labels"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 93, 0, len(wire)))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 90, LABEL_MASK, LABEL_MASK, 1, 1, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 91, LABEL_MASK, LABEL_MASK, 80, 5, 0))
+        client.send(MW_CREATE_SAMPLER, struct.pack("<9I2f2I", 45, 0, 0, 0, 0, 0, 0, 1, 0,
+                                                   0.0, 0.0, 1, 0))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(130,
+                                             "com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 1, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 93, 0, len(wire), 0) + wire)
+        client.send(MW_TEXTURE_REPLACE_REGION,
+                    struct.pack("<12I", 90, 0, 0, 0, 0, 0, LABEL_MASK, LABEL_MASK, 1, LABEL_MASK,
+                                len(LABEL_COVERAGE), len(LABEL_COVERAGE)) + LABEL_COVERAGE)
+        client.send(MW_RENDER_BEGIN,
+                    _begin_payload(0, 91, LABEL_MASK, LABEL_MASK, 80, 2, 1,
+                                   (0.0, 0.0, 0.0, 0.0)))
+        client.send(MW_RENDER_SET_VIEWPORT,
+                    struct.pack("<6f", 0.0, 0.0, float(LABEL_MASK), float(LABEL_MASK), 0.0, 1.0))
+        client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 130, 0))
+        client.send(MW_RENDER_SET_SCISSOR, struct.pack("<4I", 0, 0, LABEL_MASK, LABEL_MASK))
+        client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 93, 1, 0))
+        client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 90, 3))
+        client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 1, 336))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 2, 240))
+        client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 93, 3, 544))
+        client.send(MW_RENDER_DRAW, _draw_payload(6, 528, 93))
+        client.send(MW_RENDER_END, struct.pack("<4I", 0, 1, 7, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 91, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 1, encoded, 0, LABEL_MASK, LABEL_MASK,
+                                              LABEL_MASK * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK or ack[3] != 1:
+            failures += 1
+            print("labels frame 1: host status %d seq %d" % (ack[2], ack[3]), flush=True)
+        else:
+            print("labels frame 1: ack status=ok", flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 # WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
 # top at NDC y=+1; Vulkan's viewport maps y down. The host compensates with a negative viewport
 # height, so framebuffer row y must come out as the source row y -- in the present read-back, the
@@ -988,6 +1087,9 @@ def main(argv):
                         help="send one seed frame and three render frames through the "
                              "downsample_4 / narrow_blur_23 / narrow_blur_15 pipelines, the "
                              "WP-4 1.2 regression")
+    parser.add_argument("--labels", action="store_true",
+                        help="send an A8 glyph mask drawn with a white colour, the WP-4 D4 "
+                             "label-mask regression")
     parser.add_argument("--orientation", action="store_true",
                         help="send one seed frame and two render frames that make the CW/CCW "
                              "picture direction observable (numbered rows + framebuffer fetch), "
@@ -999,6 +1101,8 @@ def main(argv):
         return run_rgba16f_ramp(args)
     if args.blur_pipelines:
         return run_blur_pipelines(args)
+    if args.labels:
+        return run_labels(args)
     if args.orientation:
         return run_orientation(args)
     if args.render:

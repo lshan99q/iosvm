@@ -201,6 +201,11 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
   missing report) and every tile matches the box/binomial kernel the shaders document to within
   2/255, including its PNG,
+* the label mask (WP-4 D4): a 32x32 A8 glyph mask (Metal's alpha-only label format) is uploaded
+  with replaceRegion and drawn over black with a white colour and premultiply on; the test asserts
+  every pixel is grey coverage (R == G == B == the mask byte, within 1) and the SHM alpha carries
+  the same coverage. A host without the A8 view swizzle writes (coverage, 0, 0) -- red glyphs --
+  and the test fails on 992 of 1024 pixels,
 * the direction (WP-4 1.1): a 64x64 source whose every row is a different colour is copied 1:1
   through CA's mvp into a render target, then a framebuffer-fetch draw blends 50% over it. The
   test asserts the present read-back, the PPM and the PNG hold source row y at output row y, and
@@ -313,6 +318,11 @@ The execution half:
   write-back -- in the same framebuffer row order. Without it the whole desktop came out
   vertically mirrored (stage 34's symptom: status bar at the bottom); the BootUI only looked right
   because the Apple logo is nearly symmetric;
+* creates the image view of an `A8Unorm` texture (CA's glyph/label mask) with a
+  `(1, 1, 1, coverage)` component swizzle: the byte is coverage, which Metal's A8 view exposes as
+  alpha with a zero colour, so the host's R8 image would otherwise feed the fragment stage
+  `(coverage, 0, 0)` and every label came out red (boot wp4-v6's D4). `R8Unorm` (the luma ramp,
+  format 10) keeps a plain view;
 * reads the target back after the draws, logs its CRC and a non-zero-byte count, publishes it in
   glwire's SHM format when `--shm` is on, and acknowledges the frame as before.
 
