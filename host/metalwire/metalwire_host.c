@@ -3569,7 +3569,8 @@ static int mw_render_vk_init(struct mw_server *s)
         return -1;
     }
     r->ready = 1;
-    mw_log("render: execution ready (dynamic rendering, embedded shaders)");
+    mw_log("render: execution ready (dynamic rendering, embedded shaders, negative viewport "
+           "height for Metal's y-up NDC)");
     return 0;
 }
 
@@ -4307,10 +4308,32 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                           pipeline->vk_pipeline[draw->primitive_type <= 4
                                                     ? draw->primitive_type
                                                     : 3]);
+        /*
+         * Metal's NDC has y up, Vulkan's has y down, and CA's recorded viewport is in Metal's
+         * top-left window space. Passing the height through positive therefore lands every CA
+         * draw vertically mirrored in the framebuffer -- that was WP-4's desktop symptom (status
+         * bar at the bottom, glyphs inverted) while the BootUI "looked right" only because the
+         * Apple logo is nearly symmetric.
+         *
+         * The compensation is one negative viewport height: the viewport still covers
+         * [x, x+width) x [y, y+height) of the framebuffer, but NDC y=+1 now maps to the top edge.
+         * Negative height is core Vulkan 1.1 (promoted from VK_KHR_maintenance1), and this render
+         * path already requires a Vulkan 1.3 device with dynamic rendering, so every device that
+         * reaches here supports it (lavapipe reports 1.4; the V100 driver 1.3+). Doing it at this
+         * single point keeps fixed/std/downsample/narrow-blur on one convention -- the vertex
+         * shaders stay a faithful transcription of CA's mvp -- while the colour-attachment
+         * read-back, the PPM/PNG files, the SHM picture and the IOSurface by-reference write-back
+         * all stay in the framebuffer order they already had.
+         */
         vp.x = draw->viewport[0];
-        vp.y = draw->viewport[1];
+        if (draw->viewport[3] > 0.0f) {
+            vp.y = draw->viewport[1] + draw->viewport[3];
+            vp.height = -draw->viewport[3];
+        } else {
+            vp.y = draw->viewport[1];
+            vp.height = draw->viewport[3];
+        }
         vp.width = draw->viewport[2];
-        vp.height = draw->viewport[3];
         vp.minDepth = draw->viewport[4];
         vp.maxDepth = draw->viewport[5];
         vkCmdSetViewport(command, 0, 1, &vp);

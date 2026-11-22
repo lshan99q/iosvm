@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zlib
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(BASE, "metalwire_gen.py")
@@ -364,6 +365,162 @@ def run_blur_pipelines(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def read_png_rgb(path):
+    """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
+    with open(path, "rb") as f:
+        data = f.read()
+    require(data.startswith(b"\x89PNG\r\n\x1a\n"), "%s: not a PNG" % path)
+    at = 8
+    idat = b""
+    width = height = 0
+    while at + 8 <= len(data):
+        length = int.from_bytes(data[at:at + 4], "big")
+        kind = data[at + 4:at + 8]
+        chunk = data[at + 8:at + 8 + length]
+        if kind == b"IHDR":
+            width = int.from_bytes(chunk[0:4], "big")
+            height = int.from_bytes(chunk[4:8], "big")
+            require(chunk[8:10] == b"\x08\x02", "%s: not 8-bit truecolour" % path)
+        elif kind == b"IDAT":
+            idat += chunk
+        at += 12 + length
+    require(width > 0 and height > 0 and idat, "%s: missing IHDR/IDAT" % path)
+    raw = zlib.decompress(idat)
+    stride = 1 + width * 3
+    require(len(raw) == stride * height, "%s: %d raw bytes for %dx%d" % (path, len(raw), width,
+                                                                       height))
+    out = bytearray()
+    for y in range(height):
+        require(raw[y * stride] == 0, "%s: row %d has filter %d" % (path, y, raw[y * stride]))
+        out += raw[y * stride + 1:(y + 1) * stride]
+    return width, height, bytes(out)
+
+
+def run_orientation(env):
+    """WP-4 1.1: CA's Metal NDC y-up / Vulkan y-down must not mirror the picture.
+
+    Metal's NDC has y up and CA's mvp puts a layer's top at NDC y=+1; Vulkan's viewport maps NDC y
+    down. The host compensates with a negative viewport height, so the numbered-row source has to
+    come out with the same rows in the present read-back, the PPM/PNG files, the SHM picture and
+    the IOSurface by-reference write-back. Frame 2 adds a framebuffer-fetch draw (the Bsov base
+    function) that blends 50% over the destination: a wrong fetch origin would read the mirrored
+    row. The same fixture against a host without the negative height comes out exactly flipped
+    (verified while writing this), so the assertion bites.
+    """
+    source, frame1, frame2 = metalwire_gen.orientation_expected()
+    size = metalwire_gen.ORIENT_SIZE
+    require(frame1[:9] != frame1[-9:], "the orientation source is not asymmetric")
+    work = tempfile.mkdtemp(prefix="metalwire-orient-")
+    out_dir = os.path.join(work, "frames")
+    ram_path = os.path.join(work, "ram.img")
+    shm_path = os.path.join(work, "frame.shm")
+    with open(ram_path, "wb") as f:
+        f.write(b"\x00" * metalwire_gen.ORIENT_RAM_BYTES)
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "3", "--ram", ram_path,
+         "--shm", shm_path, "--out", out_dir, "--png-every", "1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+
+    def picture(path):
+        return read_ppm(path, size, size)
+
+    try:
+        require(listening.wait(60), "orientation host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the orientation host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--orientation", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+        require(gen.returncode == 0,
+                "orientation generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout,
+                                                             gen.stderr))
+        require("wire error" not in gen.stderr, "orientation generator saw a wire error:\n%s" %
+                gen.stderr)
+        require(host.wait(timeout=120) == 0,
+                "orientation host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        for seq in (1, 2):
+            require("orientation frame %d: ack status=ok" % seq in gen.stdout,
+                    "orientation frame %d was not acknowledged:\n%s" % (seq, gen.stdout))
+        for name in ("com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                     "com.apple.coreanimation.draw.PBGRABsov_TimgXfc_Isrc"):
+            require("-> Vulkan pipeline" in output and name in output,
+                    "the host did not build a Vulkan pipeline for %s:\n%s" % (name, output))
+        require(output.count("picture written into the guest's real IOSurface and read back by "
+                             "reference") >= 2,
+                "the IOSurface write-back did not happen for both render frames:\n%s" % output)
+        # 1. the blit path (no viewport) and the render copy draw: top row is the source top row.
+        seed = picture(os.path.join(out_dir, "frame-000000.ppm"))
+        require(seed == frame1, "the blit seed frame does not hold the source in RGB order")
+        copied = picture(os.path.join(out_dir, "frame-000001.ppm"))
+        require(copied == frame1,
+                "the render frame is not upright: host row 0 must be the source row 0")
+        blended = picture(os.path.join(out_dir, "frame-000002.ppm"))
+        require(blended == frame2,
+                "the framebuffer-fetch frame reads the wrong row (or blends wrongly)")
+        # 2. PPM and PNG are the same picture.
+        for index, expected in ((1, frame1), (2, frame2)):
+            png_path = os.path.join(out_dir, "frame-%06d.png" % index)
+            require(os.path.exists(png_path), "%s was not written" % png_path)
+            width, height, pixels = read_png_rgb(png_path)
+            require((width, height) == (size, size), "%s: %dx%d" % (png_path, width, height))
+            require(pixels == expected, "%s differs from the PPM of the same frame" % png_path)
+        # 3. The SHM picture and the guest surface hold the same last frame, same direction.
+        with open(shm_path, "rb") as f:
+            shm = f.read()
+        require(len(shm) >= 40 + size * size * 4, "%s is %d bytes" % (shm_path, len(shm)))
+        magic, _seq, shm_w, shm_h, shm_bytes, _pad, _ns = struct.unpack_from("<QQIIIIQ", shm, 0)
+        require(magic == 0x57464C47 and (shm_w, shm_h, shm_bytes) == (size, size, size * size * 4),
+                "%s: bad SHM header" % shm_path)
+        expected_bgra = bytearray()
+        for y in range(size):
+            for x in range(size):
+                r, g, b = frame2[(y * size + x) * 3:(y * size + x) * 3 + 3]
+                expected_bgra += bytes((b, g, r, 255))
+        expected_bgra = bytes(expected_bgra)
+        require(shm[40:40 + len(expected_bgra)] == expected_bgra,
+                "the SHM picture is not the last frame in the source's row order")
+        with open(ram_path, "rb") as f:
+            f.seek(metalwire_gen.ORIENT_RAM_OFFSET)
+            surface = f.read(size * size * 4)
+        require(surface == expected_bgra,
+                "the IOSurface by-reference write-back is not the last frame in row order")
+        print("PASS orientation: Metal y-up -> Vulkan y-down compensated; read-back, PPM/PNG, SHM "
+              "and IOSurface all hold the source's rows (fetch draw included)")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- orientation host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     if not os.path.exists(LAVAPIPE):
         print("metalwire_test: SKIP: lavapipe ICD not found at %s" % LAVAPIPE)
@@ -486,8 +643,9 @@ def main():
         run_v4_fallback(env)
         run_format115(env)
         run_blur_pipelines(env)
-        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur)" %
-              (WIDTH, HEIGHT, FRAMES))
+        run_orientation(env)
+        print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, blur, "
+              "orientation)" % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
         print("metalwire_test: FAIL: %s" % failure)

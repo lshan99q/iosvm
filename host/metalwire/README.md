@@ -198,7 +198,13 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
 * the blur family: one seed frame and three render frames drive `downsample_4`, `narrow_blur_23`
   and `narrow_blur_15` over a 256x256 source; every frame executes 1 of 1 draw (0 skipped), the
   missing report is empty, and the three pictures match the kernels the shaders document (4x4 box,
-  then two binomial blurs) to within 2/255.
+  then two binomial blurs) to within 2/255,
+* the direction (WP-4 1.1): a 64x64 source whose every row is a different colour is copied 1:1
+  through CA's mvp into a render target, then a framebuffer-fetch draw blends 50% over it. The
+  test asserts the present read-back, the PPM and the PNG hold source row y at output row y, and
+  that the SHM picture and the IOSurface by-reference write-back (a fake `--ram` file) hold the
+  same last frame -- 0 tolerance. The same fixture against a host without the negative viewport
+  height comes out exactly flipped, so the assertion bites.
 
 No GPU is needed. If the lavapipe ICD is absent the test prints `SKIP` and exits 0, so `make test`
 stays green on a machine with only a proprietary driver or no Vulkan at all.
@@ -294,6 +300,17 @@ The execution half:
   equation cannot express CA's shader-side composition;
 * honours `blendingEnabled` (the recorded pipelines all say NO), the viewport, the scissor and the
   render pass's load/store/clear values;
+* compensates the one convention difference Vulkan does not share with Metal: Metal's NDC has y
+  up and CA's mvp puts a layer's top at NDC y=+1, while Vulkan's viewport maps NDC y down. The
+  viewport is submitted with a negative height (`y = ca_y + ca_height, height = -ca_height`), so
+  the viewport covers the same framebuffer rectangle but NDC y=+1 lands on its top edge. Negative
+  viewport height is core Vulkan 1.1 (VK_KHR_maintenance1), and this path already needs a Vulkan
+  1.3 device with dynamic rendering. Doing it at that one point leaves the vertex shaders a
+  faithful transcription of CA's mvp and keeps every consumer of the picture -- the colour
+  attachment read-back, the PPM/PNG files, the SHM picture and the IOSurface by-reference
+  write-back -- in the same framebuffer row order. Without it the whole desktop came out
+  vertically mirrored (stage 34's symptom: status bar at the bottom); the BootUI only looked right
+  because the Apple logo is nearly symmetric;
 * reads the target back after the draws, logs its CRC and a non-zero-byte count, publishes it in
   glwire's SHM format when `--shm` is on, and acknowledges the frame as before.
 

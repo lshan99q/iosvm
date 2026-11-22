@@ -200,6 +200,7 @@ MW_RENDER_SET_VERTEX_TEXTURE = 0x0065
 MW_RENDER_SET_VERTEX_SAMPLER = 0x0066
 MW_RENDER_SET_FRAGMENT_BUFFER = 0x0067
 MW_RENDER_SET_FRAGMENT_BYTES = 0x0068
+MW_TEXTURE_SET_IOSURFACE = 0x0023
 MW_RENDER_SET_FRAGMENT_TEXTURE = 0x0069
 MW_RENDER_SET_FRAGMENT_SAMPLER = 0x006A
 MW_RENDER_SET_VIEWPORT = 0x006B
@@ -659,11 +660,13 @@ def _blur_wire_buffer():
     """
     buf = bytearray(262144)
     buf[72] = 1  # Uniform.premultiply: the source is premultiplied BGRA
-    # Upright mvp (Vulkan NDC y is down): 0..64 -> -1..1, so PPM rows follow the target rows.
+    # CA's own mvp convention: position y=0 is the top of the layer (Metal NDC y=+1). The host
+    # compensates Metal's y-up NDC with a negative viewport height, so the target's top row is the
+    # picture's top row and the PPMs below read the same way as the references.
     mvp = ((2.0 / BLUR_TARGET, 0.0, 0.0, 0.0),
-           (0.0, 2.0 / BLUR_TARGET, 0.0, 0.0),
+           (0.0, -2.0 / BLUR_TARGET, 0.0, 0.0),
            (0.0, 0.0, 0.0, 0.0),
-           (-1.0, -1.0, 0.0, 1.0))
+           (-1.0, 1.0, 0.0, 1.0))
     for i, row in enumerate(mvp):
         struct.pack_into("<4f", buf, 240 + 16 * i, *row)
 
@@ -793,6 +796,192 @@ def run_blur_pipelines(args):
     return 0 if failures == 0 else 1
 
 
+
+# WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
+# top at NDC y=+1; Vulkan's viewport maps y down. The host compensates with a negative viewport
+# height, so framebuffer row y must come out as the source row y -- in the present read-back, the
+# PPM/PNG, the SHM picture and the IOSurface by-reference write-back alike. The second frame also
+# reads the destination back through Metal's framebuffer fetch (the Bsov base function), so a
+# wrong fetch origin (framebuffer row vs flipped window row) cannot hide.
+ORIENT_SIZE = 64
+ORIENT_RAM_OFFSET = 4096                 # the fake IOSurface's offset inside the guest RAM file
+ORIENT_RAM_BYTES = 1 << 20
+ORIENT_RAM_PA = 0x40000000 + ORIENT_RAM_OFFSET  # the host maps --ram at guest physical 0x40000000
+
+
+def make_orientation_source(size=ORIENT_SIZE):
+    """A 64x64 source whose every row is a different colour, so a flipped row cannot pass.
+
+    Channels are even so the frame-2 50% blend lands on an integer; blue wraps once, which the
+    row numbers do not rely on (red and green identify the row).
+    """
+    buf = bytearray(size * size * 4)
+    for y in range(size):
+        r = 4 * y
+        g = 252 - 4 * y
+        b = (2 * y) & 0xFF
+        buf[y * size * 4:(y + 1) * size * 4] = bytes((b, g, r, 255)) * size
+    return bytes(buf)
+
+
+def orientation_expected():
+    """(source BGRA, frame-1 PPM RGB, frame-2 PPM RGB) for the orientation fixture.
+
+    Frame 1 copies the source 1:1. Frame 2 is `dst * (1 - 128/255)` for every channel, the fixed
+    fragment shader's source-over with the 1x1 texture (0,0,0,128): round(v * 127 / 255).
+    """
+    source = make_orientation_source()
+    size = ORIENT_SIZE
+    frame1 = bytearray()
+    frame2 = bytearray()
+    for y in range(size):
+        at = y * size * 4
+        for x in range(size):
+            b, g, r, _a = source[at + x * 4:at + x * 4 + 4]
+            frame1 += bytes((r, g, b))
+            for v in (r, g, b):
+                frame2.append(int(v * 127.0 / 255.0 + 0.5))
+    return source, bytes(frame1), bytes(frame2)
+
+
+def _orientation_wire_buffer():
+    """The wire buffer: Uniform, CA-convention mvp, the 64x64 quad, indices and texture matrix."""
+    buf = bytearray(262144)
+    buf[72] = 0  # Uniform.premultiply off: the copy draw must be the identity
+    # CA's mvp convention: position y=0 is the layer's top (Metal NDC y=+1).
+    mvp = ((2.0 / ORIENT_SIZE, 0.0, 0.0, 0.0),
+           (0.0, -2.0 / ORIENT_SIZE, 0.0, 0.0),
+           (0.0, 0.0, 0.0, 0.0),
+           (-1.0, 1.0, 0.0, 1.0))
+    for i, row in enumerate(mvp):
+        struct.pack_into("<4f", buf, 240 + 16 * i, *row)
+    positions = ((0.0, 0.0), (ORIENT_SIZE, 0.0), (ORIENT_SIZE, ORIENT_SIZE), (0.0, ORIENT_SIZE))
+    for i, (x, y) in enumerate(positions):
+        at = 336 + i * 48
+        struct.pack_into("<4f", buf, at, x, y, 0.0, 1.0)
+        struct.pack_into("<2f", buf, at + 16, x, y)       # texcoords in source pixels
+        struct.pack_into("<2f", buf, at + 24, 0.0, 0.0)
+        struct.pack_into("<4e", buf, at + 32, 1.0, 1.0, 1.0, 1.0)
+    struct.pack_into("<6H", buf, 528, 0, 1, 2, 2, 3, 0)
+    struct.pack_into("<4f", buf, 544, 1.0 / ORIENT_SIZE, 1.0 / ORIENT_SIZE, 0.0, 0.0)
+    return bytes(buf)
+
+
+def run_orientation(args):
+    """One seed frame and two render frames that make the picture direction observable.
+
+    frame 1: the numbered-row source, copied 1:1 through CA's mvp into the presented target.
+    frame 2: the same copy, then a framebuffer-fetch draw that blends 50% over it.
+    Both are saved as PPM/PNG, published to --shm and written by reference into the fake guest
+    RAM's IOSurface (--ram); the test reads all four back and asserts the rows.
+    """
+    source = make_orientation_source()
+    wire = _orientation_wire_buffer()
+    tiny = bytes((0, 0, 0, 128))
+    attributes = [(31, 0, 1), (29, 16, 1), (29, 24, 1), (27, 32, 1)] + [(0, 0, 0)] * 12
+    layouts = [(0, 1, 1), (48, 1, 1)] + [(0, 1, 1)] * 6
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-orient"))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 83, 0, len(source)))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 84, 0, len(wire)))
+        client.send(MW_CREATE_BUFFER, struct.pack("<IIQ", 85, 0, len(tiny)))
+        client.send(MW_CREATE_TEXTURE,
+                    struct.pack("<6I", 80, ORIENT_SIZE, ORIENT_SIZE, 80, 5, 0))
+        client.send(MW_CREATE_TEXTURE,
+                    struct.pack("<6I", 81, ORIENT_SIZE, ORIENT_SIZE, 80, 1, 0))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 82, 1, 1, 80, 1, 0))
+        client.send(MW_CREATE_SAMPLER, struct.pack("<9I2f2I", 45, 0, 0, 0, 0, 0, 0, 1, 0,
+                                                   0.0, 0.0, 1, 0))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(60, "com.apple.coreanimation.draw.PBGRA_TimgXfc_Isrc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+        client.send(MW_CREATE_RENDER_PIPELINE,
+                    _create_pipeline_payload(61,
+                                             "com.apple.coreanimation.draw.PBGRABsov_TimgXfc_Isrc",
+                                             "fixed_vert_lpf_spc", "fixed_frag_lpf_cpf",
+                                             attributes, layouts))
+        # The presented target is a real IOSurface as far as the host is concerned: one segment in
+        # the guest RAM file it was told to map.
+        client.send(MW_TEXTURE_SET_IOSURFACE,
+                    struct.pack("<4I", 80, ORIENT_SIZE * 4, ORIENT_SIZE * ORIENT_SIZE * 4, 1) +
+                    struct.pack("<QII", ORIENT_RAM_PA, ORIENT_SIZE * ORIENT_SIZE * 4, 0))
+
+        # Seed frame: the two source textures through buffer->texture copies; present the source so
+        # the blit path's own direction is checked too.
+        begin = time.monotonic_ns()
+        client.send(MW_FRAME_BEGIN, struct.pack("<QQ", 0, begin))
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 83, 0, len(source), 0) + source)
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 84, 0, len(wire), 0) + wire)
+        client.send(MW_UPLOAD_BUFFER, struct.pack("<IIII", 85, 0, len(tiny), 0) + tiny)
+        client.send(MW_COPY_BUFFER_TO_TEXTURE,
+                    struct.pack("<IIQ6I", 83, 81, 0, ORIENT_SIZE * 4, len(source), ORIENT_SIZE,
+                                ORIENT_SIZE, 0, 0))
+        client.send(MW_COPY_BUFFER_TO_TEXTURE,
+                    struct.pack("<IIQ6I", 85, 82, 0, 4, len(tiny), 1, 1, 0, 0))
+        client.send(MW_PRESENT, struct.pack("<II", 81, 0))
+        encoded = time.monotonic_ns() - begin
+        client.send(MW_FRAME_END, struct.pack("<QQIIII", 0, encoded,
+                                              zlib.crc32(source) & 0xFFFFFFFF, ORIENT_SIZE,
+                                              ORIENT_SIZE, ORIENT_SIZE * 4))
+        ack = client.recv_ack()
+        if ack[2] != MW_STATUS_OK:
+            failures += 1
+            print("orientation seed frame: host status %d" % ack[2], flush=True)
+
+        for seq in (1, 2):
+            begin = time.monotonic_ns()
+            client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, begin))
+            client.send(MW_RENDER_BEGIN,
+                        _begin_payload(0, 80, ORIENT_SIZE, ORIENT_SIZE, 80, 2, 1,
+                                       (0.0, 0.0, 0.0, 0.0)))
+            client.send(MW_RENDER_SET_VIEWPORT,
+                        struct.pack("<6f", 0.0, 0.0, ORIENT_SIZE, ORIENT_SIZE, 0.0, 1.0))
+            client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 60, 0))
+            client.send(MW_RENDER_SET_SCISSOR,
+                        struct.pack("<4I", 0, 0, ORIENT_SIZE, ORIENT_SIZE))
+            client.send(MW_RENDER_SET_FRAGMENT_BUFFER, struct.pack("<IIQ", 84, 1, 0))
+            client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 81, 3))
+            client.send(MW_RENDER_SET_FRAGMENT_SAMPLER, struct.pack("<II", 45, 0))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 84, 1, 336))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 84, 2, 240))
+            client.send(MW_RENDER_SET_VERTEX_BUFFER, struct.pack("<IIQ", 84, 3, 544))
+            client.send(MW_RENDER_DRAW, _draw_payload(6, 528, 84))
+            if seq == 2:
+                # Framebuffer fetch: the destination is read back at the fragment's own row and
+                # blended 50%; a wrong fetch origin would show the neighbouring row's colour.
+                client.send(MW_RENDER_SET_PIPELINE, struct.pack("<II", 61, 0))
+                client.send(MW_RENDER_SET_FRAGMENT_TEXTURE, struct.pack("<II", 82, 3))
+                client.send(MW_RENDER_DRAW, _draw_payload(6, 528, 84))
+            client.send(MW_RENDER_END, struct.pack("<4I", 0, 2 if seq == 2 else 1, 11, 0))
+            client.send(MW_PRESENT, struct.pack("<II", 80, 0))
+            encoded = time.monotonic_ns() - begin
+            client.send(MW_FRAME_END, struct.pack("<QQIIII", seq, encoded, 0, ORIENT_SIZE,
+                                                  ORIENT_SIZE, ORIENT_SIZE * 4))
+            ack = client.recv_ack()
+            if ack[2] != MW_STATUS_OK or ack[3] != seq:
+                failures += 1
+                print("orientation frame %d: host status %d seq %d" % (seq, ack[2], ack[3]),
+                      flush=True)
+            else:
+                print("orientation frame %d: ack status=ok" % seq, flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 def main(argv):
     parser = argparse.ArgumentParser(
         description="Send deterministic synthetic frames to a metalwire host.")
@@ -823,6 +1012,10 @@ def main(argv):
                         help="send one seed frame and three render frames through the "
                              "downsample_4 / narrow_blur_23 / narrow_blur_15 pipelines, the "
                              "WP-4 1.2 regression")
+    parser.add_argument("--orientation", action="store_true",
+                        help="send one seed frame and two render frames that make the CW/CCW "
+                             "picture direction observable (numbered rows + framebuffer fetch), "
+                             "the WP-4 1.1 direction regression")
     args = parser.parse_args(argv)
     global WIRE_VERSION
     WIRE_VERSION = args.protocol
@@ -830,6 +1023,8 @@ def main(argv):
         return run_rgba16f_ramp(args)
     if args.blur_pipelines:
         return run_blur_pipelines(args)
+    if args.orientation:
+        return run_orientation(args)
     if args.render:
         return run_render(args)
     if args.frames <= 0:
