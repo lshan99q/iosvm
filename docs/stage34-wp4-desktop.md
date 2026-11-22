@@ -1,10 +1,13 @@
 # stage 34: the desktop's composite frames, and a frame that survives a missing shader
 
 > Status: **measured. CoreAnimation's *desktop* compositing is recorded and executed on the host's
-> Vulkan: one hybrid boot acknowledged 655 render frames (652 with a picture, 0 skipped draws, 0
-> pipelines without a base function) and removed the BootUI overlay. The picture is not yet
-> colour-correct** — the open half is the shading semantics a function constant selects, not the
-> pipeline list. Branch `experiment/ca-metal-device`, 2026-11-22. This continues
+> Vulkan: one hybrid boot acknowledged 655 render frames and removed the BootUI overlay; a later
+> boot with the raised draw cap puts the desktop's **app icons, their labels and the status bar** on
+> the screen through this path. Two known defects remain, and both have a name: the picture is
+> vertically flipped (the hybrid host-GL surfaces' orientation), and the wallpaper/background-blur
+> layers are missing because their three pipelines have no host shader yet — the missing report
+> writes them down (`docs/stage34-missing-pipelines.txt`).** Branch
+> `experiment/ca-metal-device`, 2026-11-22. This continues
 > [`docs/stage33-ca-metal-picture.md`](stage33-ca-metal-picture.md) and carries out WP-4 of
 > ENG-METAL-006 (work items 1–3; the frame-rate report of item 4 is data, not a claim).
 
@@ -100,8 +103,10 @@ used mapped onto one of the four base functions the host already has.
 
 ### 3.2 What the pictures show, and what they do not
 
-The desktop composites execute but are **not colour-correct**: the wallpaper/background layers come
-out transparent-black, icons and labels come out as white rectangles. The geometry is right (icon
+In this run (before the draw cap was raised) the desktop composites execute but are **not
+colour-correct**: the wallpaper/background layers come out transparent-black, icons and labels come
+out as white rectangles. §3.7 is the same boot after the cap was raised — the icons are there; this
+section's two pictures are the before. The geometry is right (icon
 grid at the expected positions, the dock band, the status bar), and the layer image textures arrive
 (the guest uploads `129x158`, `180x180`, `161x90 A8` … content through `replaceRegion:`), but the
 four hand-written GLSL base functions of WP-2 implement only a slice of what CA's composite
@@ -112,12 +117,14 @@ desktop-sized recording, not that the desktop is translated.
 
 ### 3.3 Dynamic-pipeline capture is exercised, and the fallback is proven elsewhere
 
-In these boots no pipeline lacked a base function, so the missing report is empty and the fallback
-was not needed (boot `wp4-v4` adds the real-guest protocol-4 evidence, §3.6). It is proven by the CI-safe test instead (`metalwire_test.py`): a v4 frame with a
-pipeline whose vertex/fragment names are `mystery_vert_lpf`/`mystery_frag_lpf` is acknowledged
-status OK, executes 2 of its 3 draws, logs the missing pipeline once with its library, and writes it
-(with the library's name hash) to `--missing-report`. `make test` PASS — provenance, proto, the
-lavapipe probe and the new fallback test.
+The BootUI boots had no pipeline without a base function, so their missing report was empty. The
+desktop boot below changes that: three blur pipelines have no host shader, 674 draws were skipped
+across 462 frames, and **every frame was still acknowledged status OK** — the fallback is not a
+theory. The CI-safe test (`metalwire_test.py`) is the fast version of the same contract: a v4
+frame with a pipeline whose names are `mystery_vert_lpf`/`mystery_frag_lpf` is acknowledged OK,
+executes 2 of its 3 draws, logs the missing pipeline once with its library, and writes it (with the
+library's name hash) to `--missing-report`. `make test` PASS — provenance, proto, the lavapipe
+probe and the new fallback test.
 
 ### 3.4 Cost, on lavapipe (data, not a frame-rate claim)
 
@@ -161,10 +168,38 @@ CoreAnimation asked for is still on the pipeline state; (b) a library's entry-fu
 those the guest asked *it* for, so a library that CoreAnimation assigns functions to through
 specialisation may arrive with 0 names. Both are provenance detail; neither changes what executes.
 
+### 3.7 After the raised draw cap: the desktop is there (boot `wp4-v4`)
+
+Same hybrid configuration, v4 guest plug-in, `MW_MAX_RENDER_DRAWS` 512. The desktop compositing now
+runs end to end: 462 frames acknowledged, **0 wire errors**, the 77/76/57-draw composite frames
+executing (e.g. `executed 67 of 71 draw(s)`), and the screen shows the icon grid with the real icon
+images, the labels and the red status bar — the picture is the portrait desktop, **flipped
+vertically** (status bar at the bottom, icon glyphs upside down), on a black background.
+
+![the home screen through the Metal path](demo/wp4-desktop-home.png)
+
+What is missing, by name, from `docs/stage34-missing-pipelines.txt` (the report the host writes):
+
+```
+pipeline 111 vertex "downsample_blur_vert_lpf" fragment "downsample_4_frag_lpf"  skipped 290
+pipeline 117 vertex "downsample_blur_vert_lpf" fragment "narrow_blur_23_frag_lpf" skipped  98
+pipeline 431 vertex "downsample_blur_vert_lpf" fragment "narrow_blur_15_frag_lpf" skipped 286
+library 6 kind url bytes 64 hash 0x0472d062082ed7b7
+```
+
+Those are exactly the background/Dock blur passes the work package predicted; the host has no
+`downsample_blur_vert_lpf`/`downsample_n_frag_lpf` GLSL yet, so the wallpaper band they feed stays
+black. A second blocker is a texture format: `texture 61: pixel format 115 is not implemented`
+(256×1, 8 bytes/texel = Metal's RGBA16Float ramp), whose draws are skipped the same way. The flip
+is a hybrid-path orientation issue, not a wire issue: the BootUI frame in stage 33 was upright,
+while SpringBoard's GL surfaces written by `host_glwire`'s by-reference path come back to the
+compositor with the opposite row order. All three are named follow-ups, not unknowns.
+
 ## 4. What this does not establish
 
-* **A correct desktop picture.** See §3.2; the constants/behaviour of CA's composite shaders are
-  the open half of WP-4 item 2.
+* **A correct desktop picture.** See §3.7: the icons/labels/status bar are visible, but the picture
+  is flipped, the wallpaper/background-blur band is missing (three blur pipelines + an RGBA16Float
+  ramp), and the shading semantics of CA's composite shaders still deserve the full WP-4 item 2.
 * **Frame rate.** ~4 fps of recorded frames on lavapipe is what the record loop did; the doc's
   performance work (item 4) still needs the fps tooling and a steady-state run.
 * **The V100 row.** Not used: the instruction for this session is GPU 1, and the other experiment
@@ -184,7 +219,9 @@ specialisation may arrive with 0 names. Both are provenance detail; neither chan
 - `guest/metal-plugin/HakiosMetal.m` — library hashing/records, function provenance, pipeline ref,
   `byname=nil` switch.
 - `host/metalwire/PROTOCOL.md` — the protocol 4 section.
-- `docs/demo/wp4-desktop-composite.png`, `docs/demo/wp4-desktop-late.png` — the two pictures here.
+- `docs/demo/wp4-desktop-composite.png`, `docs/demo/wp4-desktop-late.png`,
+  `docs/demo/wp4-desktop-home.png` — the pictures here.
+- `docs/stage34-missing-pipelines.txt` — the `--missing-report` of boot `wp4-v4`.
 - `README.md`, `docs/state-of-the-port.md` — the state row.
 
 ## 6. Reproduce

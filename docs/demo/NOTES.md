@@ -109,3 +109,33 @@ branch `experiment/ca-metal-device`.
   `3bf3a5e3acef7ec51aa36e0b3ad33f537ce14454dcaa1ec0d498bc7e9d7b4d9b` (`wp4-desktop-late.png`).
   The run's file names count acknowledged frames, so the 55-draw composite (render frame 14) is
   `frame-000013.png`.
+
+# Metal translation acceptance capture — stage 34 / WP-4 (the home screen through the Metal path)
+
+One frame of boot `wp4-v4`, taken 2026-11-22 10:19–10:20 UTC (18:19 +08).
+
+- **Milestone**: WP-4 of ENG-METAL-006 (experiment only; not a delivered path)
+- **Commit**: the tree that carries `docs/stage34-wp4-desktop.md` (stage 34)
+- **Guest firmware**: Darwin 22.5.0, 20F66, iPhone10,3 — the contributor's own IPSW; run tree
+  `/home/lshan/DSH-desktop/mt-work`, image with `bin/glremote_on`, clients `metal_frame`,
+  `metal_probe`, `backboardd`, injected `libcainject.dylib`, and the **v4** guest plug-in
+  (`HakiosMetal` 245304 bytes)
+- **Host**: both host programs on device 1 = llvmpipe/lavapipe (V100 unused):
+  `metalwire_host --gpu 1 --port 9111 --ram <ram.img> --out /tmp/wp4-v4-frames --png-every 1
+  --missing-report /tmp/wp4-v4-missing.txt`, and `host_glwire --no-panel 9210 <ram.img>` with
+  `GLWIRE_SOFTWARE_GL=1` + the Mesa EGL vendor; QEMU TCG, one vCPU, `CMDLINE="cpus=1 fb_beat=0
+  fbscale=2 metal=1"`, instance 3
+- **Command**: `MW_CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1" tools/metalwire/run-guest.sh
+  wp4-v4 1500`; the capture is `frame-000272.png` of that run's `--out` tree, downscaled to 375×812
+- **What it shows**: CoreAnimation's desktop composite executed by the host's Vulkan — the app
+  icons with their real images (FaceTime, Calendar, Photos, Mail, Notes, Reminders, Clock, News,
+  Podcasts, App Store, Maps…), their labels, the folder widgets and the red status bar. 462 frames
+  were acknowledged in this boot with 0 wire errors; three blur pipelines have no host shader
+  (`docs/stage34-missing-pipelines.txt`) and 674 of their draws were skipped.
+- **What it does not show**: a finished desktop. The picture is **vertically flipped** (status bar
+  at the bottom, glyphs upside down) — the hybrid host-GL surfaces' row order, not a wire issue;
+  the wallpaper/background-blur band is black because `downsample_blur_vert_lpf` /
+  `downsample_4_frag_lpf` / `narrow_blur_23/15_frag_lpf` are not implemented, and a 256×1
+  RGBA16Float (Metal format 115) ramp is skipped for the same reason. No frame-rate or V100 claim.
+- **Notes**: project's own pixels; sha256
+  `82803d0d4232096833110c633f01b651b695d4a743965d6071d0f5b4e155fa5f`.
