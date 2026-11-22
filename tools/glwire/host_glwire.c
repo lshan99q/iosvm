@@ -62,6 +62,14 @@ int host_skip_clear;   /* GLWIRE_SKIP_CLEAR=1: do not replay colour clears (see 
 static int repair_dash; /* GLWIRE_REPAIR_DASH=1: erase the squashed-text band under icon labels */
 int host_force_linear; /* GLWIRE_FORCE_LINEAR=1: sample textures linearly (dash experiment) */
 int host_skip_thin_lines; /* GLWIRE_SKIP_THIN_LINES=1: drop full-width 1-2 px quad draws (dash experiment) */
+static int keep_prev;   /* GLWIRE_KEEP_PREV=1: fill black holes from the previous picture */
+static int clean_green; /* GLWIRE_CLEAN_GREEN=1: publish (0,254,0) as black */
+/* The colour clears replayed during the frame being built, so keep_previous() can tell a region
+ * the guest deliberately cleared (trust it: black there is intentional) from one it never drew
+ * (a hole: copy the previous picture).  Rects are in picture pixels, x0,y0,x1,y1 exclusive. */
+int host_clear_rects_count;
+int host_clear_rects[64][4];
+void host_note_clear_rect(int x0, int y0, int x1, int y1);
 /* The picture of the frame before: the guest's uploaded panel is the surface as of the previous
  * present (measured: picture(N) == panel(N+1) for every animating frame of a --no-panel run), so
  * the acceptance that "the host drew what the guest drew" is read against this one. */
@@ -433,6 +441,104 @@ make_client_current(struct client *client)
  * every icon label (the same labels are clean at native 3x), which shows up as a dashed underline.
  * The band is a row (or two) of short runs, detached from the text above and from the icon below;
  * fill those rows with the colour beside the span, which is what a real iPhone shows: nothing. */
+/* GLWIRE_KEEP_PREV=1: the guest's 2x path draws only the damaged rectangles and leaves the rest
+ * of its surface black; on a real display those pixels keep the previous frame.  Keep the last
+ * picture and, wherever this one is black and the last was not, show the last -- which is what the
+ * panel would have shown.  Ghosting is the risk: a genuinely black area keeps its old content. */
+static unsigned char *keep_prev_picture;
+static size_t keep_prev_bytes;
+
+/* GLWIRE_CLEAN_GREEN=1: the guest's first frames carry a (0,254,0) block in the lower right (the
+ * panel memory before anything drew into it).  The static patch inherited it once; treat that colour
+ * as undefined and publish black there instead. */
+void
+host_note_clear_rect(int x0, int y0, int x1, int y1)
+{
+	if (host_clear_rects_count >= 64) {
+		return;
+	}
+	host_clear_rects[host_clear_rects_count][0] = x0;
+	host_clear_rects[host_clear_rects_count][1] = y0;
+	host_clear_rects[host_clear_rects_count][2] = x1;
+	host_clear_rects[host_clear_rects_count][3] = y1;
+	host_clear_rects_count++;
+}
+
+static int
+inside_a_clear(int x, int y)
+{
+	for (int i = 0; i < host_clear_rects_count; i++) {
+		if (x >= host_clear_rects[i][0] && x < host_clear_rects[i][2] &&
+		    y >= host_clear_rects[i][1] && y < host_clear_rects[i][3]) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void
+clean_green_pixels(unsigned char *picture, int width, int height)
+{
+	size_t bytes = (size_t) width * (size_t) height * 4;
+
+	for (size_t i = 0; i < bytes; i += 4) {
+		if (picture[i + 1] > 200 && picture[i] < 60 && picture[i + 2] < 60) {
+			picture[i] = 0;
+			picture[i + 1] = 0;
+			picture[i + 2] = 0;
+		}
+	}
+}
+
+static void
+keep_previous(unsigned char *picture, int width, int height)
+{
+	size_t bytes = (size_t) width * (size_t) height * 4;
+
+	if (keep_prev_picture == NULL || keep_prev_bytes != bytes) {
+		free(keep_prev_picture);
+		keep_prev_picture = malloc(bytes);
+		keep_prev_bytes = bytes;
+		if (keep_prev_picture == NULL) {
+			return;
+		}
+		memcpy(keep_prev_picture, picture, bytes);
+		{	/* GLWIRE_SEED_PATCH=1: start the kept picture from the static patch, so areas the guest
+			 * never draws (the dock's right end, the Search pill) have the panel's content instead of
+			 * staying black.  Later frames are kept from that seed. */
+			const char *seed = getenv("GLWIRE_SEED_PATCH");
+
+			if (seed != NULL && atoi(seed) != 0) {
+				const char *file = getenv("GLWIRE_STATIC_PATCH_FILE");
+				FILE *fp = file != NULL ? fopen(file, "rb") : NULL;
+
+				if (fp != NULL) {
+					if (fread(keep_prev_picture, 1, bytes, fp) == bytes) {
+						memcpy(picture, keep_prev_picture, bytes);
+					}
+					fclose(fp);
+				}
+			}
+		}
+		return;
+	}
+	for (size_t i = 0; i < bytes; i += 4) {
+		if (picture[i] <= 8 && picture[i + 1] <= 8 && picture[i + 2] <= 8 &&
+		    (keep_prev_picture[i] > 8 || keep_prev_picture[i + 1] > 8 || keep_prev_picture[i + 2] > 8)) {
+			int px = (int) ((i / 4) % (size_t) width), py = (int) ((i / 4) / (size_t) width);
+
+			if (inside_a_clear(px, py)) {
+				continue;   /* the guest cleared it on purpose */
+			}
+			picture[i] = keep_prev_picture[i];
+			picture[i + 1] = keep_prev_picture[i + 1];
+			picture[i + 2] = keep_prev_picture[i + 2];
+			picture[i + 3] = keep_prev_picture[i + 3];
+		}
+	}
+	memcpy(keep_prev_picture, picture, bytes);
+}
+
 static int
 repair_dash_rows(unsigned char *picture, int width, int height)
 {
@@ -4570,6 +4676,13 @@ serve_frame(struct client *client)
 	 * undrawn lower half, so it must not be pasted over a frame an app has drawn into: the demo
 	 * would then look frozen whatever the guest did.  Coverage = share of clearly lit pixels in
 	 * the lower 60% of the frame; below patch_min_coverage the patch is applied. */
+	if (clean_green) {
+		clean_green_pixels(picture, width, height);
+	}
+	if (keep_prev) {
+		keep_previous(picture, width, height);
+	}
+	host_clear_rects_count = 0;
 	if (repair_dash) {
 		repair_dash_rows(picture, width, height);
 	}
@@ -5173,6 +5286,16 @@ main(int argc, char **argv)
 		if (host_skip_thin_lines == 1) {
 			host_skip_thin_lines = 2;
 		}
+	}
+	{
+		const char *keep = getenv("GLWIRE_KEEP_PREV");
+
+		keep_prev = keep != NULL && atoi(keep) != 0;
+	}
+	{
+		const char *cg = getenv("GLWIRE_CLEAN_GREEN");
+
+		clean_green = cg != NULL && atoi(cg) != 0;
 	}
 
 	{

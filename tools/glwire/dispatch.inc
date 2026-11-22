@@ -42,6 +42,19 @@ switch (opcode) {
 	case 5: {
 		/* glClear */
 		GLuint a0 = wire_get_u32(r);
+		if (a0 & GL_COLOR_BUFFER_BIT) {
+			/* remember the rect so keep_previous() does not undo a deliberate clear */
+			GLint sc[4] = { 0, 0, 0, 0 };
+			GLint vp[4] = { 0, 0, 0, 0 };
+
+			glGetIntegerv(GL_SCISSOR_BOX, sc);
+			glGetIntegerv(GL_VIEWPORT, vp);
+			if (glIsEnabled(GL_SCISSOR_TEST) && sc[2] > 0 && sc[3] > 0) {
+				host_note_clear_rect(sc[0], sc[1], sc[0] + sc[2], sc[1] + sc[3]);
+			} else if (vp[2] > 0 && vp[3] > 0) {
+				host_note_clear_rect(vp[0], vp[1], vp[0] + vp[2], vp[1] + vp[3]);
+			}
+		}
 		/* GLWIRE_SKIP_CLEAR=1: the guest clears the drawable and then redraws only the damaged
 		 * rectangles, which on a real display leaves the rest of the panel as it was -- but a
 		 * replayed clear wipes the host's framebuffer and every undrawn area turns black (the
