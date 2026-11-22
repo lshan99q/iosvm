@@ -1,6 +1,6 @@
-# metalwire protocol v1 (Metal → Vulkan translation experiment)
+# metalwire protocol v3 (Metal → Vulkan translation experiment)
 
-Status: experimental, branch `experiment/metal-translation`. The wire is not a public ABI.
+Status: experimental, branch `iosvm` (WP-3). The wire is not a public ABI.
 
 The contract lives in `metalwire_protocol.h` (shared by both ends). This note explains the
 conventions the two implementations rely on.
@@ -115,14 +115,43 @@ The host now executes the render encoder instead of only decoding it. The mappin
 - **The encoder state that reaches a draw is the state of the set/draw stream.** A `MW_RENDER_DRAW`
   carries only its own arguments; the pipeline, buffers, textures, sampler, viewport and scissor
   are the ones applied before it. This is the Metal model and the host replays it.
-- **Two Metal setters are not on the wire yet.** CoreAnimation calls
-  `-[MTLRenderCommandEncoder setVertexBufferOffset:atIndex:]` and
-  `setFragmentBufferOffset:atIndex:` between its draws (the guest log records them as "asked and
-  not implemented"); their arguments are not serialized. The captured buffer shows what they mean:
-  the three quads sit at 336/576/816 and their index buffers at 528/768/1008, while the 13 sets
-  bind only the first offsets. A protocol 2 replay therefore executes every draw with the encoder's
-  last full binding — structurally correct, but not the recorded geometry. Closing this needs two
-  new opcodes (or a version 3 addition) and is WP-3 input; WP-2 deliberately does not change the
-  wire.
+- The two per-draw offset setters were protocol 2's known gap: WP-2 replayed every draw with the
+  encoder's last full binding. Protocol 3 adds them (§ "Protocol 3"), so the geometry a draw
+  executes is the geometry CoreAnimation recorded. The protocol 2 contract is otherwise unchanged
+  and still decodes.
 
-The protocol number stays 2: no message shape changed in WP-2.
+WP-2 did not change the wire; WP-3 adds opcodes and bumps the version, keeping v2 readable.
+
+
+## Protocol 3: the picture (WP-3)
+
+`MW_VERSION` is 3. The host accepts **2 and 3**: a version-2 connection (the synthetic blit client,
+the WP-2 spike) sees the same messages it did, and every acknowledgement echoes the version the
+peer opened with, so a v2 client's ack parser does not see a stray 3. No v2 message changed shape.
+
+Three additions close the gaps WP-2 left:
+
+| opcode | payload | meaning |
+|---|---|---|
+| `MW_RENDER_SET_VERTEX_BUFFER_OFFSET` 0x0076 / `..._FRAGMENT_BUFFER_OFFSET` 0x0077 | `mw_render_set_buffer_offset` | `-setVertexBufferOffset:atIndex:` / `-setFragmentBufferOffset:atIndex:`; **replaces** the offset of the buffer already bound at the index, exactly as Metal documents it. The host keeps the encoder state a draw copies. |
+| `MW_TEXTURE_REPLACE_REGION` 0x0022 | `mw_texture_replace_region` + the bytes | `-replaceRegion:mipmapLevel:withBytes:bytesPerRow:` and its `slice`/`bytesPerImage` sibling. The host queues the region and uploads it to the Vulkan image before the first draw of the frame; the R8Unorm path is the same path (`bytes_per_row` is in bytes, `bufferRowLength` in texels). |
+| `MW_TEXTURE_SET_IOSURFACE` 0x0023 | `mw_texture_set_iosurface` + `mw_segment[]` | the physical runs behind a texture that was created from a real IOSurface. The guest resolves them with `hakios_vtop` after faulting the surface's pages in; the host keeps them. |
+
+The execution consequences:
+
+* **The recorded geometry now reaches the draw.** In the boot's second frame the host logs
+  `index 49 at 528 v1=336`, `index 49 at 768 v1=576`, `index 49 at 1008 v1=816` — the three quads
+  at 336/576/816 and the indices at 528/768/1008 that WP-2 could only infer. The first frame of the
+  same boot carries an extra pair of setters (`f1=784`, `v1=1056`, index 1248): CoreAnimation
+  records what it records, and the host applies each one.
+* **The two offset setters count as sets.** A recorded encoder now says 16 sets (boot frame 2) or
+  17 (boot frame 1 en route to the same three draws) rather than 13; the two extra are Metal's setter
+  calls, which WP-2 could not serialize.
+* **Texture content is real.** The layer image (`129x158 BGRA8`, 81,528 bytes) and the luma ramp
+  (`128x1 R8Unorm`, 128 bytes) arrive through `MW_TEXTURE_REPLACE_REGION`; `std_vert1_lpf` /
+  `luma_boost_lpf` are no longer fed by an inferred empty ramp.
+* **The IOSurface is real.** The display surface (750x1624 BGRA8, row 3072 or 3008) is allocated in
+  the guest, its base address is mapped, and `hakios_vtop` resolves it to ~300 physical segments
+  (~5 MB); the host writes the executed picture into those bytes and reads them back for the browser.
+  A guest that cannot resolve the surface sends `segment_count = 0`; the host keeps the metadata and
+  publishes its Vulkan read-back, so a missing vtop answer is a fallback, not a failure.

@@ -114,6 +114,35 @@ struct mw_image {
     VkDeviceMemory readback_memory;
     void *readback_mapped;
     int dst_this_frame;
+    /* WP-3: a texture created from a real IOSurface. bytes_per_row is the surface's stride (it
+     * may be larger than width*4); the segments are the guest-physical runs behind it, so the host
+     * can write the rendered picture into the surface and read it back by reference. */
+    int has_surface;
+    uint32_t surface_bytes_per_row;
+    uint32_t surface_alloc_size;
+    uint32_t surface_segment_count;
+    struct mw_segment *surface_segments;
+};
+
+/* One queued MW_TEXTURE_REPLACE_REGION: the guest handed over the bytes recursively; the host
+ * uploads them to the image at the start of the next executed frame and frees this record. */
+struct mw_pending_replace {
+    uint32_t texture_id;
+    uint32_t mipmap_level;
+    uint32_t slice;
+    uint32_t origin_x;
+    uint32_t origin_y;
+    uint32_t origin_z;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t bytes_per_row;
+    uint32_t bytes_per_image;
+    uint32_t length;
+    unsigned char *bytes;
+    VkBuffer staging;
+    VkDeviceMemory staging_memory;
+    void *staging_mapped;
 };
 
 struct mw_copy {
@@ -345,6 +374,15 @@ struct mw_server {
     unsigned char *ram;
     size_t ram_size;
     uint64_t ram_base;
+    int ram_writable;
+
+    /* WP-3: texture content and IOSurface binding queued by the guest, applied on the next
+     * executed render frame. */
+    struct mw_pending_replace *replaces;
+    size_t replace_count;
+    size_t replace_cap;
+    unsigned char *surface_scratch;
+    size_t surface_scratch_size;
 
     struct mw_shm shm;
     FILE *csv;
@@ -371,6 +409,7 @@ struct mw_server {
 
     int done;
     int verbose;
+    uint16_t peer_version; /* the version the guest's first message carried; acks echo it */
 };
 
 static volatile sig_atomic_t g_stop;
@@ -1295,6 +1334,7 @@ static void mw_image_destroy(struct mw_server *s, struct mw_image *image)
         vkDestroyImage(s->vk.device, image->image, NULL);
     if (image->memory != VK_NULL_HANDLE)
         vkFreeMemory(s->vk.device, image->memory, NULL);
+    free(image->surface_segments);
     free(image);
 }
 
@@ -1611,6 +1651,155 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
                  image->id, image->width, image->height, image->format, request->usage);
         snprintf(name, sizeof(name), "texture-%u.txt", image->id);
         mw_dump_file(name, text, strlen(text));
+    }
+    return 0;
+}
+
+/* WP-3: MW_TEXTURE_REPLACE_REGION. The bytes arrive inline; they are queued and uploaded at the
+ * start of the next executed render frame. CoreAnimation uploads a layer image once and samples it
+ * later in the same frame, so a queue-at-receive/apply-at-frame-start order is the recorded order
+ * for every sampling draw. */
+static int mw_handle_texture_replace(struct mw_server *s,
+                                     const struct mw_texture_replace_region *request,
+                                     const unsigned char *bytes, uint32_t body_length)
+{
+    struct mw_image *image;
+    struct mw_pending_replace *replace;
+    uint32_t bpp;
+    uint32_t row_bytes;
+
+    image = mw_image_find(s, request->texture_id);
+    if (image == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "replaceRegion names unknown texture %u",
+                      request->texture_id);
+        return -1;
+    }
+    if (request->length != body_length) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "replaceRegion length %u, %u payload byte(s)",
+                      request->length, body_length);
+        return -1;
+    }
+    if (request->mipmap_level != 0 || request->slice != 0 || request->depth > 1) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "replaceRegion level %u slice %u depth %u",
+                      request->mipmap_level, request->slice, request->depth);
+        return -1;
+    }
+    bpp = mw_format_bytes(image->format);
+    row_bytes = request->bytes_per_row;
+    if (request->width == 0 || request->height == 0 || row_bytes == 0 || row_bytes % bpp != 0 ||
+        row_bytes < request->width * bpp ||
+        (uint64_t)request->origin_x + request->width > image->width ||
+        (uint64_t)request->origin_y + request->height > image->height) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                      "replaceRegion texture %u: %ux%u at %u,%u row %u does not fit %ux%u",
+                      request->texture_id, request->width, request->height, request->origin_x,
+                      request->origin_y, row_bytes, image->width, image->height);
+        return -1;
+    }
+    replace = realloc(s->replaces, (s->replace_count + 1) * sizeof(*replace));
+    if (replace == NULL) {
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "out of host memory for a texture replacement");
+        return -1;
+    }
+    s->replaces = replace;
+    replace = &s->replaces[s->replace_count];
+    memset(replace, 0, sizeof(*replace));
+    replace->texture_id = request->texture_id;
+    replace->mipmap_level = request->mipmap_level;
+    replace->slice = request->slice;
+    replace->origin_x = request->origin_x;
+    replace->origin_y = request->origin_y;
+    replace->origin_z = request->origin_z;
+    replace->width = request->width;
+    replace->height = request->height;
+    replace->depth = request->depth != 0 ? request->depth : 1;
+    replace->bytes_per_row = row_bytes;
+    replace->bytes_per_image = request->bytes_per_image;
+    replace->length = request->length;
+    replace->bytes = malloc(request->length != 0 ? request->length : 1);
+    if (replace->bytes == NULL) {
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "out of host memory for %u texture bytes",
+                      request->length);
+        return -1;
+    }
+    memcpy(replace->bytes, bytes, request->length);
+    s->replace_count++;
+    mw_log("render: texture %u: replaceRegion %ux%u at %u,%u row %u (%u byte(s)) queued",
+           request->texture_id, request->width, request->height, request->origin_x,
+           request->origin_y, row_bytes, request->length);
+    return 0;
+}
+
+/* WP-3: MW_TEXTURE_SET_IOSURFACE. The guest hands over the physical runs behind a texture's real
+ * IOSurface. Keeping them costs 16 bytes a run; the execution half uses them to put the picture
+ * into the guest's surface and read it back by reference. A metadata-only message (0 segments)
+ * means the guest could not resolve them, and the host keeps its own read-back path. */
+static int mw_handle_texture_set_iosurface(struct mw_server *s,
+                                           const struct mw_texture_set_iosurface *request,
+                                           const unsigned char *segments_data, uint32_t length)
+{
+    struct mw_image *image;
+    const struct mw_segment *segments = (const struct mw_segment *)segments_data;
+    uint64_t total = 0;
+
+    image = mw_image_find(s, request->texture_id);
+    if (image == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "IOSurface binding names unknown texture %u",
+                      request->texture_id);
+        return -1;
+    }
+    if (request->segment_count > 8192 ||
+        length != (uint64_t)request->segment_count * sizeof(struct mw_segment)) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "IOSurface binding: %u segment(s) in %u body byte(s)",
+                      request->segment_count, length);
+        return -1;
+    }
+    if (request->bytes_per_row < image->width * mw_format_bytes(image->format)) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "IOSurface row %u is narrower than texture %u",
+                      request->bytes_per_row, request->texture_id);
+        return -1;
+    }
+    for (uint32_t i = 0; i < request->segment_count; i++) {
+        if (s->ram != NULL &&
+            ((uint64_t)segments[i].pa < s->ram_base ||
+             (uint64_t)segments[i].pa - s->ram_base + segments[i].len > s->ram_size)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                          "IOSurface segment %u at %#" PRIx64 " is outside the RAM file", i,
+                          (uint64_t)segments[i].pa);
+            return -1;
+        }
+        total += segments[i].len;
+    }
+    if (request->segment_count != 0 && total != request->alloc_size) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                      "IOSurface binding covers %" PRIu64 " byte(s), alloc size %u", total,
+                      request->alloc_size);
+        return -1;
+    }
+    free(image->surface_segments);
+    image->surface_segments = NULL;
+    image->surface_segment_count = request->segment_count;
+    image->surface_bytes_per_row = request->bytes_per_row;
+    image->surface_alloc_size = request->alloc_size;
+    image->has_surface = request->segment_count != 0;
+    if (request->segment_count != 0) {
+        image->surface_segments =
+            malloc((size_t)request->segment_count * sizeof(struct mw_segment));
+        if (image->surface_segments == NULL) {
+            image->surface_segment_count = 0;
+            image->has_surface = 0;
+            mw_frame_fail(s, MW_STATUS_NO_MEMORY, "out of host memory for IOSurface segments");
+            return -1;
+        }
+        memcpy(image->surface_segments, segments,
+               (size_t)request->segment_count * sizeof(struct mw_segment));
+        mw_log("render: texture %u: real IOSurface, row %u, %u byte(s) in %u physical segment(s)",
+               request->texture_id, request->bytes_per_row, request->alloc_size,
+               request->segment_count);
+    } else {
+        mw_log("render: texture %u: IOSurface metadata only (row %u, %u byte(s)); the guest could "
+               "not resolve the surface, the host will publish its own read-back",
+               request->texture_id, request->bytes_per_row, request->alloc_size);
     }
     return 0;
 }
@@ -2052,6 +2241,42 @@ static int mw_handle_render_set_buffer(struct mw_server *s, const char *what,
     return 0;
 }
 
+static int mw_handle_render_set_buffer_offset(struct mw_server *s, const char *what,
+                                              const struct mw_render_set_buffer_offset *request)
+{
+    struct mw_render_encoder_state *enc = &s->frame.encoder;
+
+    if (!s->frame.render_mode) {
+        mw_log("warning: %s outside a render encoder ignored", what);
+        return 0;
+    }
+    s->frame.render_set_count++;
+    if (request->index < MW_MAX_RENDER_BINDINGS && enc->active) {
+        int vertex = strncmp(what, "vertex", 6) == 0;
+
+        if (vertex) {
+            if (enc->vertex_buffer_id[request->index] == 0) {
+                mw_log("warning: %s index %u has no buffer bound; the offset is kept for a "
+                       "later draw anyway",
+                       what, request->index);
+            }
+            enc->vertex_buffer_offset[request->index] = request->offset;
+        } else {
+            if (enc->fragment_buffer_id[request->index] == 0) {
+                mw_log("warning: %s index %u has no buffer bound; the offset is kept for a "
+                       "later draw anyway",
+                       what, request->index);
+            }
+            enc->fragment_buffer_offset[request->index] = request->offset;
+        }
+    }
+    if (s->render_frames_seen == 0 || s->verbose) {
+        mw_log("CA set: %s offset %" PRIu64 " index %u (replaces the bound buffer's offset)", what,
+               (uint64_t)request->offset, request->index);
+    }
+    return 0;
+}
+
 static int mw_handle_render_set_texture(struct mw_server *s, const char *what,
                                         const struct mw_render_set_texture *request)
 {
@@ -2200,6 +2425,26 @@ static int mw_handle_render_draw(struct mw_server *s, const struct mw_render_dra
                (request->flags & MW_DRAW_INSTANCED) ? " instanced" : "",
                (uint64_t)request->index_count, (uint64_t)request->vertex_count,
                request->instance_count, (int64_t)request->base_vertex);
+        {
+            char geometry[512];
+            size_t at = 0;
+
+            geometry[0] = '\0';
+            for (uint32_t b = 0; b < MW_MAX_RENDER_BINDINGS; b++) {
+                if (enc->vertex_buffer_id[b] != 0 && at < sizeof(geometry) - 32) {
+                    at += (size_t)snprintf(geometry + at, sizeof(geometry) - at,
+                                           " v%u=%" PRIu64, b, enc->vertex_buffer_offset[b]);
+                }
+            }
+            for (uint32_t b = 0; b < MW_MAX_RENDER_BINDINGS; b++) {
+                if (enc->fragment_buffer_id[b] != 0 && at < sizeof(geometry) - 32) {
+                    at += (size_t)snprintf(geometry + at, sizeof(geometry) - at,
+                                           " f%u=%" PRIu64, b, enc->fragment_buffer_offset[b]);
+                }
+            }
+            mw_log("CA draw: geometry: index %u at %" PRIu64 "%s", request->index_buffer,
+                   (uint64_t)request->index_buffer_offset, geometry);
+        }
     }
     if (s->frame.draw_count >= MW_MAX_RENDER_DRAWS) {
         mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "more than %d draws in one frame",
@@ -3129,6 +3374,198 @@ static void mw_render_push_offsets(struct mw_server *s, VkCommandBuffer command,
                        sizeof(offsets), offsets);
 }
 
+/* WP-3: apply the guest's queued texture content to the Vulkan images. The guest names a region
+ * and a stride; Vulkan's bufferRowLength is in texels, so the same stride is expressed that way.
+ * Nothing here knows about frames or draws: the content is uploaded before the first draw of the
+ * frame that asked for it, which is the order CoreAnimation's upload/sample sequence needs. */
+static int mw_apply_pending_replaces(struct mw_server *s, VkCommandBuffer command)
+{
+    for (size_t i = 0; i < s->replace_count; i++) {
+        struct mw_pending_replace *replace = &s->replaces[i];
+        struct mw_image *image = mw_image_find(s, replace->texture_id);
+        VkBufferImageCopy region = {0};
+        uint32_t bpp;
+        VkImageLayout old_layout;
+        VkAccessFlags src_access = 0;
+        VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+        if (image == NULL || replace->length == 0)
+            continue;
+        bpp = mw_format_bytes(image->format);
+        if (replace->bytes_per_row % bpp != 0)
+            return -1;
+        if (mw_create_host_buffer(&s->vk, replace->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                  &replace->staging, &replace->staging_memory,
+                                  &replace->staging_mapped) < 0) {
+            mw_log("render: texture %u: staging buffer for %u replaceRegion byte(s) failed",
+                   replace->texture_id, replace->length);
+            return -1;
+        }
+        memcpy(replace->staging_mapped, replace->bytes, replace->length);
+        old_layout = image->layout;
+        if (old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            src_access = VK_ACCESS_SHADER_READ_BIT;
+            src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+            src_access = VK_ACCESS_TRANSFER_READ_BIT;
+            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        } else if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        }
+        mw_cmd_image_barrier(command, image->image, old_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             src_access, VK_ACCESS_TRANSFER_WRITE_BIT, src_stage,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT);
+        image->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        region.bufferOffset = 0;
+        region.bufferRowLength = replace->bytes_per_row / bpp;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = replace->mipmap_level;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset.x = (int32_t)replace->origin_x;
+        region.imageOffset.y = (int32_t)replace->origin_y;
+        region.imageOffset.z = (int32_t)replace->origin_z;
+        region.imageExtent.width = replace->width;
+        region.imageExtent.height = replace->height;
+        region.imageExtent.depth = replace->depth;
+        vkCmdCopyBufferToImage(command, replace->staging, image->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+    return 0;
+}
+
+static void mw_drop_pending_replaces(struct mw_server *s)
+{
+    for (size_t i = 0; i < s->replace_count; i++) {
+        struct mw_pending_replace *replace = &s->replaces[i];
+
+        if (replace->staging_mapped != NULL)
+            vkUnmapMemory(s->vk.device, replace->staging_memory);
+        if (replace->staging != VK_NULL_HANDLE)
+            vkDestroyBuffer(s->vk.device, replace->staging, NULL);
+        if (replace->staging_memory != VK_NULL_HANDLE)
+            vkFreeMemory(s->vk.device, replace->staging_memory, NULL);
+        free(replace->bytes);
+    }
+    s->replace_count = 0;
+}
+
+/* WP-3: the real-IOSurface half. Every byte of the surface is reachable through the guest's
+ * physical segments; the host writes the rendered picture into those bytes (the guest's real
+ * surface then holds the picture) and reads them back for the browser. This is the same
+ * by-reference idea MW_UPLOAD_BUFFER_PHYS uses in the other direction. */
+static int mw_surface_ram_write(struct mw_server *s, const struct mw_image *image,
+                                uint64_t offset, const unsigned char *bytes, uint32_t length)
+{
+    uint32_t i = 0;
+    uint64_t base = 0;
+
+    if (!image->has_surface || !s->ram_writable || s->ram == NULL)
+        return -1;
+    if (offset + length > image->surface_alloc_size)
+        return -1;
+    while (i < image->surface_segment_count && offset >= base + image->surface_segments[i].len) {
+        base += image->surface_segments[i].len;
+        i++;
+    }
+    while (length > 0 && i < image->surface_segment_count) {
+        uint64_t in_segment = offset - base;
+        uint64_t room = image->surface_segments[i].len - in_segment;
+        uint32_t take = room < length ? (uint32_t)room : length;
+
+        memcpy(s->ram + (size_t)(image->surface_segments[i].pa - s->ram_base) + in_segment, bytes,
+               take);
+        bytes += take;
+        offset += take;
+        length -= take;
+        base += image->surface_segments[i].len;
+        i++;
+    }
+    return length == 0 ? 0 : -1;
+}
+
+static int mw_surface_ram_read(struct mw_server *s, const struct mw_image *image,
+                               uint64_t offset, unsigned char *bytes, uint32_t length)
+{
+    uint32_t i = 0;
+    uint64_t base = 0;
+
+    if (!image->has_surface || s->ram == NULL)
+        return -1;
+    if (offset + length > image->surface_alloc_size)
+        return -1;
+    while (i < image->surface_segment_count && offset >= base + image->surface_segments[i].len) {
+        base += image->surface_segments[i].len;
+        i++;
+    }
+    while (length > 0 && i < image->surface_segment_count) {
+        uint64_t in_segment = offset - base;
+        uint64_t room = image->surface_segments[i].len - in_segment;
+        uint32_t take = room < length ? (uint32_t)room : length;
+
+        memcpy(bytes, s->ram + (size_t)(image->surface_segments[i].pa - s->ram_base) + in_segment,
+               take);
+        bytes += take;
+        offset += take;
+        length -= take;
+        base += image->surface_segments[i].len;
+        i++;
+    }
+    return length == 0 ? 0 : -1;
+}
+
+/* Put the tight width*4 read-back into the surface's row-padded layout and read it back. Returns a
+ * host-visible copy of what the guest's surface now contains, or NULL when the surface or the
+ * writable RAM file is not there (the caller then publishes the Vulkan read-back). */
+static unsigned char *mw_surface_roundtrip(struct mw_server *s, struct mw_image *image)
+{
+    uint32_t row_bytes;
+    unsigned char *copy;
+
+    if (!image->has_surface || !s->ram_writable || image->readback_mapped == NULL)
+        return NULL;
+    row_bytes = image->width * 4;
+    if (image->surface_bytes_per_row < row_bytes ||
+        image->surface_alloc_size < (uint64_t)image->surface_bytes_per_row * image->height)
+        return NULL;
+    for (uint32_t y = 0; y < image->height; y++) {
+        const unsigned char *row = (const unsigned char *)image->readback_mapped +
+                                   (uint64_t)y * row_bytes;
+
+        if (mw_surface_ram_write(s, image, (uint64_t)y * image->surface_bytes_per_row, row,
+                                 row_bytes) != 0)
+            return NULL;
+    }
+    copy = mw_scratch_resize(&s->surface_scratch, &s->surface_scratch_size, image->bytes);
+    if (copy == NULL)
+        return NULL;
+    for (uint32_t y = 0; y < image->height; y++) {
+        if (mw_surface_ram_read(s, image, (uint64_t)y * image->surface_bytes_per_row,
+                                copy + (uint64_t)y * row_bytes, row_bytes) != 0)
+            return NULL;
+    }
+    if (memcmp(copy, image->readback_mapped, image->bytes) != 0) {
+        size_t differences = 0;
+
+        for (size_t i = 0; i < image->bytes; i++) {
+            if (copy[i] != ((const unsigned char *)image->readback_mapped)[i])
+                differences++;
+        }
+        mw_log("render: IOSurface round trip differs in %zu byte(s) of %u", differences,
+               image->bytes);
+    } else {
+        mw_log("render: picture written into the guest's real IOSurface and read back by "
+               "reference (%u byte(s), %u segment(s), row %u)",
+               image->bytes, image->surface_segment_count, image->surface_bytes_per_row);
+    }
+    return copy;
+}
+
 static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame,
                                struct mw_frame_result *result)
 {
@@ -3189,6 +3626,10 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
     if (vr != VK_SUCCESS) {
         mw_vk_result_log("vkBeginCommandBuffer", vr);
         return MW_STATUS_VULKAN;
+    }
+    if (mw_apply_pending_replaces(s, command) < 0) {
+        mw_frame_fail(s, MW_STATUS_VULKAN, "cannot upload the queued texture content");
+        status = MW_STATUS_VULKAN;
     }
 
     for (uint32_t d = 0; d < frame->draw_count && status == MW_STATUS_OK; d++) {
@@ -3538,21 +3979,44 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
                frame->seq, frame->draw_count, target->id, target->width, target->height,
                result->crc, nonzero, count);
     }
-    if (s->shm.path != NULL && s->shm.path[0] != '\0' && !s->shm.failed) {
-        if (mw_shm_prepare(&s->shm, target->width, target->height) == 0) {
-            const unsigned char *bgra = target->readback_mapped;
+    {
+        /* WP-3: when the target is a real IOSurface, the picture goes into the guest's surface
+         * first and the browser copy is read out of that memory by reference. Otherwise the
+         * Vulkan read-back is the picture, exactly as WP-2 left it. */
+        unsigned char *surface_copy = mw_surface_roundtrip(s, target);
+        const unsigned char *bgra = surface_copy != NULL ? surface_copy : target->readback_mapped;
 
-            if (!mw_format_is_bgra(target->format)) {
-                unsigned char *scratch = mw_scratch_resize(&s->bgra_scratch, &s->bgra_scratch_size,
-                                                           target->bytes);
+        if (!mw_format_is_bgra(target->format)) {
+            unsigned char *scratch = mw_scratch_resize(&s->bgra_scratch, &s->bgra_scratch_size,
+                                                       target->bytes);
 
-                if (scratch != NULL) {
-                    mw_pixels_to_bgra(target->readback_mapped, target->bytes, target->format,
-                                      scratch);
-                    bgra = scratch;
+            if (scratch != NULL) {
+                mw_pixels_to_bgra(bgra, target->bytes, target->format, scratch);
+                bgra = scratch;
+            }
+        }
+        if (s->shm.path != NULL && s->shm.path[0] != '\0' && !s->shm.failed) {
+            if (mw_shm_prepare(&s->shm, target->width, target->height) == 0)
+                mw_shm_publish(&s->shm, bgra);
+        }
+        if (s->out_dir != NULL) {
+            unsigned char *rgb = mw_scratch_resize(&s->rgb_scratch, &s->rgb_scratch_size,
+                                                   (size_t)target->width * target->height * 3);
+            char path[4096];
+
+            if (rgb != NULL) {
+                mw_pixels_to_rgb(bgra, target->width, target->height, target->format, rgb);
+                snprintf(path, sizeof(path), "%s/frame-%06u.ppm", s->out_dir,
+                         (unsigned)s->frames_done);
+                if (mw_write_ppm(path, rgb, target->width, target->height) < 0)
+                    mw_log("warning: cannot write %s", path);
+                if (s->png_every > 0 && s->frames_done % (uint64_t)s->png_every == 0) {
+                    snprintf(path, sizeof(path), "%s/frame-%06u.png", s->out_dir,
+                             (unsigned)s->frames_done);
+                    if (mw_write_png(path, rgb, target->width, target->height) < 0)
+                        mw_log("warning: cannot write %s", path);
                 }
             }
-            mw_shm_publish(&s->shm, bgra);
         }
     }
     return MW_STATUS_OK;
@@ -3659,7 +4123,7 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
         mw_log("warning: MW_FRAME_END(%" PRIu64 ") without MW_FRAME_BEGIN", request->seq);
         memset(&ack, 0, sizeof(ack));
         ack.magic = MW_ACK_MAGIC;
-        ack.version = MW_VERSION;
+        ack.version = s->peer_version != 0 ? s->peer_version : MW_VERSION;
         ack.status = MW_STATUS_BAD_COMMAND;
         ack.seq = request->seq;
         ack.guest_t_commit_ns = request->guest_t_encoded_ns;
@@ -3691,9 +4155,10 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
 
         memset(&result, 0, sizeof(result));
         status = mw_run_render_frame(s, frame, &result);
+        mw_drop_pending_replaces(s);
         memset(&ack, 0, sizeof(ack));
         ack.magic = MW_ACK_MAGIC;
-        ack.version = MW_VERSION;
+        ack.version = s->peer_version != 0 ? s->peer_version : MW_VERSION;
         ack.status = (uint16_t)status;
         ack.seq = frame->seq;
         ack.guest_t_commit_ns = frame->guest_t_encoded_ns;
@@ -3726,6 +4191,7 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
     memset(&timing, 0, sizeof(timing));
     timing.recv_ns = t_end > frame->begin_ns ? t_end - frame->begin_ns : 0;
     status = mw_run_frame(s, frame, &result);
+    mw_drop_pending_replaces(s);
     if (status == MW_STATUS_OK && !result.crc_ok)
         status = MW_STATUS_CRC_MISMATCH;
 
@@ -3740,7 +4206,7 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
 
     memset(&ack, 0, sizeof(ack));
     ack.magic = MW_ACK_MAGIC;
-    ack.version = MW_VERSION;
+    ack.version = s->peer_version != 0 ? s->peer_version : MW_VERSION;
     ack.status = (uint16_t)status;
     ack.seq = frame->seq;
     ack.guest_t_commit_ns = frame->guest_t_encoded_ns;
@@ -3850,6 +4316,10 @@ static const char *mw_type_name(uint16_t type)
         return "MW_CREATE_TEXTURE";
     case MW_DESTROY_TEXTURE:
         return "MW_DESTROY_TEXTURE";
+    case MW_TEXTURE_REPLACE_REGION:
+        return "MW_TEXTURE_REPLACE_REGION";
+    case MW_TEXTURE_SET_IOSURFACE:
+        return "MW_TEXTURE_SET_IOSURFACE";
     case MW_COPY_BUFFER_TO_TEXTURE:
         return "MW_COPY_BUFFER_TO_TEXTURE";
     case MW_FILL_BUFFER:
@@ -3867,15 +4337,20 @@ static const char *mw_type_name(uint16_t type)
     case MW_RENDER_SET_DEPTH_STENCIL:
         return "MW_RENDER_SET_DEPTH_STENCIL";
     case MW_RENDER_SET_VERTEX_BUFFER:
-        return "MW_RENDER_SET_VERTEX_BUFFER";
+    case MW_RENDER_SET_FRAGMENT_BUFFER:
+        return type == MW_RENDER_SET_VERTEX_BUFFER ? "MW_RENDER_SET_VERTEX_BUFFER"
+                                                   : "MW_RENDER_SET_FRAGMENT_BUFFER";
+    case MW_RENDER_SET_VERTEX_BUFFER_OFFSET:
+    case MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET:
+        return type == MW_RENDER_SET_VERTEX_BUFFER_OFFSET
+                   ? "MW_RENDER_SET_VERTEX_BUFFER_OFFSET"
+                   : "MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET";
     case MW_RENDER_SET_VERTEX_BYTES:
         return "MW_RENDER_SET_VERTEX_BYTES";
     case MW_RENDER_SET_VERTEX_TEXTURE:
         return "MW_RENDER_SET_VERTEX_TEXTURE";
     case MW_RENDER_SET_VERTEX_SAMPLER:
         return "MW_RENDER_SET_VERTEX_SAMPLER";
-    case MW_RENDER_SET_FRAGMENT_BUFFER:
-        return "MW_RENDER_SET_FRAGMENT_BUFFER";
     case MW_RENDER_SET_FRAGMENT_BYTES:
         return "MW_RENDER_SET_FRAGMENT_BYTES";
     case MW_RENDER_SET_FRAGMENT_TEXTURE:
@@ -3991,6 +4466,31 @@ static int mw_handle_message(struct mw_server *s, uint16_t type, const unsigned 
         }
         memcpy(&request, payload, sizeof(request));
         mw_handle_create_texture(s, &request);
+        break;
+    }
+    case MW_TEXTURE_REPLACE_REGION: {
+        struct mw_texture_replace_region request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_TEXTURE_REPLACE_REGION (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_texture_replace(s, &request, payload + sizeof(request), len - sizeof(request));
+        break;
+    }
+    case MW_TEXTURE_SET_IOSURFACE: {
+        struct mw_texture_set_iosurface request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "short MW_TEXTURE_SET_IOSURFACE (%u bytes)",
+                          len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_texture_set_iosurface(s, &request, payload + sizeof(request),
+                                        len - sizeof(request));
         break;
     }
     case MW_DESTROY_TEXTURE: {
@@ -4156,6 +4656,22 @@ static int mw_handle_message(struct mw_server *s, uint16_t type, const unsigned 
                                     &request);
         break;
     }
+    case MW_RENDER_SET_VERTEX_BUFFER_OFFSET:
+    case MW_RENDER_SET_FRAGMENT_BUFFER_OFFSET: {
+        struct mw_render_set_buffer_offset request;
+
+        if (len < sizeof(request)) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND,
+                          "short MW_RENDER_SET_*_BUFFER_OFFSET (%u bytes)", len);
+            break;
+        }
+        memcpy(&request, payload, sizeof(request));
+        mw_handle_render_set_buffer_offset(
+            s, type == MW_RENDER_SET_VERTEX_BUFFER_OFFSET ? "vertex buffer offset"
+                                                          : "fragment buffer offset",
+            &request);
+        break;
+    }
     case MW_RENDER_SET_VERTEX_BYTES:
     case MW_RENDER_SET_FRAGMENT_BYTES: {
         struct mw_render_set_bytes request;
@@ -4293,10 +4809,16 @@ static void mw_serve_client(struct mw_server *s)
         received = mw_recv_full(s->client_fd, &header, sizeof(header));
         if (received <= 0)
             break;
-        if (header.magic != MW_MAGIC || header.version != MW_VERSION) {
+        if (header.magic != MW_MAGIC || header.version < 2 || header.version > MW_VERSION) {
             mw_log("protocol: bad header (magic 0x%08x version %u); closing the connection",
                    header.magic, header.version);
             break;
+        }
+        if (s->peer_version == 0 || s->peer_version != header.version) {
+            if (s->peer_version != 0 && s->peer_version != header.version)
+                mw_log("protocol: peer switched from version %u to %u; closing the connection",
+                       s->peer_version, header.version);
+            s->peer_version = header.version;
         }
         if (header.length > MW_MAX_MESSAGE) {
             mw_log("protocol: message length %u over the %u-byte limit; closing the connection",
@@ -4542,7 +5064,10 @@ static void mw_server_cleanup(struct mw_server *s)
         mw_pipeline_destroy(s, s->pipelines[0]);
     while (s->sampler_count > 0)
         mw_sampler_state_destroy(s, s->samplers[0]);
+    mw_drop_pending_replaces(s);
     mw_render_vk_fini(s);
+    free(s->replaces);
+    free(s->surface_scratch);
     free(s->images);
     free(s->buffers);
     free(s->pipelines);
@@ -4736,8 +5261,13 @@ int main(int argc, char **argv)
     server.crc_stride = (uint32_t)crc_stride;
     if (ram_path != NULL && ram_path[0] != '\0') {
         struct stat st;
-        int fd = open(ram_path, O_RDONLY);
+        int fd = open(ram_path, O_RDWR);
+        int prot = PROT_READ | PROT_WRITE;
 
+        if (fd < 0) {
+            fd = open(ram_path, O_RDONLY);
+            prot = PROT_READ;
+        }
         if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0) {
             mw_log("--ram %s: cannot open or size the RAM file: %s", ram_path, strerror(errno));
             if (fd >= 0)
@@ -4745,15 +5275,18 @@ int main(int argc, char **argv)
             return 1;
         }
         server.ram_size = (size_t)st.st_size;
-        server.ram = mmap(NULL, server.ram_size, PROT_READ, MAP_SHARED, fd, 0);
+        server.ram = mmap(NULL, server.ram_size, prot, MAP_SHARED, fd, 0);
         close(fd);
         if (server.ram == MAP_FAILED) {
             mw_log("--ram %s: mmap failed: %s", ram_path, strerror(errno));
             server.ram = NULL;
             return 1;
         }
-        mw_log("ram: %s mapped, %zu bytes, guest physical base %#" PRIx64, ram_path,
-               server.ram_size, server.ram_base);
+        server.ram_writable = (prot & PROT_WRITE) != 0;
+        mw_log("ram: %s mapped, %zu bytes, guest physical base %#" PRIx64 " (%s)", ram_path,
+               server.ram_size, server.ram_base,
+               server.ram_writable ? "read/write: IOSurface write-back is available"
+                                   : "read-only: the picture falls back to the host read-back");
     }
     mw_crc32_init();
     signal(SIGPIPE, SIG_IGN);
