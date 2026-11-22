@@ -1,4 +1,4 @@
-# metalwire host — executing a guest Metal frame's blits on Vulkan
+# metalwire host — executing a guest Metal frame on Vulkan (blits, and CA's render encoder)
 
 Status: experimental, branch `experiment/metal-translation`. This is the host half of the
 metalwire experiment (see [`PROTOCOL.md`](PROTOCOL.md) and
@@ -22,6 +22,12 @@ frame as a real GPU transfer (buffer → image → read-back buffer), checks the
 the guest's, publishes the picture in the same shared-memory format `tools/glwire` already uses, and
 answers one acknowledgement per frame. There is no window, no surface and no swapchain.
 
+Since WP-2 it also executes **protocol 2 render encoders**: the wire's three CA pipelines are
+created as real Vulkan pipelines from the four hand-written base functions in
+[`shaders/`](shaders/), and the recorded draws are replayed with the wire's buffers, textures,
+sampler, viewport and scissor. The blit path is unchanged and is what `make test` still measures;
+see [`../../docs/stage32-ca-metal-execute.md`](../../docs/stage32-ca-metal-execute.md).
+
 ## Files
 
 | file | what it is |
@@ -31,6 +37,9 @@ answers one acknowledgement per frame. There is no window, no surface and no swa
 | [`metalwire_test.py`](metalwire_test.py) | the test behind `make test`; runs the host on lavapipe and checks frames, CRC, CSV, SHM and image files |
 | [`Makefile`](Makefile) | `make`, `make test`, `make clean` |
 | [`metalwire_protocol.h`](metalwire_protocol.h), [`PROTOCOL.md`](PROTOCOL.md) | the wire contract, shared with the guest |
+| [`shaders/`](shaders/) | the four WP-2 Vulkan GLSL base functions and their provenance note |
+| [`embed_spirv.py`](embed_spirv.py) | build step: embeds the compiled SPIR-V into `build/wp2_shaders.h` |
+| [`wp2_spike.py`](wp2_spike.py) | the WP-2 spike: four composition variants on lavapipe, PASS/FAIL |
 
 ## Build
 
@@ -38,12 +47,15 @@ Needs a C compiler, the Vulkan loader and headers (`libvulkan-dev`) and Python 3
 only) for the tools:
 
 ```sh
-make            # builds ./metalwire_host
+make            # builds the four shaders (glslangValidator + spirv-val), then ./metalwire_host
+make shaders    # only the SPIR-V and the generated build/wp2_shaders.h
 make test       # builds, then runs the lavapipe test (skips cleanly without lavapipe)
+make spike      # builds, then runs the four-variant WP-2 spike on lavapipe
 make clean
 ```
 
-The host links `-lvulkan`; it uses no Vulkan device extension. `VK_EXT_pci_bus_info` is only queried
+It needs `glslangValidator` (and `spirv-val`) at build time; the host itself needs only the Vulkan
+loader. The host links `-lvulkan`; it uses no Vulkan device extension. `VK_EXT_pci_bus_info` is only queried
 for the log line when the driver exposes it.
 
 ## Run
@@ -76,6 +88,7 @@ user network maps that to the host's loopback). The listener binds `127.0.0.1` b
 | `--out DIR` | save every frame as `DIR/frame-%06u.ppm` (P6) |
 | `--png-every N` | also save every Nth frame as `DIR/frame-%06u.png` (default `0` = never) |
 | `--csv FILE` | write the per-frame timing table |
+| `--dump DIR` | write decoded buffers and pipeline/sampler/texture descriptors to `DIR` (debug aid) |
 | `--verbose` | log every wire message, object and Vulkan memory allocation |
 | `--help` | usage |
 
@@ -229,16 +242,59 @@ The GPU's transfer is faster than lavapipe's, as expected (gpu 0.95 ms vs 1.41 m
 path is dominated by the CPU-side 4.87 MB checks and the 4.87 MB that still crosses TCP — which is
 the honest shape of this design, not a GPU bottleneck.
 
+## Render encoders (stage C, WP-2)
+
+A protocol 2 frame that carries `MW_RENDER_*` messages is executed on Vulkan instead of blitted.
+The execution half:
+
+* creates one `VkPipeline` per wire pipeline (and per primitive topology) on first use, from the
+  four embedded shader modules; the wire's base-function names choose the modules, the pipeline
+  name chooses the specialization constants (texture, destination fetch, texture matrix);
+* builds the vertex input from the wire's 16-attribute descriptor (only attributes with a real
+  format are bound) and the instance/stride information from the layouts;
+* binds the wire's one buffer at the four byte offsets the shaders take as push constants, the
+  layer image or the 128x1 R8Unorm ramp at fragment texture 3, the wire sampler at 0;
+* translates Metal's `[[color(0)]]` fetch (draws B and C of the BootUI frame) to a sampled copy of
+  the colour attachment, because core Vulkan has no framebuffer fetch and a fixed-function blend
+  equation cannot express CA's shader-side composition;
+* honours `blendingEnabled` (the recorded pipelines all say NO), the viewport, the scissor and the
+  render pass's load/store/clear values;
+* reads the target back after the draws, logs its CRC and a non-zero-byte count, publishes it in
+  glwire's SHM format when `--shm` is on, and acknowledges the frame as before.
+
+The synthetic client can produce the same frame shape without a guest:
+
+```sh
+./metalwire_host --gpu 1 --port 9131 --shm /dev/shm/wp2
+./metalwire_gen.py --render --variant fetch --port 9131
+./wp2_spike.py --validation          # all four composition variants, with the validation layer
+```
+
+`--variant` is the spike's blending experiment: `fetch` (the CA path: `blendingEnabled = NO` and
+the shader composites), `nofetch` (no destination read: replace), `fixed` (fixed-function
+source-over), `fetch-noramp` (CA path with the R8 ramp empty, proving the ramp is sampled). See
+[`../../docs/spike-wp2-vulkan-glsl.md`](../../docs/spike-wp2-vulkan-glsl.md).
+
+Two known limits of this path, both recorded in `PROTOCOL.md` and the stage note: protocol 2 does
+not carry the two per-draw offset setters CA calls (`setVertexBufferOffset:`, `setFragmentBufferOffset:`),
+so all draws in a frame execute with the encoder's last full binding; and the guest does not upload
+texture pixels yet, so a layer image samples as zero content. Neither changes the acceptance of
+WP-2 (execution, not a picture) and both are WP-3 input.
+
+`MW_DEBUG_DRAWS=N` (environment) executes only the first N draws of a render frame; it is a
+bring-up aid, not a protocol feature.
+
 ## Limits, and things that are not true
 
 * **This is not CoreAnimation.** The test client is a synthetic Metal program (device, queue,
   buffer, texture, one blit, present, wait). The port's CoreAnimation has no Metal renderer here (no
   ARM shader compiler / AIR → SPIR-V), so these numbers say nothing about coverage of the system UI.
   They measure the smallest end-to-end version of the planned path.
-* **No shaders, no render passes.** Only Metal blit copy buffer → texture, one presented texture and
-  the read-back. There is no `MTLRenderCommandEncoder`, pipeline, or draw. `MW_FILL_BUFFER` is in
-  the protocol enum but has no wire structure in v1, so the host fails it as `BAD_COMMAND` rather
-  than inventing one.
+* **The delivered/measured blit path is not a picture either.** The v1 numbers below are blit
+  frames (buffer → texture → read-back). Render-encoder execution exists since WP-2, but its
+  picture is not claimed: the wire gaps above, the empty guest textures and the two inferred base
+  functions are WP-3 work. `MW_FILL_BUFFER` is in the protocol enum but has no wire structure in
+  v1, so the host fails it as `BAD_COMMAND` rather than inventing one.
 * **Pixels still cross the socket.** Like glwire, the picture bytes travel over TCP; the translation
   is Metal command → Vulkan command, and the host-side cost includes the real GPU round trip. It is
   not a zero-copy display path.

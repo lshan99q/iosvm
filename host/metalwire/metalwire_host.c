@@ -40,6 +40,7 @@
 #include <vulkan/vulkan.h>
 
 #include "metalwire_protocol.h"
+#include "build/wp2_shaders.h"
 
 #if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "metalwire: the wire format and the SHM header are little-endian host order"
@@ -107,6 +108,7 @@ struct mw_image {
     uint32_t bytes;
     VkImage image;
     VkDeviceMemory memory;
+    VkImageView view;
     VkImageLayout layout;
     VkBuffer readback;
     VkDeviceMemory readback_memory;
@@ -124,6 +126,93 @@ struct mw_copy {
     uint32_t height;
     uint32_t origin_x;
     uint32_t origin_y;
+};
+
+/* ---- stage C render execution -------------------------------------------------------------- */
+
+#define MW_MAX_RENDER_BINDINGS 16
+#define MW_MAX_RENDER_DRAWS 64
+
+/* The state an MTLRenderCommandEncoder holds between calls, as the host must replay it. Offsets
+ * are wire (Metal) offsets into the named buffer. */
+struct mw_render_encoder_state {
+    int active;
+    uint32_t target_texture;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+    uint32_t load_action;
+    uint32_t store_action;
+    float clear_color[4];
+    uint32_t pipeline_id;
+    uint32_t vertex_buffer_id[MW_MAX_RENDER_BINDINGS];
+    uint64_t vertex_buffer_offset[MW_MAX_RENDER_BINDINGS];
+    uint32_t fragment_buffer_id[MW_MAX_RENDER_BINDINGS];
+    uint64_t fragment_buffer_offset[MW_MAX_RENDER_BINDINGS];
+    uint32_t texture_id[MW_MAX_RENDER_BINDINGS];
+    uint32_t sampler_id[MW_MAX_RENDER_BINDINGS];
+    float viewport[6];
+    uint32_t scissor[4];
+    int has_viewport;
+    int has_scissor;
+};
+
+/* One draw with the encoder state that preceded it, so state changes between draws are kept. */
+struct mw_render_draw_command {
+    uint32_t target_texture;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+    uint32_t load_action;
+    uint32_t store_action;
+    float clear_color[4];
+    uint32_t pipeline_id;
+    uint32_t primitive_type;
+    uint32_t flags;
+    uint32_t index_type;
+    uint32_t index_buffer;
+    uint64_t index_count;
+    uint64_t index_buffer_offset;
+    uint64_t vertex_start;
+    uint64_t vertex_count;
+    uint32_t instance_count;
+    uint32_t base_instance;
+    uint64_t base_vertex;
+    uint32_t vertex_buffer_id[MW_MAX_RENDER_BINDINGS];
+    uint64_t vertex_buffer_offset[MW_MAX_RENDER_BINDINGS];
+    uint32_t fragment_buffer_id[MW_MAX_RENDER_BINDINGS];
+    uint64_t fragment_buffer_offset[MW_MAX_RENDER_BINDINGS];
+    uint32_t texture_id[MW_MAX_RENDER_BINDINGS];
+    uint32_t sampler_id[MW_MAX_RENDER_BINDINGS];
+    float viewport[6];
+    uint32_t scissor[4];
+};
+
+struct mw_sampler_state {
+    uint32_t id;
+    VkSampler sampler;
+};
+
+/* The Vulkan objects the execution half needs beyond the blit path: one descriptor set layout
+ * for the wire buffer, the texture, the sampler and the destination snapshot; a 1x1 dummy image
+ * for bindings a draw does not use; a fetch image that holds the colour attachment snapshot the
+ * Metal shader reads as [[color(0)]]; and the dummy sampler. Created on first render execution. */
+struct mw_render_vk {
+    int ready;
+    VkDescriptorSetLayout set_layout;
+    VkPipelineLayout pipeline_layout;
+    VkDescriptorPool pool;
+    VkImage dummy_image;
+    VkDeviceMemory dummy_memory;
+    VkImageView dummy_view;
+    VkSampler dummy_sampler;
+    VkShaderModule modules[4];
+    VkImage fetch_image;
+    VkDeviceMemory fetch_memory;
+    VkImageView fetch_view;
+    uint32_t fetch_width;
+    uint32_t fetch_height;
+    uint32_t fetch_format;
 };
 
 struct mw_frame_state {
@@ -149,6 +238,9 @@ struct mw_frame_state {
     uint32_t render_encoders;
     uint64_t render_draw_count;
     uint64_t render_set_count;
+    struct mw_render_encoder_state encoder;
+    struct mw_render_draw_command draws[MW_MAX_RENDER_DRAWS];
+    uint32_t draw_count;
 };
 
 /* A render pipeline state the guest created; WP-2 resolves its shaders from this record. */
@@ -157,11 +249,25 @@ struct mw_render_pipeline {
     uint32_t color_format;
     uint32_t sample_count;
     uint32_t blend_enabled;
+    uint32_t rgb_blend_operation;
+    uint32_t alpha_blend_operation;
+    uint32_t src_rgb_blend_factor;
+    uint32_t dst_rgb_blend_factor;
+    uint32_t src_alpha_blend_factor;
+    uint32_t dst_alpha_blend_factor;
+    uint32_t write_mask;
     uint32_t vertex_attribute_count;
     uint32_t vertex_layout_count;
+    struct mw_vertex_attribute attributes[MW_MAX_RENDER_ATTRIBUTES];
+    struct mw_vertex_layout layouts[MW_MAX_RENDER_LAYOUTS];
     char name[MW_NAME_MAX];
     char vertex_function[MW_NAME_MAX];
     char fragment_function[MW_NAME_MAX];
+    /* stage C execution: the Vulkan pipeline is created on first use (the wire's pipeline bytes
+     * are enough) and cached on this record, one per Metal primitive topology. */
+    VkPipeline vk_pipeline[5];
+    int vk_attempted[5];
+    int vk_failed;
 };
 
 struct mw_timing {
@@ -194,6 +300,7 @@ struct mw_vulkan {
     VkCommandBuffer command_buffer;
     VkFence fence;
     VkDeviceSize max_buffer_size;
+    int has_dynamic_rendering;
     int has_pci_bus_info;
     uint32_t pci_domain;
     uint32_t pci_bus;
@@ -212,6 +319,10 @@ struct mw_server {
     struct mw_render_pipeline **pipelines;
     size_t pipeline_count;
     size_t pipeline_cap;
+    struct mw_sampler_state **samplers;
+    size_t sampler_count;
+    size_t sampler_cap;
+    struct mw_render_vk render;
     uint64_t render_frames_seen;
     uint64_t render_draws_logged;
 
@@ -281,6 +392,31 @@ static void mw_on_signal(int sig)
 {
     (void)sig;
     g_stop = 1;
+}
+
+/*
+ * --dump DIR: write the decoded objects out beside the log, so the execution half (and the
+ * shader work) can be developed and replayed without a guest boot. Buffers are dumped whole after
+ * every upload, pipeline/attachments as text. It is a debugging aid: no execution reads it.
+ */
+static char *g_dump_dir;
+
+static void mw_dump_file(const char *name, const void *data, size_t len)
+{
+    char path[4096];
+    FILE *file;
+
+    if (g_dump_dir == NULL)
+        return;
+    snprintf(path, sizeof(path), "%s/%s", g_dump_dir, name);
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        mw_log("dump: cannot write %s: %s", path, strerror(errno));
+        return;
+    }
+    if (len > 0 && fwrite(data, 1, len, file) != len)
+        mw_log("dump: short write to %s: %s", path, strerror(errno));
+    fclose(file);
 }
 
 static uint64_t mw_now_ns(void)
@@ -816,7 +952,7 @@ static int mw_vulkan_init(struct mw_vulkan *vk, int gpu_index, const char *pci_a
     app.applicationVersion = 1;
     app.pEngineName = "metalwire";
     app.engineVersion = MW_VERSION;
-    app.apiVersion = VK_API_VERSION_1_1;
+    app.apiVersion = VK_API_VERSION_1_3;
     instance_info.pApplicationInfo = &app;
     result = vkCreateInstance(&instance_info, NULL, &vk->instance);
     if (result != VK_SUCCESS) {
@@ -952,6 +1088,29 @@ static int mw_vulkan_init(struct mw_vulkan *vk, int gpu_index, const char *pci_a
         mw_log("device limits: maxBufferSize %" PRIu64 ", maxImageDimension2D %u",
                (uint64_t)vk->max_buffer_size, vk->props.limits.maxImageDimension2D);
 
+    {
+        VkPhysicalDeviceVulkan13Features features13 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceFeatures2 features2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features13};
+
+        vkGetPhysicalDeviceFeatures2(vk->physical, &features2);
+        vk->has_dynamic_rendering =
+            features13.dynamicRendering == VK_TRUE &&
+            vk->props.apiVersion >= VK_API_VERSION_1_3;
+        if (verbose)
+            mw_log("features: dynamicRendering %s (device API %u.%u)",
+                   vk->has_dynamic_rendering ? "yes" : "no",
+                   VK_VERSION_MAJOR(vk->props.apiVersion), VK_VERSION_MINOR(vk->props.apiVersion));
+    }
+    if (vk->has_dynamic_rendering) {
+        static VkPhysicalDeviceVulkan13Features enable13 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+
+        enable13.dynamicRendering = VK_TRUE;
+        device_info.pNext = &enable13;
+    }
+
     priority = 1.0f;
     queue_info.queueFamilyIndex = chosen;
     queue_info.queueCount = 1;
@@ -1056,6 +1215,45 @@ static int mw_image_add(struct mw_server *s, struct mw_image *image)
     return 0;
 }
 
+static struct mw_sampler_state *mw_sampler_find(struct mw_server *s, uint32_t id)
+{
+    for (size_t i = 0; i < s->sampler_count; i++) {
+        if (s->samplers[i]->id == id)
+            return s->samplers[i];
+    }
+    return NULL;
+}
+
+static int mw_sampler_add(struct mw_server *s, struct mw_sampler_state *sampler)
+{
+    if (s->sampler_count == s->sampler_cap) {
+        size_t cap = s->sampler_cap == 0 ? 8 : s->sampler_cap * 2;
+        struct mw_sampler_state **grown = realloc(s->samplers, cap * sizeof(*grown));
+
+        if (grown == NULL)
+            return -1;
+        s->samplers = grown;
+        s->sampler_cap = cap;
+    }
+    s->samplers[s->sampler_count++] = sampler;
+    return 0;
+}
+
+static void mw_sampler_state_destroy(struct mw_server *s, struct mw_sampler_state *sampler)
+{
+    for (size_t i = 0; i < s->sampler_count; i++) {
+        if (s->samplers[i] == sampler) {
+            memmove(&s->samplers[i], &s->samplers[i + 1],
+                    (s->sampler_count - i - 1) * sizeof(*s->samplers));
+            s->sampler_count--;
+            break;
+        }
+    }
+    if (sampler->sampler != VK_NULL_HANDLE)
+        vkDestroySampler(s->vk.device, sampler->sampler, NULL);
+    free(sampler);
+}
+
 static void mw_buffer_destroy(struct mw_server *s, struct mw_buffer *buffer)
 {
     for (size_t i = 0; i < s->buffer_count; i++) {
@@ -1091,6 +1289,8 @@ static void mw_image_destroy(struct mw_server *s, struct mw_image *image)
         vkDestroyBuffer(s->vk.device, image->readback, NULL);
     if (image->readback_memory != VK_NULL_HANDLE)
         vkFreeMemory(s->vk.device, image->readback_memory, NULL);
+    if (image->view != VK_NULL_HANDLE)
+        vkDestroyImageView(s->vk.device, image->view, NULL);
     if (image->image != VK_NULL_HANDLE)
         vkDestroyImage(s->vk.device, image->image, NULL);
     if (image->memory != VK_NULL_HANDLE)
@@ -1145,7 +1345,10 @@ static int mw_handle_create_buffer(struct mw_server *s, const struct mw_create_b
     buffer->id = request->id;
     buffer->options = request->options;
     buffer->length = request->length;
-    if (mw_create_host_buffer(&s->vk, request->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    if (mw_create_host_buffer(&s->vk, request->length,
+                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                               &buffer->buffer, &buffer->memory, &buffer->mapped) < 0) {
         free(buffer);
         mw_frame_fail(s, MW_STATUS_NO_MEMORY, "cannot allocate buffer %u (%" PRIu64 " bytes)",
@@ -1180,6 +1383,12 @@ static int mw_handle_upload_buffer(struct mw_server *s, const struct mw_upload_b
     }
     if (request->length > 0)
         memcpy((unsigned char *)buffer->mapped + request->offset, data, request->length);
+    if (g_dump_dir != NULL) {
+        char name[64];
+
+        snprintf(name, sizeof(name), "buffer-%u.bin", buffer->id);
+        mw_dump_file(name, buffer->mapped, (size_t)buffer->length);
+    }
     if (s->verbose)
         mw_log("buffer %u: upload %u bytes at %u", request->id, request->length, request->offset);
     return 0;
@@ -1238,6 +1447,12 @@ static int mw_handle_upload_buffer_phys(struct mw_server *s,
         memcpy((unsigned char *)buffer->mapped + request->offset + at,
                s->ram + (size_t)(segments[i].pa - s->ram_base), segments[i].len);
         at += segments[i].len;
+    }
+    if (g_dump_dir != NULL) {
+        char name[64];
+
+        snprintf(name, sizeof(name), "buffer-%u.bin", buffer->id);
+        mw_dump_file(name, buffer->mapped, (size_t)buffer->length);
     }
     if (s->verbose)
         mw_log("buffer %u: upload %u bytes by reference (%u segment(s))", request->id,
@@ -1350,6 +1565,29 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
         mw_frame_fail(s, MW_STATUS_VULKAN, "vkBindImageMemory for texture %u failed", request->id);
         return -1;
     }
+    {
+        VkImageViewCreateInfo view_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+
+        view_info.image = image->image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = format;
+        view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        view_info.subresourceRange.baseMipLevel = 0;
+        view_info.subresourceRange.levelCount = 1;
+        view_info.subresourceRange.baseArrayLayer = 0;
+        view_info.subresourceRange.layerCount = 1;
+        result = vkCreateImageView(s->vk.device, &view_info, NULL, &image->view);
+        if (result != VK_SUCCESS) {
+            mw_log("vulkan: vkCreateImageView(%ux%u) failed: %d", request->width, request->height,
+                   (int)result);
+            vkDestroyImage(s->vk.device, image->image, NULL);
+            vkFreeMemory(s->vk.device, image->memory, NULL);
+            free(image);
+            mw_frame_fail(s, MW_STATUS_VULKAN, "vkCreateImageView for texture %u failed",
+                          request->id);
+            return -1;
+        }
+    }
     if (mw_create_host_buffer(&s->vk, image->bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               &image->readback, &image->readback_memory,
                               &image->readback_mapped) < 0) {
@@ -1365,6 +1603,15 @@ static int mw_handle_create_texture(struct mw_server *s, const struct mw_create_
     if (s->verbose)
         mw_log("texture %u: %ux%u format %u, %u bytes", image->id, image->width, image->height,
                image->format, image->bytes);
+    if (g_dump_dir != NULL) {
+        char name[64];
+        char text[512];
+
+        snprintf(text, sizeof(text), "texture %u\nwidth %u\nheight %u\nformat %u\nusage 0x%x\n",
+                 image->id, image->width, image->height, image->format, request->usage);
+        snprintf(name, sizeof(name), "texture-%u.txt", image->id);
+        mw_dump_file(name, text, strlen(text));
+    }
     return 0;
 }
 
@@ -1385,24 +1632,29 @@ static int mw_handle_copy(struct mw_server *s, const struct mw_copy_buffer_to_te
                       request->buffer_id, request->texture_id);
         return -1;
     }
-    if (request->width == 0 || request->height == 0 ||
-        request->bytes_per_row % MW_PIXEL_BYTES != 0) {
-        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "copy has width %u height %u row bytes %u",
-                      request->width, request->height, request->bytes_per_row);
-        return -1;
-    }
-    if (request->bytes_per_row < request->width * MW_PIXEL_BYTES ||
-        (uint64_t)request->origin_x + request->width > image->width ||
-        (uint64_t)request->origin_y + request->height > image->height) {
-        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "copy rectangle out of the texture");
-        return -1;
-    }
-    if (request->buffer_offset % MW_PIXEL_BYTES != 0 ||
-        request->buffer_offset + (uint64_t)(request->height - 1) * request->bytes_per_row +
-                (uint64_t)request->width * MW_PIXEL_BYTES >
-            buffer->length) {
-        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "copy reads outside buffer %u", request->buffer_id);
-        return -1;
+    {
+        uint32_t bpp = mw_format_bytes(image->format);
+
+        if (request->width == 0 || request->height == 0 ||
+            request->bytes_per_row % bpp != 0) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "copy has width %u height %u row bytes %u",
+                          request->width, request->height, request->bytes_per_row);
+            return -1;
+        }
+        if (request->bytes_per_row < request->width * bpp ||
+            (uint64_t)request->origin_x + request->width > image->width ||
+            (uint64_t)request->origin_y + request->height > image->height) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "copy rectangle out of the texture");
+            return -1;
+        }
+        if (request->buffer_offset % bpp != 0 ||
+            request->buffer_offset + (uint64_t)(request->height - 1) * request->bytes_per_row +
+                    (uint64_t)request->width * bpp >
+                buffer->length) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "copy reads outside buffer %u",
+                          request->buffer_id);
+            return -1;
+        }
     }
     if (s->frame.copy_count >= MW_MAX_COPIES) {
         mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "more than %d copies in one frame", MW_MAX_COPIES);
@@ -1445,6 +1697,11 @@ static struct mw_render_pipeline *mw_pipeline_find(struct mw_server *s, uint32_t
 
 static void mw_pipeline_destroy(struct mw_server *s, struct mw_render_pipeline *pipeline)
 {
+    for (size_t i = 0; i < sizeof(pipeline->vk_pipeline) / sizeof(pipeline->vk_pipeline[0]); i++) {
+        if (pipeline->vk_pipeline[i] != VK_NULL_HANDLE)
+            vkDestroyPipeline(s->vk.device, pipeline->vk_pipeline[i], NULL);
+        pipeline->vk_pipeline[i] = VK_NULL_HANDLE;
+    }
     for (size_t i = 0; i < s->pipeline_count; i++) {
         if (s->pipelines[i] == pipeline) {
             memmove(&s->pipelines[i], &s->pipelines[i + 1],
@@ -1522,8 +1779,19 @@ static int mw_handle_create_render_pipeline(struct mw_server *s, const unsigned 
     pipeline->color_format = request.color_format;
     pipeline->sample_count = request.sample_count;
     pipeline->blend_enabled = request.blend_enabled;
+    pipeline->rgb_blend_operation = request.rgb_blend_operation;
+    pipeline->alpha_blend_operation = request.alpha_blend_operation;
+    pipeline->src_rgb_blend_factor = request.src_rgb_blend_factor;
+    pipeline->dst_rgb_blend_factor = request.dst_rgb_blend_factor;
+    pipeline->src_alpha_blend_factor = request.src_alpha_blend_factor;
+    pipeline->dst_alpha_blend_factor = request.dst_alpha_blend_factor;
+    pipeline->write_mask = request.write_mask;
     pipeline->vertex_attribute_count = request.vertex_attribute_count;
     pipeline->vertex_layout_count = request.vertex_layout_count;
+    if (attribute_bytes > 0)
+        memcpy(pipeline->attributes, payload + sizeof(request), attribute_bytes);
+    if (layout_bytes > 0)
+        memcpy(pipeline->layouts, payload + sizeof(request) + attribute_bytes, layout_bytes);
     memcpy(pipeline->name, request.pipeline_name, MW_NAME_MAX);
     memcpy(pipeline->vertex_function, request.vertex_function, MW_NAME_MAX);
     memcpy(pipeline->fragment_function, request.fragment_function, MW_NAME_MAX);
@@ -1539,16 +1807,122 @@ static int mw_handle_create_render_pipeline(struct mw_server *s, const unsigned 
            "blend %u, %u attributes",
            pipeline->id, pipeline->name, pipeline->vertex_function, pipeline->fragment_function,
            pipeline->color_format, pipeline->blend_enabled, pipeline->vertex_attribute_count);
+    if (g_dump_dir != NULL) {
+        char name[64];
+        char text[8192];
+        int at = 0;
+
+        at += snprintf(text + at, sizeof(text) - (size_t)at,
+                       "pipeline %u\nname %s\nvertex %s\nfragment %s\ncolor_format %u\n"
+                       "sample_count %u\nblend_enabled %u\nwrite_mask 0x%x\n"
+                       "blend rgb op %u src %u dst %u; alpha op %u src %u dst %u\n",
+                       pipeline->id, pipeline->name, pipeline->vertex_function,
+                       pipeline->fragment_function, pipeline->color_format,
+                       pipeline->sample_count, pipeline->blend_enabled, pipeline->write_mask,
+                       pipeline->rgb_blend_operation, pipeline->src_rgb_blend_factor,
+                       pipeline->dst_rgb_blend_factor, pipeline->alpha_blend_operation,
+                       pipeline->src_alpha_blend_factor, pipeline->dst_alpha_blend_factor);
+        for (uint32_t i = 0; i < pipeline->vertex_attribute_count; i++)
+            at += snprintf(text + at, sizeof(text) - (size_t)at,
+                           "attribute %u format %u offset %u buffer %u\n", i,
+                           pipeline->attributes[i].format, pipeline->attributes[i].offset,
+                           pipeline->attributes[i].buffer_index);
+        for (uint32_t i = 0; i < pipeline->vertex_layout_count; i++)
+            at += snprintf(text + at, sizeof(text) - (size_t)at,
+                           "layout %u stride %u step_function %u step_rate %u\n", i,
+                           pipeline->layouts[i].stride, pipeline->layouts[i].step_function,
+                           pipeline->layouts[i].step_rate);
+        snprintf(name, sizeof(name), "pipeline-%u.txt", pipeline->id);
+        mw_dump_file(name, text, strlen(text));
+    }
     return 0;
+}
+
+static VkFilter mw_metal_filter(uint32_t filter)
+{
+    return filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+}
+
+static VkSamplerAddressMode mw_metal_address(uint32_t mode)
+{
+    switch (mode) {
+    case 1:
+        return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+    case 2:
+        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case 3:
+        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case 4:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    case 0:
+    default:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    }
 }
 
 static int mw_handle_create_sampler(struct mw_server *s, const struct mw_create_sampler *request)
 {
-    (void)s;
+    struct mw_sampler_state *state;
+    VkSamplerCreateInfo info = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    VkResult result;
+
+    if (mw_sampler_find(s, request->id) != NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "sampler id %u already exists", request->id);
+        return -1;
+    }
+    state = calloc(1, sizeof(*state));
+    if (state == NULL) {
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "out of host memory for sampler %u", request->id);
+        return -1;
+    }
+    state->id = request->id;
+    info.magFilter = mw_metal_filter(request->mag_filter);
+    info.minFilter = mw_metal_filter(request->min_filter);
+    info.mipmapMode = request->mip_filter == 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                               : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    info.addressModeU = mw_metal_address(request->address_s);
+    info.addressModeV = mw_metal_address(request->address_t);
+    info.addressModeW = mw_metal_address(request->address_r);
+    info.mipLodBias = 0.0f;
+    info.anisotropyEnable = VK_FALSE;
+    info.maxAnisotropy = 1.0f;
+    info.compareEnable = VK_FALSE;
+    info.compareOp = VK_COMPARE_OP_NEVER;
+    info.minLod = request->lod_min;
+    info.maxLod = request->lod_max != 0.0f ? request->lod_max : VK_LOD_CLAMP_NONE;
+    info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    info.unnormalizedCoordinates = request->normalized_coords == 0 ? VK_TRUE : VK_FALSE;
+    result = vkCreateSampler(s->vk.device, &info, NULL, &state->sampler);
+    if (result != VK_SUCCESS) {
+        free(state);
+        mw_frame_fail(s, MW_STATUS_VULKAN, "vkCreateSampler for sampler %u failed", request->id);
+        return -1;
+    }
+    if (mw_sampler_add(s, state) < 0) {
+        vkDestroySampler(s->vk.device, state->sampler, NULL);
+        free(state);
+        mw_frame_fail(s, MW_STATUS_NO_MEMORY, "sampler table growth failed");
+        return -1;
+    }
     mw_log("render sampler %u: min %u mag %u mip %u address %u/%u/%u normalized %u",
            request->id, request->min_filter, request->mag_filter, request->mip_filter,
            request->address_s, request->address_t, request->address_r,
            request->normalized_coords);
+    if (g_dump_dir != NULL) {
+        char name[64];
+        char text[1024];
+
+        snprintf(text, sizeof(text),
+                 "sampler %u\nmin %u\nmag %u\nmip %u\naddress_s %u\naddress_t %u\n"
+                 "address_r %u\nnormalized %u\ncompare %u\nlod_min %g\nlod_max %g\n"
+                 "max_anisotropy %u\n",
+                 request->id, request->min_filter, request->mag_filter, request->mip_filter,
+                 request->address_s, request->address_t, request->address_r,
+                 request->normalized_coords, request->compare_function, request->lod_min,
+                 request->lod_max, request->max_anisotropy);
+        snprintf(name, sizeof(name), "sampler-%u.txt", request->id);
+        mw_dump_file(name, text, strlen(text));
+    }
     return 0;
 }
 
@@ -1564,6 +1938,7 @@ static int mw_handle_create_depth_stencil(struct mw_server *s,
 static int mw_handle_render_begin(struct mw_server *s, const struct mw_render_begin *request)
 {
     struct mw_image *target;
+    struct mw_render_encoder_state *enc = &s->frame.encoder;
 
     if (!s->frame.active) {
         mw_log("warning: MW_RENDER_BEGIN outside a frame ignored");
@@ -1575,6 +1950,25 @@ static int mw_handle_render_begin(struct mw_server *s, const struct mw_render_be
                       request->target_texture);
         return -1;
     }
+    memset(enc, 0, sizeof(*enc));
+    enc->active = 1;
+    enc->target_texture = request->target_texture;
+    enc->width = request->width;
+    enc->height = request->height;
+    enc->pixel_format = request->pixel_format;
+    enc->load_action = request->load_action;
+    enc->store_action = request->store_action;
+    memcpy(enc->clear_color, request->clear_color, sizeof(enc->clear_color));
+    enc->viewport[0] = 0.0f;
+    enc->viewport[1] = 0.0f;
+    enc->viewport[2] = (float)request->width;
+    enc->viewport[3] = (float)request->height;
+    enc->viewport[4] = 0.0f;
+    enc->viewport[5] = 1.0f;
+    enc->scissor[0] = 0;
+    enc->scissor[1] = 0;
+    enc->scissor[2] = request->width;
+    enc->scissor[3] = request->height;
     s->frame.render_mode = 1;
     s->frame.render_encoders++;
     s->frame.render_target = request->target_texture;
@@ -1607,6 +2001,7 @@ static int mw_handle_render_set_pipeline(struct mw_server *s,
         return -1;
     }
     s->frame.render_pipeline = request->pipeline_id;
+    s->frame.encoder.pipeline_id = request->pipeline_id;
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("CA set: pipeline %u \"%s\"", pipeline->id, pipeline->name);
     }
@@ -1641,6 +2036,15 @@ static int mw_handle_render_set_buffer(struct mw_server *s, const char *what,
         return -1;
     }
     s->frame.render_set_count++;
+    if (request->index < MW_MAX_RENDER_BINDINGS && s->frame.encoder.active) {
+        if (strncmp(what, "vertex", 6) == 0) {
+            s->frame.encoder.vertex_buffer_id[request->index] = request->buffer_id;
+            s->frame.encoder.vertex_buffer_offset[request->index] = request->offset;
+        } else {
+            s->frame.encoder.fragment_buffer_id[request->index] = request->buffer_id;
+            s->frame.encoder.fragment_buffer_offset[request->index] = request->offset;
+        }
+    }
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("CA set: %s buffer %u offset %" PRIu64 " index %u", what, request->buffer_id,
                (uint64_t)request->offset, request->index);
@@ -1661,6 +2065,8 @@ static int mw_handle_render_set_texture(struct mw_server *s, const char *what,
         return -1;
     }
     s->frame.render_set_count++;
+    if (request->index < MW_MAX_RENDER_BINDINGS && s->frame.encoder.active)
+        s->frame.encoder.texture_id[request->index] = request->texture_id;
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("CA set: %s texture %u index %u", what, request->texture_id, request->index);
     }
@@ -1676,6 +2082,8 @@ static int mw_handle_render_set_sampler(struct mw_server *s, const char *what,
         return 0;
     }
     s->frame.render_set_count++;
+    if (request->index < MW_MAX_RENDER_BINDINGS && s->frame.encoder.active)
+        s->frame.encoder.sampler_id[request->index] = request->sampler_id;
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("CA set: %s sampler %u index %u", what, request->sampler_id, request->index);
     }
@@ -1710,6 +2118,15 @@ static int mw_handle_render_set_viewport(struct mw_server *s,
         return 0;
     }
     s->frame.render_set_count++;
+    if (s->frame.encoder.active) {
+        s->frame.encoder.viewport[0] = request->x;
+        s->frame.encoder.viewport[1] = request->y;
+        s->frame.encoder.viewport[2] = request->width;
+        s->frame.encoder.viewport[3] = request->height;
+        s->frame.encoder.viewport[4] = request->znear;
+        s->frame.encoder.viewport[5] = request->zfar;
+        s->frame.encoder.has_viewport = 1;
+    }
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("CA set: viewport %.1f %.1f %.1fx%.1f z %.3f..%.3f", request->x, request->y,
                request->width, request->height, request->znear, request->zfar);
@@ -1725,6 +2142,13 @@ static int mw_handle_render_set_scissor(struct mw_server *s,
         return 0;
     }
     s->frame.render_set_count++;
+    if (s->frame.encoder.active) {
+        s->frame.encoder.scissor[0] = request->x;
+        s->frame.encoder.scissor[1] = request->y;
+        s->frame.encoder.scissor[2] = request->width;
+        s->frame.encoder.scissor[3] = request->height;
+        s->frame.encoder.has_scissor = 1;
+    }
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("CA set: scissor %ux%u at %u,%u", request->width, request->height, request->x,
                request->y);
@@ -1749,6 +2173,9 @@ static int mw_handle_render_set_blend_color(struct mw_server *s,
 
 static int mw_handle_render_draw(struct mw_server *s, const struct mw_render_draw *request)
 {
+    struct mw_render_encoder_state *enc = &s->frame.encoder;
+    struct mw_render_draw_command *command;
+
     if (!s->frame.render_mode) {
         mw_log("warning: MW_RENDER_DRAW outside a render encoder ignored");
         return 0;
@@ -1774,6 +2201,44 @@ static int mw_handle_render_draw(struct mw_server *s, const struct mw_render_dra
                (uint64_t)request->index_count, (uint64_t)request->vertex_count,
                request->instance_count, (int64_t)request->base_vertex);
     }
+    if (s->frame.draw_count >= MW_MAX_RENDER_DRAWS) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "more than %d draws in one frame",
+                      MW_MAX_RENDER_DRAWS);
+        return -1;
+    }
+    command = &s->frame.draws[s->frame.draw_count++];
+    memset(command, 0, sizeof(*command));
+    command->target_texture = enc->target_texture;
+    command->width = enc->width;
+    command->height = enc->height;
+    command->pixel_format = enc->pixel_format;
+    command->load_action = enc->load_action;
+    command->store_action = enc->store_action;
+    memcpy(command->clear_color, enc->clear_color, sizeof(command->clear_color));
+    command->pipeline_id = s->frame.render_pipeline;
+    command->primitive_type = request->primitive_type;
+    command->flags = request->flags;
+    command->index_type = request->index_type;
+    command->index_buffer = request->index_buffer;
+    command->index_count = request->index_count;
+    command->index_buffer_offset = request->index_buffer_offset;
+    command->vertex_start = request->vertex_start;
+    command->vertex_count = request->vertex_count;
+    command->instance_count = request->instance_count != 0 ? request->instance_count : 1;
+    command->base_instance = request->base_instance;
+    command->base_vertex = (uint64_t)request->base_vertex;
+    memcpy(command->vertex_buffer_id, enc->vertex_buffer_id,
+           sizeof(command->vertex_buffer_id));
+    memcpy(command->vertex_buffer_offset, enc->vertex_buffer_offset,
+           sizeof(command->vertex_buffer_offset));
+    memcpy(command->fragment_buffer_id, enc->fragment_buffer_id,
+           sizeof(command->fragment_buffer_id));
+    memcpy(command->fragment_buffer_offset, enc->fragment_buffer_offset,
+           sizeof(command->fragment_buffer_offset));
+    memcpy(command->texture_id, enc->texture_id, sizeof(command->texture_id));
+    memcpy(command->sampler_id, enc->sampler_id, sizeof(command->sampler_id));
+    memcpy(command->viewport, enc->viewport, sizeof(command->viewport));
+    memcpy(command->scissor, enc->scissor, sizeof(command->scissor));
     return 0;
 }
 
@@ -1783,6 +2248,7 @@ static int mw_handle_render_end(struct mw_server *s, const struct mw_render_end 
         mw_log("warning: MW_RENDER_END outside a render encoder ignored");
         return 0;
     }
+    s->frame.encoder.active = 0;
     if (s->render_frames_seen == 0 || s->verbose) {
         mw_log("render: encoder %u ended: %u draws, %u sets", request->encoder_index,
                request->draw_count, request->set_count);
@@ -1907,7 +2373,7 @@ static int mw_run_frame(struct mw_server *s, struct mw_frame_state *frame,
             image->dst_this_frame = 1;
         }
         region.bufferOffset = copy->buffer_offset;
-        region.bufferRowLength = copy->bytes_per_row / MW_PIXEL_BYTES;
+        region.bufferRowLength = copy->bytes_per_row / mw_format_bytes(image->format);
         region.bufferImageHeight = 0;
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.mipLevel = 0;
@@ -2059,6 +2525,1039 @@ static int mw_run_frame(struct mw_server *s, struct mw_frame_state *frame,
     return MW_STATUS_OK;
 }
 
+/* ---- stage C: executing a wire render frame on Vulkan --------------------------------------
+ *
+ * The decode half above keeps every object the wire names; this half turns the draws the guest
+ * recorded into real Vulkan work. Three decisions are worth stating:
+ *
+ *  - Dynamic rendering (Vulkan 1.3) instead of a VkRenderPass/Framebuffer pair: the wire carries
+ *    the load/store actions and the clear value per encoder, so the attachment's loadOp is
+ *    chosen when the command buffer is recorded, not when a render pass object is created.
+ *  - Metal's `[[color(0)]]` framebuffer fetch is translated to a sampled snapshot: before a draw
+ *    whose fragment function reads the destination, the colour image is copied to a scratch image
+ *    and bound as a texture. Core Vulkan has no framebuffer fetch, and a fixed-function blend
+ *    equation cannot express the 37 blend modes CA bakes into its fragment shaders.
+ *  - Metal buffers share one index space per stage but have arbitrary byte offsets; Vulkan
+ *    descriptor offsets are alignment-constrained, so the host binds the whole wire buffer once
+ *    and passes the four byte offsets the shader needs as push constants.
+ */
+
+static VkFormat mw_vk_vertex_format(uint32_t metal_format, uint32_t *components)
+{
+    *components = 0;
+    switch (metal_format) {
+    case 28: /* MTLVertexFormatFloat */
+        *components = 1;
+        return VK_FORMAT_R32_SFLOAT;
+    case 29: /* MTLVertexFormatFloat2 */
+        *components = 2;
+        return VK_FORMAT_R32G32_SFLOAT;
+    case 30: /* MTLVertexFormatFloat3 */
+        *components = 3;
+        return VK_FORMAT_R32G32B32_SFLOAT;
+    case 31: /* MTLVertexFormatFloat4 */
+        *components = 4;
+        return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case 25: /* MTLVertexFormatHalf2 */
+        *components = 2;
+        return VK_FORMAT_R16G16_SFLOAT;
+    case 26: /* MTLVertexFormatHalf3 */
+        *components = 3;
+        return VK_FORMAT_R16G16B16_SFLOAT;
+    case 27: /* MTLVertexFormatHalf4 */
+        *components = 4;
+        return VK_FORMAT_R16G16B16A16_SFLOAT;
+    default:
+        return VK_FORMAT_UNDEFINED;
+    }
+}
+
+static VkPrimitiveTopology mw_metal_topology(uint32_t primitive)
+{
+    switch (primitive) {
+    case 0:
+        return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    case 1:
+        return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    case 2:
+        return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    case 4:
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    case 3:
+    default:
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+}
+
+static VkIndexType mw_metal_index_type(uint32_t type)
+{
+    return type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+}
+
+static VkBlendFactor mw_metal_blend_factor(uint32_t factor)
+{
+    switch (factor) {
+    case 0:
+        return VK_BLEND_FACTOR_ZERO;
+    case 2:
+        return VK_BLEND_FACTOR_SRC_COLOR;
+    case 3:
+        return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case 4:
+        return VK_BLEND_FACTOR_SRC_ALPHA;
+    case 5:
+        return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case 6:
+        return VK_BLEND_FACTOR_DST_COLOR;
+    case 7:
+        return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 8:
+        return VK_BLEND_FACTOR_DST_ALPHA;
+    case 9:
+        return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 10:
+        return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    case 11:
+        return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case 12:
+        return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case 13:
+        return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 14:
+        return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    case 1:
+    default:
+        return VK_BLEND_FACTOR_ONE;
+    }
+}
+
+static VkBlendOp mw_metal_blend_op(uint32_t op)
+{
+    switch (op) {
+    case 1:
+        return VK_BLEND_OP_SUBTRACT;
+    case 2:
+        return VK_BLEND_OP_REVERSE_SUBTRACT;
+    case 3:
+        return VK_BLEND_OP_MIN;
+    case 4:
+        return VK_BLEND_OP_MAX;
+    case 0:
+    default:
+        return VK_BLEND_OP_ADD;
+    }
+}
+
+static VkColorComponentFlags mw_metal_write_mask(uint32_t mask)
+{
+    VkColorComponentFlags out = 0;
+
+    if ((mask & 0x8u) != 0)
+        out |= VK_COLOR_COMPONENT_R_BIT; /* MTLColorWriteMaskRed */
+    if ((mask & 0x4u) != 0)
+        out |= VK_COLOR_COMPONENT_G_BIT;
+    if ((mask & 0x2u) != 0)
+        out |= VK_COLOR_COMPONENT_B_BIT;
+    if ((mask & 0x1u) != 0)
+        out |= VK_COLOR_COMPONENT_A_BIT;
+    return out != 0 ? out : 0xfu;
+}
+
+static const struct mw_spirv_blob *mw_spirv_find(const char *name)
+{
+    for (size_t i = 0; i < sizeof(mw_spirv_blobs) / sizeof(mw_spirv_blobs[0]); i++) {
+        if (strcmp(mw_spirv_blobs[i].name, name) == 0)
+            return &mw_spirv_blobs[i];
+    }
+    return NULL;
+}
+
+static VkShaderModule mw_render_module(struct mw_server *s, const char *name)
+{
+    static const char *const names[] = {"fixed_vert_lpf_spc", "fixed_frag_lpf_cpf", "std_vert1_lpf",
+                                        "luma_boost_lpf"};
+    struct mw_render_vk *r = &s->render;
+    int slot = -1;
+    const struct mw_spirv_blob *blob;
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(names[i], name) == 0) {
+            slot = (int)i;
+            break;
+        }
+    }
+    if (slot < 0)
+        return VK_NULL_HANDLE;
+    if (r->modules[slot] != VK_NULL_HANDLE)
+        return r->modules[slot];
+    blob = mw_spirv_find(name);
+    if (blob == NULL) {
+        mw_log("render: no embedded SPIR-V for %s", name);
+        return VK_NULL_HANDLE;
+    }
+    {
+        VkShaderModuleCreateInfo info = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+
+        info.codeSize = (size_t)blob->word_count * sizeof(uint32_t);
+        info.pCode = blob->words;
+        if (vkCreateShaderModule(s->vk.device, &info, NULL, &r->modules[slot]) != VK_SUCCESS) {
+            mw_log("render: vkCreateShaderModule(%s) failed", name);
+            return VK_NULL_HANDLE;
+        }
+    }
+    return r->modules[slot];
+}
+
+static int mw_render_make_image(struct mw_server *s, uint32_t width, uint32_t height,
+                                VkFormat format, VkImageUsageFlags usage, VkImage *out_image,
+                                VkDeviceMemory *out_memory, VkImageView *out_view)
+{
+    VkImageCreateInfo info = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkImageViewCreateInfo view_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    VkMemoryRequirements req;
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkResult result;
+
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent.width = width;
+    info.extent.height = height;
+    info.extent.depth = 1;
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    result = vkCreateImage(s->vk.device, &info, NULL, &image);
+    if (result != VK_SUCCESS) {
+        mw_log("render: vkCreateImage(%ux%u) failed: %d", width, height, (int)result);
+        return -1;
+    }
+    vkGetImageMemoryRequirements(s->vk.device, image, &req);
+    if (mw_allocate_memory(&s->vk, &req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &memory) < 0) {
+        vkDestroyImage(s->vk.device, image, NULL);
+        return -1;
+    }
+    if (vkBindImageMemory(s->vk.device, image, memory, 0) != VK_SUCCESS) {
+        vkDestroyImage(s->vk.device, image, NULL);
+        vkFreeMemory(s->vk.device, memory, NULL);
+        return -1;
+    }
+    view_info.image = image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(s->vk.device, &view_info, NULL, &view) != VK_SUCCESS) {
+        vkDestroyImage(s->vk.device, image, NULL);
+        vkFreeMemory(s->vk.device, memory, NULL);
+        return -1;
+    }
+    *out_image = image;
+    *out_memory = memory;
+    *out_view = view;
+    return 0;
+}
+
+static void mw_render_drop_image(struct mw_server *s, VkImage *image, VkDeviceMemory *memory,
+                                 VkImageView *view)
+{
+    if (*view != VK_NULL_HANDLE)
+        vkDestroyImageView(s->vk.device, *view, NULL);
+    if (*image != VK_NULL_HANDLE)
+        vkDestroyImage(s->vk.device, *image, NULL);
+    if (*memory != VK_NULL_HANDLE)
+        vkFreeMemory(s->vk.device, *memory, NULL);
+    *view = VK_NULL_HANDLE;
+    *image = VK_NULL_HANDLE;
+    *memory = VK_NULL_HANDLE;
+}
+
+/* One-shot layout transition for objects created outside a frame (the dummy image). */
+static int mw_render_transition_now(struct mw_server *s, VkImage image, VkImageLayout new_layout)
+{
+    VkCommandBuffer command = s->vk.command_buffer;
+    VkCommandBufferBeginInfo begin_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkResult result;
+
+    result = vkResetCommandPool(s->vk.device, s->vk.command_pool, 0);
+    if (result != VK_SUCCESS)
+        return -1;
+    if (vkBeginCommandBuffer(command, &begin_info) != VK_SUCCESS)
+        return -1;
+    mw_cmd_image_barrier(command, image, VK_IMAGE_LAYOUT_UNDEFINED, new_layout, 0,
+                         VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    if (vkEndCommandBuffer(command) != VK_SUCCESS)
+        return -1;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command;
+    vkResetFences(s->vk.device, 1, &s->vk.fence);
+    if (vkQueueSubmit(s->vk.queue, 1, &submit_info, s->vk.fence) != VK_SUCCESS)
+        return -1;
+    return vkWaitForFences(s->vk.device, 1, &s->vk.fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS ? 0
+                                                                                           : -1;
+}
+
+static int mw_render_vk_init(struct mw_server *s)
+{
+    struct mw_render_vk *r = &s->render;
+    VkDescriptorSetLayoutBinding bindings[4];
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    VkPushConstantRange push = {.stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
+                                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                                .offset = 0,
+                                .size = 4 * sizeof(uint32_t)};
+    VkPipelineLayoutCreateInfo pipeline_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VkDescriptorPoolSize sizes[3];
+    VkDescriptorPoolCreateInfo pool_info = {.sType =
+                                                VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    VkSamplerCreateInfo sampler_info = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    VkResult result;
+
+    if (r->ready)
+        return 0;
+    if (!s->vk.has_dynamic_rendering) {
+        mw_log("render: the device has no Vulkan 1.3 dynamic rendering; render frames stay "
+               "decode-only");
+        return -1;
+    }
+    memset(bindings, 0, sizeof(bindings));
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    layout_info.bindingCount = 4;
+    layout_info.pBindings = bindings;
+    result = vkCreateDescriptorSetLayout(s->vk.device, &layout_info, NULL, &r->set_layout);
+    if (result != VK_SUCCESS) {
+        mw_log("render: vkCreateDescriptorSetLayout failed: %d", (int)result);
+        return -1;
+    }
+    pipeline_info.setLayoutCount = 1;
+    pipeline_info.pSetLayouts = &r->set_layout;
+    pipeline_info.pushConstantRangeCount = 1;
+    pipeline_info.pPushConstantRanges = &push;
+    result = vkCreatePipelineLayout(s->vk.device, &pipeline_info, NULL, &r->pipeline_layout);
+    if (result != VK_SUCCESS) {
+        mw_log("render: vkCreatePipelineLayout failed: %d", (int)result);
+        return -1;
+    }
+    memset(sizes, 0, sizeof(sizes));
+    sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[0].descriptorCount = 256;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    sizes[1].descriptorCount = 768;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+    sizes[2].descriptorCount = 256;
+    pool_info.maxSets = 256;
+    pool_info.poolSizeCount = 3;
+    pool_info.pPoolSizes = sizes;
+    result = vkCreateDescriptorPool(s->vk.device, &pool_info, NULL, &r->pool);
+    if (result != VK_SUCCESS) {
+        mw_log("render: vkCreateDescriptorPool failed: %d", (int)result);
+        return -1;
+    }
+    sampler_info.magFilter = VK_FILTER_NEAREST;
+    sampler_info.minFilter = VK_FILTER_NEAREST;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.maxLod = VK_LOD_CLAMP_NONE;
+    if (vkCreateSampler(s->vk.device, &sampler_info, NULL, &r->dummy_sampler) != VK_SUCCESS) {
+        mw_log("render: vkCreateSampler failed");
+        return -1;
+    }
+    if (mw_render_make_image(s, 1, 1, VK_FORMAT_B8G8R8A8_UNORM,
+                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                             &r->dummy_image, &r->dummy_memory, &r->dummy_view) < 0) {
+        mw_log("render: cannot create the 1x1 dummy image");
+        return -1;
+    }
+    if (mw_render_transition_now(s, r->dummy_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) < 0) {
+        mw_log("render: cannot transition the dummy image");
+        return -1;
+    }
+    r->ready = 1;
+    mw_log("render: execution ready (dynamic rendering, embedded shaders)");
+    return 0;
+}
+
+static int mw_render_ensure_fetch(struct mw_server *s, uint32_t width, uint32_t height,
+                                  uint32_t format)
+{
+    struct mw_render_vk *r = &s->render;
+
+    if (r->fetch_image != VK_NULL_HANDLE && r->fetch_width == width &&
+        r->fetch_height == height && r->fetch_format == format)
+        return 0;
+    mw_render_drop_image(s, &r->fetch_image, &r->fetch_memory, &r->fetch_view);
+    if (mw_render_make_image(s, width, height, mw_vk_format(format),
+                             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                             &r->fetch_image, &r->fetch_memory, &r->fetch_view) < 0) {
+        mw_log("render: cannot create the %ux%u framebuffer-fetch snapshot", width, height);
+        return -1;
+    }
+    r->fetch_width = width;
+    r->fetch_height = height;
+    r->fetch_format = format;
+    return 0;
+}
+
+static void mw_render_vk_fini(struct mw_server *s)
+{
+    struct mw_render_vk *r = &s->render;
+
+    for (size_t i = 0; i < sizeof(r->modules) / sizeof(r->modules[0]); i++) {
+        if (r->modules[i] != VK_NULL_HANDLE)
+            vkDestroyShaderModule(s->vk.device, r->modules[i], NULL);
+    }
+    mw_render_drop_image(s, &r->fetch_image, &r->fetch_memory, &r->fetch_view);
+    mw_render_drop_image(s, &r->dummy_image, &r->dummy_memory, &r->dummy_view);
+    if (r->dummy_sampler != VK_NULL_HANDLE)
+        vkDestroySampler(s->vk.device, r->dummy_sampler, NULL);
+    if (r->pool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(s->vk.device, r->pool, NULL);
+    if (r->pipeline_layout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(s->vk.device, r->pipeline_layout, NULL);
+    if (r->set_layout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(s->vk.device, r->set_layout, NULL);
+    memset(r, 0, sizeof(*r));
+}
+
+static int mw_pipeline_fetches(const struct mw_render_pipeline *pipeline)
+{
+    return strstr(pipeline->name, "Bsov") != NULL || strstr(pipeline->name, "Tlub") != NULL;
+}
+
+static int mw_render_ensure_pipeline(struct mw_server *s, struct mw_render_pipeline *pipeline,
+                                     uint32_t primitive)
+{
+    int index = primitive <= 4 ? (int)primitive : 3;
+    int has_texture;
+    int uses_fetch;
+    const char *vertex_name;
+    const char *fragment_name;
+    VkShaderModule vertex;
+    VkShaderModule fragment;
+    VkPipelineShaderStageCreateInfo stages[2];
+    VkVertexInputBindingDescription bindings[MW_MAX_RENDER_LAYOUTS];
+    VkVertexInputAttributeDescription attributes[MW_MAX_RENDER_ATTRIBUTES];
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    VkPipelineViewportStateCreateInfo viewport = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    VkPipelineColorBlendAttachmentState blend = {0};
+    VkPipelineColorBlendStateCreateInfo blend_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    VkPipelineRenderingCreateInfo rendering = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    VkGraphicsPipelineCreateInfo info = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    VkFormat color_format;
+    uint32_t binding_count = 0;
+    uint32_t attribute_count = 0;
+    uint32_t vconst = 0;
+    uint32_t fconst[3] = {0, 0, 0};
+    VkSpecializationMapEntry ventry = {0, 0, sizeof(uint32_t)};
+    VkSpecializationMapEntry fentries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
+    VkSpecializationInfo vspec = {.mapEntryCount = 1, .pMapEntries = &ventry,
+                                  .dataSize = sizeof(uint32_t), .pData = &vconst};
+    VkSpecializationInfo fspec = {.mapEntryCount = 3, .pMapEntries = fentries,
+                                  .dataSize = sizeof(fconst), .pData = fconst};
+    VkResult result;
+
+    if (pipeline->vk_attempted[index])
+        return pipeline->vk_failed ? -1 : 0;
+    pipeline->vk_attempted[index] = 1;
+    if (mw_render_vk_init(s) < 0) {
+        pipeline->vk_failed = 1;
+        return -1;
+    }
+    has_texture = strstr(pipeline->name, "Timg") != NULL || strstr(pipeline->name, "Tlub") != NULL;
+    uses_fetch = mw_pipeline_fetches(pipeline);
+    vertex_name = strcmp(pipeline->vertex_function, "std_vert1_lpf") == 0 ? "std_vert1_lpf"
+                                                                          : "fixed_vert_lpf_spc";
+    fragment_name = strcmp(pipeline->fragment_function, "luma_boost_lpf") == 0
+                        ? "luma_boost_lpf"
+                        : "fixed_frag_lpf_cpf";
+    vertex = mw_render_module(s, vertex_name);
+    fragment = mw_render_module(s, fragment_name);
+    if (vertex == VK_NULL_HANDLE || fragment == VK_NULL_HANDLE) {
+        pipeline->vk_failed = 1;
+        return -1;
+    }
+    vconst = has_texture ? 1u : 0u;
+    fconst[0] = has_texture ? 1u : 0u;
+    fconst[1] = uses_fetch ? 1u : 0u;
+    fconst[2] = 0u;
+
+    memset(stages, 0, sizeof(stages));
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].pName = "main";
+    stages[0].module = vertex;
+    stages[0].pSpecializationInfo = &vspec;
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].pName = "main";
+    stages[1].module = fragment;
+    stages[1].pSpecializationInfo = strcmp(fragment_name, "luma_boost_lpf") == 0 ? NULL : &fspec;
+
+    for (uint32_t i = 0; i < pipeline->vertex_layout_count && binding_count < MW_MAX_RENDER_LAYOUTS;
+         i++) {
+        if (pipeline->layouts[i].stride == 0)
+            continue;
+        bindings[binding_count].binding = i;
+        bindings[binding_count].stride = pipeline->layouts[i].stride;
+        bindings[binding_count].inputRate = pipeline->layouts[i].step_function == 2
+                                                ? VK_VERTEX_INPUT_RATE_INSTANCE
+                                                : VK_VERTEX_INPUT_RATE_VERTEX;
+        binding_count++;
+    }
+    for (uint32_t i = 0; i < pipeline->vertex_attribute_count &&
+                         attribute_count < MW_MAX_RENDER_ATTRIBUTES;
+         i++) {
+        uint32_t components = 0;
+        VkFormat format = mw_vk_vertex_format(pipeline->attributes[i].format, &components);
+
+        if (format == VK_FORMAT_UNDEFINED || pipeline->attributes[i].buffer_index >=
+                                                 MW_MAX_RENDER_LAYOUTS)
+            continue;
+        attributes[attribute_count].location = i;
+        attributes[attribute_count].binding = pipeline->attributes[i].buffer_index;
+        attributes[attribute_count].format = format;
+        attributes[attribute_count].offset = pipeline->attributes[i].offset;
+        attribute_count++;
+    }
+    vertex_input.vertexBindingDescriptionCount = binding_count;
+    vertex_input.pVertexBindingDescriptions = bindings;
+    vertex_input.vertexAttributeDescriptionCount = attribute_count;
+    vertex_input.pVertexAttributeDescriptions = attributes;
+
+    assembly.topology = mw_metal_topology(primitive);
+    assembly.primitiveRestartEnable = VK_FALSE;
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    blend.colorWriteMask = mw_metal_write_mask(pipeline->write_mask);
+    if (pipeline->blend_enabled) {
+        blend.blendEnable = VK_TRUE;
+        blend.srcColorBlendFactor = mw_metal_blend_factor(pipeline->src_rgb_blend_factor);
+        blend.dstColorBlendFactor = mw_metal_blend_factor(pipeline->dst_rgb_blend_factor);
+        blend.colorBlendOp = mw_metal_blend_op(pipeline->rgb_blend_operation);
+        blend.srcAlphaBlendFactor = mw_metal_blend_factor(pipeline->src_alpha_blend_factor);
+        blend.dstAlphaBlendFactor = mw_metal_blend_factor(pipeline->dst_alpha_blend_factor);
+        blend.alphaBlendOp = mw_metal_blend_op(pipeline->alpha_blend_operation);
+    }
+    blend_state.attachmentCount = 1;
+    blend_state.pAttachments = &blend;
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+    color_format = mw_vk_format(pipeline->color_format);
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachmentFormats = &color_format;
+
+    info.pNext = &rendering;
+    info.stageCount = 2;
+    info.pStages = stages;
+    info.pVertexInputState = &vertex_input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pColorBlendState = &blend_state;
+    info.pDynamicState = &dynamic;
+    info.layout = s->render.pipeline_layout;
+    result = vkCreateGraphicsPipelines(s->vk.device, VK_NULL_HANDLE, 1, &info, NULL,
+                                       &pipeline->vk_pipeline[index]);
+    if (result != VK_SUCCESS) {
+        mw_log("render: vkCreateGraphicsPipelines(%s, topology %u) failed: %d", pipeline->name,
+               assembly.topology, (int)result);
+        pipeline->vk_failed = 1;
+        return -1;
+    }
+    mw_log("render: pipeline %u \"%s\" -> Vulkan pipeline (topology %u, texture %d, fetch %d)",
+           pipeline->id, pipeline->name, assembly.topology, has_texture, uses_fetch);
+    return 0;
+}
+
+static void mw_render_push_offsets(struct mw_server *s, VkCommandBuffer command,
+                                   const struct mw_render_draw_command *draw)
+{
+    uint32_t offsets[4];
+
+    offsets[0] = (uint32_t)draw->vertex_buffer_offset[2];
+    offsets[1] = (uint32_t)draw->vertex_buffer_offset[3];
+    offsets[2] = (uint32_t)draw->fragment_buffer_offset[1];
+    offsets[3] = (uint32_t)draw->fragment_buffer_offset[2];
+    vkCmdPushConstants(command, s->render.pipeline_layout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(offsets), offsets);
+}
+
+static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame,
+                               struct mw_frame_result *result)
+{
+    struct mw_vulkan *vk = &s->vk;
+    struct mw_image *target;
+    VkCommandBuffer command = vk->command_buffer;
+    VkCommandBufferBeginInfo begin_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkImageLayout fetch_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint64_t t0;
+    uint64_t t1;
+    uint64_t t2;
+    uint64_t t3;
+    int status = MW_STATUS_OK;
+    VkResult vr;
+
+    memset(result, 0, sizeof(*result));
+    if (frame->error != 0)
+        return frame->error;
+    target = mw_image_find(s, frame->render_target);
+    if (target == NULL) {
+        mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "render frame names unknown target %u",
+                      frame->render_target);
+        return MW_STATUS_BAD_COMMAND;
+    }
+    if (frame->draw_count == 0) {
+        mw_log("render frame %" PRIu64 ": no draws; acknowledged", frame->seq);
+        return MW_STATUS_OK;
+    }
+    if (mw_render_vk_init(s) < 0)
+        return MW_STATUS_VULKAN;
+    if (mw_render_ensure_fetch(s, target->width, target->height, target->format) < 0)
+        return MW_STATUS_NO_MEMORY;
+
+    {
+        /* Debug aid for the WP-2 shader bring-up: execute only the first N draws of the frame. */
+        const char *limit = getenv("MW_DEBUG_DRAWS");
+
+        if (limit != NULL) {
+            uint32_t debug_limit = (uint32_t)strtoul(limit, NULL, 10);
+
+            if (debug_limit > 0 && debug_limit < frame->draw_count)
+                frame->draw_count = debug_limit;
+        }
+    }
+    t0 = mw_now_ns();
+    vr = vkResetCommandPool(vk->device, vk->command_pool, 0);
+    if (vr != VK_SUCCESS) {
+        mw_vk_result_log("vkResetCommandPool", vr);
+        return MW_STATUS_VULKAN;
+    }
+    vr = vkResetDescriptorPool(vk->device, s->render.pool, 0);
+    if (vr != VK_SUCCESS) {
+        mw_vk_result_log("vkResetDescriptorPool", vr);
+        return MW_STATUS_VULKAN;
+    }
+    vr = vkBeginCommandBuffer(command, &begin_info);
+    if (vr != VK_SUCCESS) {
+        mw_vk_result_log("vkBeginCommandBuffer", vr);
+        return MW_STATUS_VULKAN;
+    }
+
+    for (uint32_t d = 0; d < frame->draw_count && status == MW_STATUS_OK; d++) {
+        const struct mw_render_draw_command *draw = &frame->draws[d];
+        struct mw_render_pipeline *pipeline = mw_pipeline_find(s, draw->pipeline_id);
+        struct mw_buffer *wire_buffer = NULL;
+        struct mw_buffer *index_buffer = NULL;
+        struct mw_image *texture_image = NULL;
+        struct mw_sampler_state *sampler_state = NULL;
+        VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo allocate = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        VkWriteDescriptorSet writes[4];
+        VkDescriptorBufferInfo buffer_info;
+        VkDescriptorImageInfo image_info;
+        VkDescriptorImageInfo sampler_info;
+        VkDescriptorImageInfo fetch_info;
+        VkRenderingAttachmentInfo color_attachment = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        VkRenderingInfo rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO};
+        VkViewport vp;
+        VkRect2D scissor;
+        int uses_fetch;
+        uint32_t wire_id;
+
+        if (pipeline == NULL) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw names unknown pipeline %u",
+                          draw->pipeline_id);
+            status = MW_STATUS_BAD_COMMAND;
+            break;
+        }
+        if (mw_render_ensure_pipeline(s, pipeline, draw->primitive_type) < 0) {
+            mw_frame_fail(s, MW_STATUS_VULKAN, "cannot create the Vulkan pipeline for \"%s\"",
+                          pipeline->name);
+            status = MW_STATUS_VULKAN;
+            break;
+        }
+        /* The shader's Metal buffer arguments live in the wire buffer; the one the vertex stage
+         * reads at index 2 (mvp_matrix) is the authoritative allocation for this draw. */
+        wire_id = draw->vertex_buffer_id[2] != 0
+                      ? draw->vertex_buffer_id[2]
+                      : (draw->fragment_buffer_id[1] != 0 ? draw->fragment_buffer_id[1]
+                                                         : draw->vertex_buffer_id[1]);
+        wire_buffer = mw_buffer_find(s, wire_id);
+        if (wire_buffer == NULL) {
+            mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw has no wire buffer");
+            status = MW_STATUS_BAD_COMMAND;
+            break;
+        }
+        if (draw->fragment_buffer_id[1] != 0 && draw->fragment_buffer_id[1] != wire_id)
+            mw_log("warning: frame buffer 1 is buffer %u, not the vertex stage's buffer %u; "
+                   "the push-constant offsets assume one allocation",
+                   draw->fragment_buffer_id[1], wire_id);
+        if ((draw->flags & MW_DRAW_INDEXED) != 0) {
+            index_buffer = mw_buffer_find(s, draw->index_buffer);
+            if (index_buffer == NULL) {
+                mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw names unknown index buffer %u",
+                              draw->index_buffer);
+                status = MW_STATUS_BAD_COMMAND;
+                break;
+            }
+        }
+        if (draw->texture_id[3] != 0) {
+            texture_image = mw_image_find(s, draw->texture_id[3]);
+            if (texture_image == NULL) {
+                mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "draw names unknown texture %u",
+                              draw->texture_id[3]);
+                status = MW_STATUS_BAD_COMMAND;
+                break;
+            }
+            if (texture_image->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                VkAccessFlags src_access = 0;
+                VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+                if (texture_image->layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                    src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                }
+                mw_cmd_image_barrier(
+                    command, texture_image->image, texture_image->layout,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, src_access,
+                    VK_ACCESS_SHADER_READ_BIT, src_stage, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                texture_image->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
+        }
+        if (draw->sampler_id[0] != 0)
+            sampler_state = mw_sampler_find(s, draw->sampler_id[0]);
+        uses_fetch = mw_pipeline_fetches(pipeline);
+
+        if (uses_fetch && d > 0) {
+            VkImageCopy copy = {0};
+
+            mw_cmd_image_barrier(command, target->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+            mw_cmd_image_barrier(
+                command, s->render.fetch_image, fetch_layout,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                fetch_layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                fetch_layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                                          : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+            copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.srcSubresource.layerCount = 1;
+            copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.dstSubresource.layerCount = 1;
+            copy.extent.width = target->width;
+            copy.extent.height = target->height;
+            copy.extent.depth = 1;
+            vkCmdCopyImage(command, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           s->render.fetch_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            mw_cmd_image_barrier(command, s->render.fetch_image,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            fetch_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            mw_cmd_image_barrier(command, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_ACCESS_TRANSFER_READ_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        } else if (d == 0 && target->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            VkAccessFlags src_access = 0;
+            VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+            if (target->layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+                src_access = VK_ACCESS_TRANSFER_READ_BIT;
+                src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            } else if (target->layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+                src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            }
+            mw_cmd_image_barrier(command, target->image, target->layout,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, src_access,
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 src_stage, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+
+        allocate.descriptorPool = s->render.pool;
+        allocate.descriptorSetCount = 1;
+        allocate.pSetLayouts = &s->render.set_layout;
+        vr = vkAllocateDescriptorSets(vk->device, &allocate, &descriptor);
+        if (vr != VK_SUCCESS) {
+            mw_vk_result_log("vkAllocateDescriptorSets", vr);
+            status = MW_STATUS_VULKAN;
+            break;
+        }
+        buffer_info.buffer = wire_buffer->buffer;
+        buffer_info.offset = 0;
+        buffer_info.range = VK_WHOLE_SIZE;
+        image_info.sampler = VK_NULL_HANDLE;
+        image_info.imageView =
+            texture_image != NULL ? texture_image->view : s->render.dummy_view;
+        image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        sampler_info.sampler =
+            sampler_state != NULL ? sampler_state->sampler : s->render.dummy_sampler;
+        sampler_info.imageView = VK_NULL_HANDLE;
+        sampler_info.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        fetch_info.sampler = VK_NULL_HANDLE;
+        fetch_info.imageView = uses_fetch ? s->render.fetch_view : s->render.dummy_view;
+        fetch_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        memset(writes, 0, sizeof(writes));
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = descriptor;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[0].pBufferInfo = &buffer_info;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = descriptor;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[1].pImageInfo = &image_info;
+        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet = descriptor;
+        writes[2].dstBinding = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        writes[2].pImageInfo = &sampler_info;
+        writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[3].dstSet = descriptor;
+        writes[3].dstBinding = 3;
+        writes[3].descriptorCount = 1;
+        writes[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[3].pImageInfo = &fetch_info;
+        vkUpdateDescriptorSets(vk->device, 4, writes, 0, NULL);
+
+        color_attachment.imageView = target->view;
+        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.loadOp =
+            d > 0 ? VK_ATTACHMENT_LOAD_OP_LOAD
+                  : (draw->load_action == 2
+                         ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                         : (draw->load_action == 1 ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                                   : VK_ATTACHMENT_LOAD_OP_DONT_CARE));
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color_attachment.clearValue.color.float32[0] = draw->clear_color[0];
+        color_attachment.clearValue.color.float32[1] = draw->clear_color[1];
+        color_attachment.clearValue.color.float32[2] = draw->clear_color[2];
+        color_attachment.clearValue.color.float32[3] = draw->clear_color[3];
+        rendering.renderArea.offset.x = 0;
+        rendering.renderArea.offset.y = 0;
+        rendering.renderArea.extent.width = target->width;
+        rendering.renderArea.extent.height = target->height;
+        rendering.layerCount = 1;
+        rendering.colorAttachmentCount = 1;
+        rendering.pColorAttachments = &color_attachment;
+        vkCmdBeginRendering(command, &rendering);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipeline->vk_pipeline[draw->primitive_type <= 4
+                                                    ? draw->primitive_type
+                                                    : 3]);
+        vp.x = draw->viewport[0];
+        vp.y = draw->viewport[1];
+        vp.width = draw->viewport[2];
+        vp.height = draw->viewport[3];
+        vp.minDepth = draw->viewport[4];
+        vp.maxDepth = draw->viewport[5];
+        vkCmdSetViewport(command, 0, 1, &vp);
+        scissor.offset.x = (int32_t)draw->scissor[0];
+        scissor.offset.y = (int32_t)draw->scissor[1];
+        scissor.extent.width = draw->scissor[2];
+        scissor.extent.height = draw->scissor[3];
+        vkCmdSetScissor(command, 0, 1, &scissor);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                s->render.pipeline_layout, 0, 1, &descriptor, 0, NULL);
+        for (uint32_t b = 0; b < MW_MAX_RENDER_LAYOUTS; b++) {
+            struct mw_buffer *vertex_buffer;
+
+            if (pipeline->layouts[b].stride == 0 || draw->vertex_buffer_id[b] == 0)
+                continue;
+            vertex_buffer = mw_buffer_find(s, draw->vertex_buffer_id[b]);
+            if (vertex_buffer == NULL) {
+                mw_frame_fail(s, MW_STATUS_BAD_COMMAND, "vertex buffer %u is missing",
+                              draw->vertex_buffer_id[b]);
+                status = MW_STATUS_BAD_COMMAND;
+                break;
+            }
+            vkCmdBindVertexBuffers(command, b, 1, &vertex_buffer->buffer,
+                                   &draw->vertex_buffer_offset[b]);
+        }
+        if (status != MW_STATUS_OK) {
+            vkCmdEndRendering(command);
+            break;
+        }
+        if ((draw->flags & MW_DRAW_INDEXED) != 0)
+            vkCmdBindIndexBuffer(command, index_buffer->buffer, draw->index_buffer_offset,
+                                 mw_metal_index_type(draw->index_type));
+        mw_render_push_offsets(s, command, draw);
+        if ((draw->flags & MW_DRAW_INDEXED) != 0) {
+            vkCmdDrawIndexed(command, (uint32_t)draw->index_count, draw->instance_count, 0,
+                             (int32_t)draw->base_vertex, draw->base_instance);
+        } else {
+            vkCmdDraw(command, (uint32_t)draw->vertex_count, draw->instance_count,
+                      (uint32_t)draw->vertex_start, draw->base_instance);
+        }
+        vkCmdEndRendering(command);
+    }
+
+    if (status == MW_STATUS_OK) {
+        VkImageLayout layout = target->layout;
+        VkAccessFlags src_access = layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                        ? VK_ACCESS_TRANSFER_READ_BIT
+                                        : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        VkPipelineStageFlags src_stage = layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                             ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                                             : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkBufferImageCopy copy = {0};
+
+        if (layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+            mw_cmd_image_barrier(command, target->image, layout,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_access,
+                                 VK_ACCESS_TRANSFER_READ_BIT, src_stage,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+            target->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        }
+        copy.bufferOffset = 0;
+        copy.bufferRowLength = 0;
+        copy.bufferImageHeight = 0;
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent.width = target->width;
+        copy.imageExtent.height = target->height;
+        copy.imageExtent.depth = 1;
+        vkCmdCopyImageToBuffer(command, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               target->readback, 1, &copy);
+    }
+
+    if (status != MW_STATUS_OK) {
+        vkEndCommandBuffer(command);
+        for (size_t i = 0; i < s->image_count; i++)
+            s->images[i]->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        return status;
+    }
+    vr = vkEndCommandBuffer(command);
+    if (vr != VK_SUCCESS) {
+        mw_vk_result_log("vkEndCommandBuffer", vr);
+        return MW_STATUS_VULKAN;
+    }
+    t1 = mw_now_ns();
+    result->exec_ns = t1 - t0;
+    vkResetFences(vk->device, 1, &vk->fence);
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command;
+    vr = vkQueueSubmit(vk->queue, 1, &submit_info, vk->fence);
+    if (vr != VK_SUCCESS) {
+        mw_vk_result_log("vkQueueSubmit", vr);
+        return MW_STATUS_VULKAN;
+    }
+    vr = vkWaitForFences(vk->device, 1, &vk->fence, VK_TRUE, UINT64_MAX);
+    t2 = mw_now_ns();
+    result->gpu_ns = t2 - t1;
+    if (vr != VK_SUCCESS) {
+        mw_vk_result_log("vkWaitForFences", vr);
+        return MW_STATUS_VULKAN;
+    }
+    result->crc = mw_crc32_rows_zlib((const unsigned char *)target->readback_mapped,
+                                     target->width * mw_format_bytes(target->format),
+                                     target->width * mw_format_bytes(target->format),
+                                     target->height, s->crc_stride);
+    result->crc_ok = 1;
+    t3 = mw_now_ns();
+    result->readback_ns = t3 - t2;
+    {
+        const unsigned char *bytes = target->readback_mapped;
+        size_t count = (size_t)target->bytes;
+        size_t nonzero = 0;
+
+        for (size_t i = 0; i < count; i++) {
+            if (bytes[i] != 0) {
+                nonzero++;
+            }
+        }
+        mw_log("render frame %" PRIu64 ": executed %u draw(s) on texture %u (%ux%u), "
+               "crc 0x%08x, %zu/%zu non-zero byte(s)",
+               frame->seq, frame->draw_count, target->id, target->width, target->height,
+               result->crc, nonzero, count);
+    }
+    if (s->shm.path != NULL && s->shm.path[0] != '\0' && !s->shm.failed) {
+        if (mw_shm_prepare(&s->shm, target->width, target->height) == 0) {
+            const unsigned char *bgra = target->readback_mapped;
+
+            if (!mw_format_is_bgra(target->format)) {
+                unsigned char *scratch = mw_scratch_resize(&s->bgra_scratch, &s->bgra_scratch_size,
+                                                           target->bytes);
+
+                if (scratch != NULL) {
+                    mw_pixels_to_bgra(target->readback_mapped, target->bytes, target->format,
+                                      scratch);
+                    bgra = scratch;
+                }
+            }
+            mw_shm_publish(&s->shm, bgra);
+        }
+    }
+    return MW_STATUS_OK;
+}
+
 static void mw_stats_grow(struct mw_server *s, size_t needed)
 {
     if (needed <= s->stats_cap)
@@ -2188,24 +3687,30 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
      * picture it did not draw, so the ack reports crc_ok without a read-back (crc 0). */
     if (frame->render_mode) {
         struct mw_ack ack;
+        struct mw_frame_result result;
 
+        memset(&result, 0, sizeof(result));
+        status = mw_run_render_frame(s, frame, &result);
         memset(&ack, 0, sizeof(ack));
         ack.magic = MW_ACK_MAGIC;
         ack.version = MW_VERSION;
-        ack.status = (uint16_t)(frame->error != 0 ? frame->error : MW_STATUS_OK);
+        ack.status = (uint16_t)status;
         ack.seq = frame->seq;
         ack.guest_t_commit_ns = frame->guest_t_encoded_ns;
         ack.host_t_done_ns = mw_now_ns();
-        ack.crc = 0;
-        ack.crc_ok = 1;
+        ack.crc = result.crc;
+        ack.crc_ok = 1; /* the guest did not hash a picture it did not draw */
         ack.width = frame->width;
         ack.height = frame->height;
         ack.bytes_per_row = frame->bytes_per_row;
         mw_log("render frame %" PRIu64 ": %u encoder(s), %" PRIu64 " draws, %" PRIu64
-               " sets, target texture %u %ux%u (decoded and acknowledged; no execution until the "
-               "WP-2 shaders exist)",
+               " sets, target texture %u %ux%u, status %d (%s)",
                frame->seq, frame->render_encoders, frame->render_draw_count,
-               frame->render_set_count, frame->render_target, frame->width, frame->height);
+               frame->render_set_count, frame->render_target, frame->width, frame->height,
+               status,
+               status == MW_STATUS_OK
+                   ? "executed on Vulkan"
+                   : (status == MW_STATUS_VULKAN ? "Vulkan error" : "wire error"));
         s->render_frames_seen++;
         if (mw_send_all(s->client_fd, &ack, sizeof(ack)) < 0) {
             mw_frame_reset(s);
@@ -3035,9 +4540,13 @@ static void mw_server_cleanup(struct mw_server *s)
         mw_buffer_destroy(s, s->buffers[0]);
     while (s->pipeline_count > 0)
         mw_pipeline_destroy(s, s->pipelines[0]);
+    while (s->sampler_count > 0)
+        mw_sampler_state_destroy(s, s->samplers[0]);
+    mw_render_vk_fini(s);
     free(s->images);
     free(s->buffers);
     free(s->pipelines);
+    free(s->samplers);
     free(s->payload);
     free(s->rgb_scratch);
     free(s->bgra_scratch);
@@ -3076,6 +4585,7 @@ static void mw_usage(FILE *out, const char *program)
         "  --ram PATH        QEMU's RAM file, so an upload-by-reference can be read in place\n"
         "  --ram-base HEX    guest physical address of the RAM file's first byte (default "
         "0x40000000)\n"
+        "  --dump DIR        write decoded buffers and object descriptors to DIR (debug aid)\n"
         "  --verbose         log every wire message\n"
         "  --help            this text\n",
         program, MW_DEFAULT_PORT, MW_DEFAULT_SHM);
@@ -3107,6 +4617,7 @@ int main(int argc, char **argv)
         {"ram-base", required_argument, NULL, 'R'}, {"crc-stride", required_argument, NULL, 1000},
         {"pci", required_argument, NULL, 1002},
         {"byte-check", no_argument, NULL, 1001},    {"verbose", no_argument, NULL, 'v'},
+        {"dump", required_argument, NULL, 1003},
         {"help", no_argument, NULL, 'h'},           {NULL, 0, NULL, 0},
     };
     const char *env_gpu = getenv("METALWIRE_GPU");
@@ -3177,6 +4688,9 @@ int main(int argc, char **argv)
         case 1002:
             pci_address = optarg;
             break;
+        case 1003:
+            g_dump_dir = optarg;
+            break;
         case 'v':
             server.verbose = 1;
             break;
@@ -3208,6 +4722,13 @@ int main(int argc, char **argv)
         server.out_dir = strdup(out_dir);
         if (server.out_dir == NULL)
             return 1;
+    }
+    if (g_dump_dir != NULL) {
+        if (mkdir(g_dump_dir, 0777) != 0 && errno != EEXIST) {
+            mw_log("--dump %s: cannot create the directory: %s", g_dump_dir, strerror(errno));
+            return 1;
+        }
+        mw_log("dump: writing decoded objects to %s", g_dump_dir);
     }
 
     g_verbose = server.verbose;

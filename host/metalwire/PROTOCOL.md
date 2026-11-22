@@ -105,3 +105,24 @@ Rules the two ends rely on:
   `MW_RENDER_END`, so the frame's picture is well-defined for the execution half.
 - **One render frame means one acknowledged frame.** The v1 ack path is unchanged: one
   `struct mw_ack` per `MW_FRAME_END`.
+
+## Protocol 2 execution (WP-2)
+
+The host now executes the render encoder instead of only decoding it. The mapping is in
+[`README.md`](README.md#render-encoders-stage-c-wp-2) and the four base functions are in
+[`shaders/`](shaders/). Two facts about the wire matter to the execution half:
+
+- **The encoder state that reaches a draw is the state of the set/draw stream.** A `MW_RENDER_DRAW`
+  carries only its own arguments; the pipeline, buffers, textures, sampler, viewport and scissor
+  are the ones applied before it. This is the Metal model and the host replays it.
+- **Two Metal setters are not on the wire yet.** CoreAnimation calls
+  `-[MTLRenderCommandEncoder setVertexBufferOffset:atIndex:]` and
+  `setFragmentBufferOffset:atIndex:` between its draws (the guest log records them as "asked and
+  not implemented"); their arguments are not serialized. The captured buffer shows what they mean:
+  the three quads sit at 336/576/816 and their index buffers at 528/768/1008, while the 13 sets
+  bind only the first offsets. A protocol 2 replay therefore executes every draw with the encoder's
+  last full binding — structurally correct, but not the recorded geometry. Closing this needs two
+  new opcodes (or a version 3 addition) and is WP-3 input; WP-2 deliberately does not change the
+  wire.
+
+The protocol number stays 2: no message shape changed in WP-2.
