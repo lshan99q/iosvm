@@ -178,13 +178,16 @@ Implemented (anything else a real Metal runtime asks is logged once and answered
 - dealloc: classes whose superclass is a Metal private base free their own state and skip the
   base's `-dealloc` (it dereferences dispatch objects these stubs never created — `_MTLCommandQueue`
   `_submittedGroup`, `_MTLLibrary` `_cacheEntry`); that base allocation is deliberately leaked.
-  Two stage-4.1 additions soften that: the command buffer and the two encoder classes are handed
-  out from a fixed instance pool (the pool holds the last reference and the per-frame state is
-  rebuilt, so the per-frame objects stop multiplying), and the command queue has a repair that
-  puts `dispatch_group_create()` into `_submittedGroup` and lets the base `-dealloc` run — enabled
-  with `/redwood/etc/metal-base-dealloc`, off by default until a boot proves the rest of the
-  inherited chain. Both decisions are counted per class (`alloc`/`dealloc`/`base_dealloc`/
-  `base_skipped`/`reused`) and dumped to the serial console on SIGTERM/SIGINT, at exit and every
+  Two stage-4.1 additions soften that: the command buffer, the two encoder classes and the buffer
+  class are handed out from fixed instance pools (the pool holds the last reference and the
+  per-frame state is rebuilt; buffers match on their length, so the 256 KiB render buffer CoreAnimation
+  asks for every frame is one host-side buffer refreshed by the upload instead of one per frame),
+  and the command queue's leak has a *safe release* probe — `/redwood/etc/metal-base-dealloc`
+  creates the `_submittedGroup` dispatch group and releases it balanced, logging pre/post, without
+  ever calling the inherited `-dealloc` chain (boot wp4-soak-fix ran that chain once: the guest
+  stopped rendering, 0 frames in 1,500 s, so it is recorded as unusable). The marker is off by
+  default. Both decisions are counted per class (`alloc`/`dealloc`/`base_dealloc`/`base_skipped`/
+  `reused`/`safe_release`) and dumped to the serial console on SIGTERM/SIGINT, at exit and every
   1,800 committed frames, so a soak can read the accounting.
 - census (`/redwood/etc/metal-census` in the root image): every method the stub classes inherit
   from their private base is trapped and logged once, answered with zero; the device and the queue
@@ -290,10 +293,12 @@ drawable; `-newDrawableWithTexture:` is ours, not Metal's.
   pixels yet (stage 30, §6.3).
 - **Async/completion-handler variants** of the library/function/pipeline APIs beyond the ones listed
   above.
-- **The base-dealloc leak** described above: the per-frame objects no longer multiply (they come
-  from the instance pool) and the command queue's base dealloc has an opt-in repair, but the other
-  classes still keep their base allocation until a boot validates calling their inherited
-  `-dealloc`. The lifecycle counters are the soak's evidence of what is still growing.
+- **The base-dealloc leak** described above: the per-frame objects no longer multiply (command
+  buffer, encoders and buffers come from instance pools) and the queue's dispatch group has a
+  verified safe-release probe, but the inherited `-dealloc` chain of every class stays uncalled —
+  running the queue's chain once stopped the guest from rendering (t30), so each class still keeps
+  Metal's own allocation for its objects. The lifecycle counters are the soak's evidence of what is
+  still growing.
 - `newBufferWithBytesNoCopy:length:options:deallocator:`, IOSurface-backed textures, texture
   read/write (`getBytes:`/`replaceRegion:`) — nil.
 - Buffers are plain anonymous memory; there is no GPU address and no guest-side GPU work.

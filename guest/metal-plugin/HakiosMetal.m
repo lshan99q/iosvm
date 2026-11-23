@@ -151,6 +151,7 @@ enum {
     MW_LIFE_BASE_DEALLOC,
     MW_LIFE_BASE_SKIPPED,
     MW_LIFE_REUSED,
+    MW_LIFE_SAFE_RELEASE,
     MW_LIFE_COUNT
 };
 struct mw_lifecycle_entry {
@@ -199,7 +200,7 @@ static void mw_lifecycle_note(Class cls, int kind)
 
 static void mw_lifecycle_dump(const char *why)
 {
-    uint64_t allocs = 0, deallocs = 0, taker = 0, skipped = 0, reused = 0;
+    uint64_t allocs = 0, deallocs = 0, taker = 0, skipped = 0, reused = 0, safe = 0;
 
     pthread_mutex_lock(&gLifecycleLock);
     mw_log("lifecycle (%s): %d class(es) tracked", why != NULL ? why : "?", gLifecycleCount);
@@ -207,21 +208,25 @@ static void mw_lifecycle_dump(const char *why)
         struct mw_lifecycle_entry *entry = &gLifecycle[i];
 
         mw_log("lifecycle: %-32s alloc=%llu dealloc=%llu base_dealloc=%llu base_skipped=%llu "
-               "reused=%llu", entry->name, (unsigned long long)entry->counts[MW_LIFE_ALLOC],
+               "reused=%llu safe_release=%llu", entry->name,
+               (unsigned long long)entry->counts[MW_LIFE_ALLOC],
                (unsigned long long)entry->counts[MW_LIFE_DEALLOC],
                (unsigned long long)entry->counts[MW_LIFE_BASE_DEALLOC],
                (unsigned long long)entry->counts[MW_LIFE_BASE_SKIPPED],
-               (unsigned long long)entry->counts[MW_LIFE_REUSED]);
+               (unsigned long long)entry->counts[MW_LIFE_REUSED],
+               (unsigned long long)entry->counts[MW_LIFE_SAFE_RELEASE]);
         allocs += entry->counts[MW_LIFE_ALLOC];
         deallocs += entry->counts[MW_LIFE_DEALLOC];
         taker += entry->counts[MW_LIFE_BASE_DEALLOC];
         skipped += entry->counts[MW_LIFE_BASE_SKIPPED];
         reused += entry->counts[MW_LIFE_REUSED];
+        safe += entry->counts[MW_LIFE_SAFE_RELEASE];
     }
     pthread_mutex_unlock(&gLifecycleLock);
     mw_log("lifecycle: totals alloc=%llu dealloc=%llu base_dealloc=%llu base_skipped=%llu "
-           "reused=%llu", (unsigned long long)allocs, (unsigned long long)deallocs,
-           (unsigned long long)taker, (unsigned long long)skipped, (unsigned long long)reused);
+           "reused=%llu safe_release=%llu", (unsigned long long)allocs,
+           (unsigned long long)deallocs, (unsigned long long)taker, (unsigned long long)skipped,
+           (unsigned long long)reused, (unsigned long long)safe);
 }
 
 static void mw_lifecycle_signal(int signal_number)
@@ -249,11 +254,13 @@ static void mw_lifecycle_install(void)
 #define MW_POOL_OBJECTS 16
 struct mw_object_pool {
     id objects[MW_POOL_OBJECTS];
+    uint64_t sizes[MW_POOL_OBJECTS]; /* the buffer pool matches on length; others ignore it */
     int count;
     int capacity;
 };
 static struct mw_object_pool gCommandBufferPool = {.capacity = 4};
 static struct mw_object_pool gEncoderPool = {.capacity = MW_POOL_OBJECTS};
+static struct mw_object_pool gBufferPool = {.capacity = 8};
 
 static id mw_pool_take_free(struct mw_object_pool *pool, Class cls)
 {
@@ -272,7 +279,34 @@ static id mw_pool_take_free(struct mw_object_pool *pool, Class cls)
 static void mw_pool_remember(struct mw_object_pool *pool, id object)
 {
     if (object != nil && pool->count < pool->capacity && pool->count < MW_POOL_OBJECTS) {
-        pool->objects[pool->count++] = [object retain];
+        pool->objects[pool->count] = [object retain];
+        pool->sizes[pool->count] = 0;
+        pool->count++;
+    }
+}
+
+/* Buffers are matched on their length: a buffer CoreAnimation asks for this frame is only served
+ * from the pool when the pooled one has exactly that length (its Metal buffer object already lives
+ * on the host with that id, so the frame's upload refreshes it instead of creating another). */
+static id mw_pool_take_free_buffer(struct mw_object_pool *pool, Class cls, uint64_t length)
+{
+    for (int i = 0; i < pool->count; i++) {
+        id object = pool->objects[i];
+
+        if (object != nil && object_getClass(object) == cls && pool->sizes[i] == length &&
+            [object retainCount] == 1) {
+            return object;
+        }
+    }
+    return nil;
+}
+
+static void mw_pool_remember_buffer(struct mw_object_pool *pool, id object, uint64_t length)
+{
+    if (object != nil && pool->count < pool->capacity && pool->count < MW_POOL_OBJECTS) {
+        pool->objects[pool->count] = [object retain];
+        pool->sizes[pool->count] = length;
+        pool->count++;
     }
 }
 
@@ -842,11 +876,19 @@ static void mw_free_render_encoder(struct mw_render_encoder_state *state);
  * Classes without such a known-safe repair keep the old rule (free the instance, skip the base).
  */
 /*
- * The repair is opt-in: `/redwood/etc/metal-base-dealloc` (same marker pattern as the inject
- * shims). It is correct as far as the analysis goes, but the rest of the inherited -dealloc chain
- * on a stub instance has never run in this guest; a fault there kills the process, so the default
- * boot keeps the old rule until a boot with the marker proves the chain. Removing the marker is
- * enough to go back.
+ * `/redwood/etc/metal-base-dealloc` (same marker pattern as the inject shims) now selects the
+ * *safe release* of the leak, not the inherited -dealloc chain. Boot wp4-soak-fix (t30, 1500 s)
+ * ran the chain once and the guest stopped rendering entirely -- 0 frames, the guest clock 2.8x
+ * behind the wall clock, no panic -- so that path is recorded as unusable on a stub and is no
+ * longer reachable from here.
+ *
+ * What the marker does enable is the part the analysis actually pins down: -[_MTLCommandQueue
+ * dealloc] releases the dispatch group at ivar 0xb0 (`_submittedGroup`) without a nil check
+ * (docs/research/ca-metallib-url.md §10.1). A stub whose ivar is nil cannot survive that release,
+ * so instead of calling the chain this creates a group, releases it in the same breath and clears
+ * the slot (balanced: +1 create, -1 release), and logs the pre/post state. The instance memory is
+ * then freed with object_dispose() as before; the inherited chain is never called and Metal's own
+ * allocation for the object still leaks (per process, kilobytes). The default boot is unchanged.
  */
 static int mw_base_dealloc_enabled(void)
 {
@@ -854,30 +896,47 @@ static int mw_base_dealloc_enabled(void)
 
     if (enabled < 0) {
         enabled = access("/redwood/etc/metal-base-dealloc", F_OK) == 0;
-        mw_log("lifecycle: base-dealloc repair %s (/redwood/etc/metal-base-dealloc)",
-               enabled ? "enabled" : "disabled; the base allocation of each class stays leaked");
+        mw_log("lifecycle: queue safe-release probe %s (/redwood/etc/metal-base-dealloc); the "
+               "inherited -dealloc chain is never called", enabled ? "enabled" : "disabled");
     }
     return enabled;
 }
 
-static int mw_base_dealloc_can_run(id self, Class base)
+static int mw_base_safe_release(id self, Class base)
 {
     Ivar ivar;
     void **slot;
 
-    if (base == Nil || !mw_base_dealloc_enabled() ||
-        strcmp(class_getName(base), "_MTLCommandQueue") != 0) {
+    if (base == Nil || strcmp(class_getName(base), "_MTLCommandQueue") != 0) {
         return 0;
     }
     ivar = class_getInstanceVariable(base, "_submittedGroup");
     if (ivar == NULL) {
+        mw_log("queue safe release: this _MTLCommandQueue has no _submittedGroup ivar; nothing to "
+               "do");
         return 0;
     }
     slot = (void **)((char *)self + ivar_getOffset(ivar));
-    if (*slot == NULL) {
-        *slot = dispatch_group_create();
+    if (*slot != NULL) {
+        mw_log("queue safe release: _submittedGroup already %p; leaving it alone", *slot);
+        return 1;
     }
-    return *slot != NULL;
+    {
+        dispatch_group_t group = dispatch_group_create();
+
+        mw_log("queue safe release: pre: _submittedGroup is NULL, ivar offset %td, instance %p",
+               ivar_getOffset(ivar), self);
+        if (group == NULL) {
+            mw_log("queue safe release: dispatch_group_create returned NULL; nothing released");
+            return 0;
+        }
+        *slot = group;
+        dispatch_release(group);
+        *slot = NULL;
+        mw_log("queue safe release: post: created %p and released it; the slot is NULL again "
+               "(create/release balanced, inherited -dealloc not called)", group);
+    }
+    return 1;
 }
 
 static void mw_object_dealloc(id self, SEL _cmd)
@@ -911,17 +970,10 @@ static void mw_object_dealloc(id self, SEL _cmd)
     }
     mw_lifecycle_note(cls, MW_LIFE_DEALLOC);
     if (base != Nil && strncmp(class_getName(base), "_MTL", 4) == 0) {
-        if (mw_base_dealloc_can_run(self, base)) {
-            /* A repair exists for this base: run its own -dealloc (it ends in NSObject's, which
-             * frees the instance) instead of leaking the base's allocation. */
-            IMP implementation = method_getImplementation(
-                class_getInstanceMethod(base, sel_registerName("dealloc")));
-
-            mw_lifecycle_note(cls, MW_LIFE_BASE_DEALLOC);
-            if (implementation != NULL) {
-                ((void (*)(id, SEL))implementation)(self, sel_registerName("dealloc"));
-                return;
-            }
+        if (mw_base_dealloc_enabled() && mw_base_safe_release(self, base)) {
+            /* The safe part of the queue's leak ran (the dispatch group exists and is balanced).
+             * The inherited chain is proven unusable on these stubs (t30) and is never called. */
+            mw_lifecycle_note(cls, MW_LIFE_SAFE_RELEASE);
             mw_lifecycle_note(cls, MW_LIFE_BASE_SKIPPED);
             object_dispose(self);
             return;
@@ -2955,6 +3007,29 @@ static id mw_device_new_buffer(id self, SEL _cmd, NSUInteger length, NSUInteger 
                (unsigned long long)mw_device_max_buffer_length(self, _cmd));
         return nil;
     }
+    buffer = mw_pool_take_free_buffer(&gBufferPool, gBufferClass, (uint64_t)length);
+    if (buffer != nil) {
+        /* A pooled buffer of this exact length: its Metal buffer object already exists on the host
+         * under this id, so the frame's upload refreshes the bytes instead of creating another
+         * buffer there (boot wp4-v14 created 1,803 of them in a 25-minute soak). The instance is
+         * handed to the caller as a "new" object (+1); the pool keeps its own reference. */
+        state = mw_buffer_state_of(buffer);
+        if (state != NULL && state->memory != NULL) {
+            mw_lifecycle_note(gBufferClass, MW_LIFE_REUSED);
+            [state->label release];
+            state->label = nil;
+            memset(state->memory, 0, (size_t)length);
+            state->options = options;
+            state->uploaded_seq = 0; /* the new frame's contents go to the host again */
+            if (state->created_generation != gGeneration) {
+                /* A new connection may face a host that still holds the old id; a fresh id keeps
+                 * the create unambiguous (the host rejects duplicate buffer ids). */
+                state->remote_id = mw_next_object_id();
+                state->created_generation = 0;
+            }
+            return [buffer retain];
+        }
+    }
     buffer = mw_alloc_init(gBufferClass, "buffer");
     if (buffer == nil) {
         return nil;
@@ -2977,6 +3052,7 @@ static id mw_device_new_buffer(id self, SEL _cmd, NSUInteger length, NSUInteger 
     state->options = options;
     state->remote_id = mw_next_object_id();
     *slot = state;
+    mw_pool_remember_buffer(&gBufferPool, buffer, (uint64_t)length);
     mw_log("newBufferWithLength:%lu options:0x%lx: buffer %u (%lu bytes, sent on first use)",
            (unsigned long)length, (unsigned long)options, state->remote_id, (unsigned long)length);
     return buffer; /* +1, as a Metal "new" method */
