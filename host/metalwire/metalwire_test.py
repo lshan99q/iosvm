@@ -976,6 +976,117 @@ def run_rg8(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def _run_leak_host(env, frames, extra_env):
+    """Spawn the host with the leak-check knobs; return (host stderr, exit code, generator text)."""
+    work = tempfile.mkdtemp(prefix="metalwire-leak-")
+    host_env = dict(env)
+    host_env.update(extra_env)
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", str(frames), "--shm", ""],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=host_env)
+    lines = []
+    lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain():
+        for line in host.stderr:
+            with lock:
+                lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        require(listening.wait(60), "leak host did not print a listening line in 60 s")
+        with lock:
+            match = None
+            for line in lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the leak host's port")
+        gen = subprocess.run([sys.executable, GEN, "--leak", "--leak-frames", str(frames),
+                              "--port", match.group(1)] + (["--leak-fixed"]
+                                                           if extra_env.get("_fixed") else []),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             timeout=180)
+        code = host.wait(timeout=120)
+        reader.join(timeout=10)
+        with lock:
+            return "\n".join(lines), code, gen.stdout + gen.stderr
+    finally:
+        if host.poll() is None:
+            host.kill()
+        reader.join(timeout=5)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def run_leak_check(env):
+    """WP-4 4.1c: the host's live set stays bounded when the guest keeps creating buffers.
+
+    Boot wp4-soak-fix-ctrl showed the host RSS growing 68 -> 719 MB in 25 minutes; the guest had
+    created 2,135 per-frame 256 KiB buffers with a new id each time and the host never freed one
+    (the wire has no destroy in the plug-in's path). The host now tracks the last frame that named
+    a buffer and, past MW_MAX_BUFFER_BYTES, destroys the oldest ones the wire has not named for
+    MW_BUFFER_MIN_AGE frames; MW_LEAK_CHECK=1 prints the live set every 60 frames and at exit.
+    This runs 130 frames that each create a fresh buffer (the boot's shape) with a 128 KiB cap and
+    a two-frame age, then 40 frames on one fixed buffer (the plug-in's pooled shape).
+    """
+    output, code, gen = _run_leak_host(env, 130, {"MW_LEAK_CHECK": "1",
+                                                  "MW_MAX_BUFFER_BYTES": "131072",
+                                                  "MW_BUFFER_MIN_AGE": "2"})
+    require(code == 0, "leak host exited %s\n%s" % (code, output))
+    require("leak: 130 frame(s) sent, 0 failure(s)" in gen,
+            "the leak fixture did not send every frame:\n%s" % gen)
+    leak_lines = [line for line in output.splitlines() if "leak-check (" in line]
+    require(any("leak-check (periodic)" in line for line in leak_lines),
+            "no periodic leak-check line in a 130-frame run:\n%s" % output)
+    require(any("leak-check (exit)" in line for line in leak_lines),
+            "no exit leak-check line:\n%s" % output)
+    periodic = [re.search(r"buffers=(\d+) buffer_bytes=(\d+)", line) for line in leak_lines
+                if "periodic" in line]
+    require(all(match is not None for match in periodic) and periodic,
+            "periodic leak-check lines have no buffer counters:\n%s" % output)
+    for match in periodic:
+        require(int(match.group(2)) <= 131072 + 65536,
+                "live buffer bytes passed the cap between frames: %s" % match.group(0))
+    exit_line = [line for line in leak_lines if "exit" in line][-1]
+    match = re.search(r"frames=(\d+) images=(\d+) image_bytes=(\d+) buffers=(\d+) "
+                      r"buffer_bytes=(\d+) reclaimed=(\d+) pending_replaces=(\d+).* "
+                      r"rss_kib=(\d+)", exit_line)
+    require(match is not None, "cannot parse the exit leak-check: %s" % exit_line)
+    require(int(match.group(1)) == 130, "exit frames %s, expected 130" % match.group(1))
+    require(int(match.group(2)) == 1, "the host holds %s images, expected the one texture"
+            % match.group(2))
+    require(int(match.group(4)) <= 3, "the live buffer count grew to %s (cap was 128 KiB)"
+            % match.group(4))
+    require(int(match.group(5)) <= 131072 + 65536, "live buffer bytes %s, cap 196,608"
+            % match.group(5))
+    require(int(match.group(6)) >= 100, "only %s buffers were reclaimed of 130 created"
+            % match.group(6))
+    require(int(match.group(7)) == 0, "pending replaceRegion entries left behind: %s"
+            % match.group(7))
+    require(int(match.group(8)) < 300000,
+            "host RSS reached %s KiB in a 130-frame run" % match.group(8))
+
+    output, code, gen = _run_leak_host(env, 40, {"MW_LEAK_CHECK": "1",
+                                                 "MW_MAX_BUFFER_BYTES": "131072",
+                                                 "MW_BUFFER_MIN_AGE": "2",
+                                                 "_fixed": "1"})
+    require(code == 0, "fixed-buffer host exited %s\n%s" % (code, output))
+    require("leak: 40 frame(s) sent, 0 failure(s)" in gen,
+            "the fixed-buffer fixture did not send every frame:\n%s" % gen)
+    exit_line = [line for line in output.splitlines() if "leak-check (exit)" in line][-1]
+    match = re.search(r"buffers=(\d+) buffer_bytes=(\d+) reclaimed=(\d+)", exit_line)
+    require(match is not None, "cannot parse the fixed-buffer leak-check: %s" % exit_line)
+    require((match.group(1), match.group(2), match.group(3)) == ("1", "65536", "0"),
+            "a reused buffer id still churned the host live set: %s" % match.group(0))
+    print("PASS leak-check: 130 fresh per-frame buffers are reclaimed past the 128 KiB cap (live "
+          "set <= 3 buffers) and a reused id creates nothing; MW_LEAK_CHECK reports images, "
+          "buffers, replaces and RSS")
+
+
 def read_png_rgb(path):
     """The host writes PNGs with stored (uncompressed) deflate blocks and filter 0: decode them."""
     with open(path, "rb") as f:
@@ -1259,10 +1370,11 @@ def main():
         run_draw_dump(env)
         run_material(env)
         run_dual_buffer(env)
+        run_leak_check(env)
         run_chain(env)
         run_orientation(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, rg8, "
-              "blur, labels, draw-dump, material, dual-buffer, chain, orientation)"
+              "blur, labels, draw-dump, material, dual-buffer, leak-check, chain, orientation)"
               % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:

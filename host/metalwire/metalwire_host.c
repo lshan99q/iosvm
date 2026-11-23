@@ -99,6 +99,12 @@ struct mw_buffer {
     VkBuffer buffer;
     VkDeviceMemory memory;
     void *mapped;
+    /* WP-4 4.1c: the last frame any message named this buffer. The guest has no destroy message for
+     * every object it creates (the plug-in's own dealloc only frees the guest side), so a wire
+     * buffer that is never named again is dead weight on the host: boot wp4-soak-fix-ctrl created
+     * 2,135 per-frame 256 KiB buffers and the host RSS grew +651 MB. mw_buffers_reclaim() frees the
+     * ones that have not been named for a while once the live set passes the cap. */
+    uint64_t last_used_frame;
 };
 
 struct mw_image {
@@ -393,6 +399,13 @@ struct mw_server {
     struct mw_render_vk render;
     uint64_t render_frames_seen;
     uint64_t render_draws_logged;
+    /* WP-4 4.1c: the host-side live set and its diagnostic/reclaim knobs. */
+    uint64_t buffer_bytes;
+    uint64_t max_buffer_bytes;
+    uint64_t buffer_min_age;
+    uint64_t buffers_reclaimed;
+    uint64_t draws_total;
+    int leak_check;
     /* WP-4 D8: the display surface the previous render frame presented, so a partial (LOAD) frame
      * on the other one can start from the picture the panel just showed. */
     uint32_t last_render_target;
@@ -1423,10 +1436,78 @@ static void mw_vulkan_fini(struct mw_vulkan *vk)
 static struct mw_buffer *mw_buffer_find(struct mw_server *s, uint32_t id)
 {
     for (size_t i = 0; i < s->buffer_count; i++) {
-        if (s->buffers[i]->id == id)
+        if (s->buffers[i]->id == id) {
+            s->buffers[i]->last_used_frame = s->frames_done;
             return s->buffers[i];
+        }
     }
     return NULL;
+}
+
+/* WP-4 4.1c: diagnostics + reclamation of the host-side live set. A buffer the wire has not named
+ * for MW_BUFFER_MIN_AGE frames (default 120) is not part of any in-flight frame -- the wire is
+ * synchronous, every message that uses a buffer names it in the frame that uses it -- so when the
+ * live set passes MW_MAX_BUFFER_BYTES (default 64 MiB) the oldest of those are destroyed. 0 for
+ * MW_MAX_BUFFER_BYTES disables reclamation. */
+static void mw_buffer_destroy(struct mw_server *s, struct mw_buffer *buffer);
+
+static void mw_buffers_reclaim(struct mw_server *s)
+{
+    while (s->max_buffer_bytes != 0 && s->buffer_bytes > s->max_buffer_bytes &&
+           s->buffer_count > 0) {
+        struct mw_buffer *victim = NULL;
+
+        for (size_t i = 0; i < s->buffer_count; i++) {
+            struct mw_buffer *buffer = s->buffers[i];
+
+            if (s->frames_done < buffer->last_used_frame + s->buffer_min_age)
+                continue;
+            if (victim == NULL || buffer->last_used_frame < victim->last_used_frame)
+                victim = buffer;
+        }
+        if (victim == NULL)
+            break;
+        if (s->leak_check)
+            mw_log("leak-check: reclaiming buffer %u (%" PRIu64 " bytes, last used frame %" PRIu64
+                   ", now %" PRIu64 ")", victim->id, victim->length, victim->last_used_frame,
+                   s->frames_done);
+        s->buffers_reclaimed++;
+        mw_buffer_destroy(s, victim);
+    }
+}
+
+static uint64_t mw_rss_kib(void)
+{
+    FILE *status = fopen("/proc/self/status", "r");
+    char line[256];
+    uint64_t kib = 0;
+
+    if (status == NULL)
+        return 0;
+    while (fgets(line, sizeof(line), status) != NULL) {
+        if (strncmp(line, "VmRSS:", 6) == 0) {
+            (void)sscanf(line + 6, "%" SCNu64, &kib);
+            break;
+        }
+    }
+    fclose(status);
+    return kib;
+}
+
+static void mw_leak_check(struct mw_server *s, const char *when)
+{
+    uint64_t image_bytes = 0;
+
+    if (!s->leak_check)
+        return;
+    for (size_t i = 0; i < s->image_count; i++)
+        image_bytes += s->images[i]->bytes;
+    mw_log("leak-check (%s): frames=%" PRIu64 " images=%zu image_bytes=%" PRIu64
+           " buffers=%zu buffer_bytes=%" PRIu64 " reclaimed=%" PRIu64 " pending_replaces=%zu"
+           " draws=%" PRIu64 " rss_kib=%" PRIu64,
+           when, s->frames_done, s->image_count, image_bytes, s->buffer_count, s->buffer_bytes,
+           s->buffers_reclaimed, s->replace_count, s->draws_total,
+           mw_rss_kib());
 }
 
 static struct mw_image *mw_image_find(struct mw_server *s, uint32_t id)
@@ -1509,6 +1590,8 @@ static void mw_sampler_state_destroy(struct mw_server *s, struct mw_sampler_stat
 
 static void mw_buffer_destroy(struct mw_server *s, struct mw_buffer *buffer)
 {
+    if (s->buffer_bytes >= buffer->length)
+        s->buffer_bytes -= buffer->length;
     for (size_t i = 0; i < s->buffer_count; i++) {
         if (s->buffers[i] == buffer) {
             memmove(&s->buffers[i], &s->buffers[i + 1],
@@ -1599,6 +1682,8 @@ static int mw_handle_create_buffer(struct mw_server *s, const struct mw_create_b
     buffer->id = request->id;
     buffer->options = request->options;
     buffer->length = request->length;
+    buffer->last_used_frame = s->frames_done;
+    s->buffer_bytes += request->length;
     if (mw_create_host_buffer(&s->vk, request->length,
                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -4499,6 +4584,7 @@ static int mw_run_render_frame(struct mw_server *s, struct mw_frame_state *frame
             }
         }
         result->draws_executed++;
+        s->draws_total++;
         /*
          * Per-draw target (WP-4 D3/D5). A wire frame carries one render encoder per CA render
          * pass, and those passes composite into different textures: CA's backdrop/blur chain
@@ -5106,6 +5192,9 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
         }
         s->frames_done++;
         mw_frame_reset(s);
+        mw_buffers_reclaim(s);
+        if (s->frames_done % 60 == 0)
+            mw_leak_check(s, "periodic");
         if (s->frames_target != 0 && s->frames_done >= s->frames_target)
             s->done = 1;
         return 0;
@@ -5180,6 +5269,9 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
 
     s->frames_done++;
     mw_frame_reset(s);
+    mw_buffers_reclaim(s);
+    if (s->frames_done % 60 == 0)
+        mw_leak_check(s, "periodic");
     if (s->frames_target != 0 && s->frames_done >= s->frames_target)
         s->done = 1;
     return 0;
@@ -5882,6 +5974,7 @@ static uint64_t mw_get_total(const struct mw_timing *t)
 
 static void mw_print_summary(struct mw_server *s)
 {
+    mw_leak_check(s, "exit");
     if (s->stats_count == 0) {
         mw_log("summary: no frames were executed");
         return;
@@ -6086,6 +6179,9 @@ int main(int argc, char **argv)
     const char *ram_path = getenv("METALWIRE_RAM");
     const char *env_crc_stride = getenv("METALWIRE_CRC_STRIDE");
     const char *env_draw_dump = getenv("MW_DUMP_DRAWS");
+    const char *env_leak_check = getenv("MW_LEAK_CHECK");
+    const char *env_max_buffer_bytes = getenv("MW_MAX_BUFFER_BYTES");
+    const char *env_buffer_min_age = getenv("MW_BUFFER_MIN_AGE");
     uint64_t ram_base = 0x40000000ULL;
     long crc_stride = env_crc_stride != NULL && env_crc_stride[0] != '\0'
                           ? mw_parse_long("crc-stride", env_crc_stride, 1, 4096)
@@ -6102,6 +6198,17 @@ int main(int argc, char **argv)
         atexit(mw_draw_dump_close);
     }
     memset(&server, 0, sizeof(server));
+    /* WP-4 4.1c: the host-side live set. MW_LEAK_CHECK=1 prints it every 60 frames and at exit;
+     * MW_MAX_BUFFER_BYTES (default 64 MiB) caps the live buffer memory by dropping the oldest
+     * buffers the wire has not named for MW_BUFFER_MIN_AGE frames (default 120); 0 disables. */
+    server.leak_check = env_leak_check != NULL && env_leak_check[0] != '\0' &&
+                        atoi(env_leak_check) != 0;
+    server.max_buffer_bytes = env_max_buffer_bytes != NULL && env_max_buffer_bytes[0] != '\0'
+                                  ? (uint64_t)strtoull(env_max_buffer_bytes, NULL, 10)
+                                  : 64u * 1024u * 1024u;
+    server.buffer_min_age = env_buffer_min_age != NULL && env_buffer_min_age[0] != '\0'
+                                ? (uint64_t)strtoull(env_buffer_min_age, NULL, 10)
+                                : 120u;
     server.listen_fd = -1;
     server.client_fd = -1;
     server.port = MW_DEFAULT_PORT;

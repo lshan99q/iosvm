@@ -201,6 +201,11 @@ device 0 because the ICD variable hides the GPUs), drives it with `metalwire_gen
   of a 4x2 mosaic from the same input texture; the frame executes 8 of 8 draws (0 skipped, empty
   missing report) and every tile matches the box/binomial kernel the shaders document to within
   2/255, including its PNG,
+* the host live set (WP-4 4.1c): 130 frames that each create a fresh buffer with a 128 KiB cap and
+  a two-frame age must leave at most three live buffers, reclaim at least 100, keep the one texture
+  and zero pending replace entries, and stay under 300 MB RSS; 40 frames on a single reused id must
+  create nothing (`buffers=1 buffer_bytes=65536 reclaimed=0`). A host without the reclaimer fails
+  the first half with 130 live buffers,
 * the double-buffer equivalence (WP-4 D8): the full static layers go into surface 90, surface 91
   only gets a poor quarter, then frames draw only the clock into 91/90/91/90 with load action LOAD.
   Every clock frame must show the full static layers: a host that copies the previous frame
@@ -371,6 +376,15 @@ The execution half:
   clock-only frame can never drag the full layer set out of the other buffer (boot wp4-v14 lost
   the Dock and Search that way: 2,779,312/2,512,062 bytes in frames 6/9, 2,385,130 after the
   clock frames copied over); a CLEAR first draw needs no copy;
+* bounds its own live set (WP-4 4.1c): every buffer records the last frame a message named it, and
+  once the live buffer memory passes `MW_MAX_BUFFER_BYTES` (default 64 MiB) the oldest buffers the
+  wire has not named for `MW_BUFFER_MIN_AGE` frames (default 120) are destroyed -- the wire has no
+  destroy in the plug-in's path, so boot wp4-soak-fix-ctrl left 2,135 per-frame 256 KiB buffers
+  behind and the host RSS grew 68 -> 719 MB in 25 minutes. `MW_MAX_BUFFER_BYTES=0` disables the
+  reclamation;
+* prints the live set when `MW_LEAK_CHECK=1`: every 60 frames and at exit, `leak-check (<when>):
+  frames= images= image_bytes= buffers= buffer_bytes= reclaimed= pending_replaces= draws= rss_kib=`
+  (RSS from /proc/self/status), so a long run shows whether the host plateaus;
 * can write a per-draw diagnostic dump when `MW_DUMP_DRAWS=1` is in the environment (file from
   `MW_DUMP_DRAWS_FILE`, default `/tmp/metalwire-draws.txt`): one grep-able `draw ...` line per
   executed draw with the vertex colour, the fragment uniform's first 16 bytes, the draw's

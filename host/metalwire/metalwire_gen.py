@@ -1382,6 +1382,62 @@ def run_rg8_ramp(args):
     return 0 if failures == 0 else 1
 
 
+
+# WP-4 4.1c: the host live-set fixture. CoreAnimation asks for a fresh 256 KiB render buffer every
+# frame and the plug-in (before its own pooling) handed each one a new id, so the host kept a Vulkan
+# buffer per frame: boot wp4-soak-fix-ctrl created 2,135 of them and the host RSS grew +651 MB.
+# This fixture reproduces the shape with small buffers and lets metalwire_test.py read the host's
+# leak-check counters (MW_LEAK_CHECK=1): with the reclaimer the live set stays under
+# MW_MAX_BUFFER_BYTES, with a fixed buffer id nothing is ever created twice.
+LEAK_BUFFER_BYTES = 65536
+LEAK_SIZE = 64
+
+
+def run_leak(args):
+    """Send --leak-frames frames, each with a buffer create+upload and a present."""
+    frames = args.leak_frames if args.leak_frames > 0 else 40
+    fixed = args.leak_fixed
+    empty_crc = zlib.crc32(b"\x00" * (LEAK_SIZE * LEAK_SIZE * 4)) & 0xFFFFFFFF
+    payload = bytes((i * 7) & 0xFF for i in range(LEAK_BUFFER_BYTES))
+    try:
+        client = Client(args.host, args.port, args.timeout)
+    except OSError as exc:
+        print("metalwire_gen: cannot connect to %s:%d: %s" % (args.host, args.port, exc),
+              file=sys.stderr)
+        return 2
+
+    failures = 0
+    try:
+        client.send(MW_HELLO, struct.pack("<II32s", WIRE_VERSION, os.getpid(), b"wp4-leak"))
+        client.send(MW_CREATE_TEXTURE, struct.pack("<6I", 91, LEAK_SIZE, LEAK_SIZE, 80, 5, 0))
+        for seq in range(frames):
+            begin = time.monotonic_ns()
+            client.send(MW_FRAME_BEGIN, struct.pack("<QQ", seq, begin))
+            buffer_id = 1000 if fixed else 1000 + seq
+            if not fixed or seq == 0:
+                client.send(MW_CREATE_BUFFER,
+                            struct.pack("<IIQ", buffer_id, 0, LEAK_BUFFER_BYTES))
+            client.send(MW_UPLOAD_BUFFER,
+                        struct.pack("<IIII", buffer_id, 0, LEAK_BUFFER_BYTES, 0) + payload)
+            client.send(MW_PRESENT, struct.pack("<II", 91, 0))
+            client.send(MW_FRAME_END, struct.pack("<QQIIII", seq, time.monotonic_ns() - begin,
+                                                  empty_crc, LEAK_SIZE, LEAK_SIZE, LEAK_SIZE * 4))
+            ack = client.recv_ack()
+            if ack[2] != MW_STATUS_OK or ack[3] != seq:
+                failures += 1
+                print("leak frame %d: host status %d seq %d" % (seq, ack[2], ack[3]), flush=True)
+        print("leak: %d frame(s) sent, %d failure(s), buffer_ids=%s" %
+              (frames, failures, "fixed 1000" if fixed else "1000..%d" % (1000 + frames - 1)),
+              flush=True)
+        client.send(MW_BYE)
+    except (OSError, WireError) as exc:
+        failures += 1
+        print("metalwire_gen: wire error: %s" % exc, file=sys.stderr)
+    finally:
+        client.close()
+    return 0 if failures == 0 else 1
+
+
 # WP-4 1.1 (stage 36): the orientation fixture. Metal's NDC has y up and CA's mvp puts a layer's
 # top at NDC y=+1; Vulkan's viewport maps y down. The host compensates with a negative viewport
 # height, so framebuffer row y must come out as the source row y -- in the present read-back, the
@@ -1597,6 +1653,13 @@ def main(argv):
                         help="send one seed frame and three render frames through the "
                              "downsample_4 / narrow_blur_23 / narrow_blur_15 pipelines, the "
                              "WP-4 1.2 regression")
+    parser.add_argument("--leak", action="store_true",
+                        help="send N frames that each create+upload a fresh buffer and present a "
+                             "texture, for the host live-set/leak-check regression")
+    parser.add_argument("--leak-frames", type=int, default=40,
+                        help="frames for --leak (default 40)")
+    parser.add_argument("--leak-fixed", action="store_true",
+                        help="with --leak, reuse one buffer id instead of a fresh one per frame")
     parser.add_argument("--rg8", action="store_true",
                         help="a 256x2 MTLPixelFormatRG8Unorm (30) texture: present it, then sample "
                              "it into a BGRA target, the WP-4 format-30 regression")
@@ -1623,6 +1686,8 @@ def main(argv):
         return run_rgba16f_ramp(args)
     if args.blur_pipelines:
         return run_blur_pipelines(args)
+    if args.leak:
+        return run_leak(args)
     if args.rg8:
         return run_rg8_ramp(args)
     if args.dual_buffer:
