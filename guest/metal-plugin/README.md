@@ -180,15 +180,20 @@ Implemented (anything else a real Metal runtime asks is logged once and answered
   `_submittedGroup`, `_MTLLibrary` `_cacheEntry`); that base allocation is deliberately leaked.
   Two stage-4.1 additions soften that: the command buffer, the two encoder classes and the buffer
   class are handed out from fixed instance pools (the pool holds the last reference and the
-  per-frame state is rebuilt; buffers match on their length, so the 256 KiB render buffer CoreAnimation
-  asks for every frame is one host-side buffer refreshed by the upload instead of one per frame),
+  per-frame state is rebuilt; buffers match on their length and are handed out again once the
+  frame that used them has been acknowledged -- CoreAnimation keeps its own references to the
+  per-frame 256 KiB buffers and never releases them (boot wp4-soak-fix2: 750
+  `newBufferWithLength:262144` calls, one per frame), so the pool cannot wait for `-retainCount`
+  to drop and tracks frame availability instead; `MW_BUFFER_LOG=1` prints rate-limited hit/miss
+  lines), and the 256 KiB render buffer is one host-side buffer refreshed by the upload instead of
+  one per frame),
   and the command queue's leak has a *safe release* probe — `/redwood/etc/metal-base-dealloc`
   creates the `_submittedGroup` dispatch group and releases it balanced, logging pre/post, without
   ever calling the inherited `-dealloc` chain (boot wp4-soak-fix ran that chain once: the guest
   stopped rendering, 0 frames in 1,500 s, so it is recorded as unusable). The marker is off by
   default. Both decisions are counted per class (`alloc`/`dealloc`/`base_dealloc`/`base_skipped`/
   `reused`/`safe_release`) and dumped to the serial console on SIGTERM/SIGINT, at exit and every
-  1,800 committed frames, so a soak can read the accounting.
+  600 committed frames, so a short soak can read the accounting too.
 - census (`/redwood/etc/metal-census` in the root image): every method the stub classes inherit
   from their private base is trapped and logged once, answered with zero; the device and the queue
   are excluded, because trapping `_MTLDevice` breaks Metal's own device registration. Diagnostic

@@ -121,6 +121,22 @@ static void mw_log(const char *fmt, ...)
  * (the v1 wire is synchronous).
  * ---------------------------------------------------------------------------------------------- */
 
+struct mw_buffer_state {
+    uint32_t remote_id;
+    uint32_t created_generation;
+    uint64_t length;
+    unsigned long options;
+    void *memory;
+    id label;
+    uint64_t uploaded_seq; /* the last frame this buffer's bytes went to the host */
+    /* WP-4 4.1d: whether the buffer may be handed out again. CoreAnimation keeps the buffers it
+     * creates (boot wp4-soak-fix2: 750 `newBufferWithLength:262144` calls, one per frame, and the
+     * lifetime counters show it never releases them), so the pool can never wait for
+     * `-retainCount == 1`; a buffer becomes available once the frame that used it has been sent and
+     * acknowledged. */
+    int available;
+};
+
 /* -------------------------------------------------------------------------------------------------
  * 4.1 Object lifecycle counters and the per-frame instance pools.
  *
@@ -288,17 +304,67 @@ static void mw_pool_remember(struct mw_object_pool *pool, id object)
 /* Buffers are matched on their length: a buffer CoreAnimation asks for this frame is only served
  * from the pool when the pooled one has exactly that length (its Metal buffer object already lives
  * on the host with that id, so the frame's upload refreshes it instead of creating another). */
+static struct mw_buffer_state *mw_buffer_state_of(id object);
+
 static id mw_pool_take_free_buffer(struct mw_object_pool *pool, Class cls, uint64_t length)
 {
     for (int i = 0; i < pool->count; i++) {
         id object = pool->objects[i];
 
-        if (object != nil && object_getClass(object) == cls && pool->sizes[i] == length &&
-            [object retainCount] == 1) {
-            return object;
+        /* A buffer is reusable when the frame that last used it has been acknowledged
+         * (`available`), or -- for a buffer CoreAnimation did release -- when the pool is its last
+         * owner. CoreAnimation keeps the per-frame 256 KiB buffers (boot wp4-soak-fix2: 750
+         * newBufferWithLength:262144 calls, one per frame, never released), so the retainCount test
+         * alone never matched and the pool never hit. */
+        if (object != nil && object_getClass(object) == cls && pool->sizes[i] == length) {
+            struct mw_buffer_state *state = mw_buffer_state_of(object);
+
+            if ((state != NULL && state->available) || [object retainCount] == 1) {
+                return object;
+            }
         }
     }
     return nil;
+}
+
+/* The buffers handed out in the current frame. CoreAnimation creates them before it commits, and
+ * they may be handed out again only once that frame is on the wire and acknowledged; the list is
+ * small (one 256 KiB buffer per frame plus a few 272-byte ones at start-up). */
+#define MW_FRAME_BUFFERS 64
+static id gFrameBuffers[MW_FRAME_BUFFERS];
+static int gFrameBufferCount;
+static int gBufferLog = -1; /* MW_BUFFER_LOG=1: rate-limited pool hit/miss lines */
+static uint64_t gBufferHits;
+static uint64_t gBufferMisses;
+
+static int mw_buffer_log_enabled(void)
+{
+    if (gBufferLog < 0) {
+        const char *env = getenv("MW_BUFFER_LOG");
+
+        gBufferLog = env != NULL && env[0] != '\0' && atoi(env) != 0;
+    }
+    return gBufferLog;
+}
+
+static void mw_frame_buffer_track(id buffer)
+{
+    if (buffer != nil && gFrameBufferCount < MW_FRAME_BUFFERS) {
+        gFrameBuffers[gFrameBufferCount++] = buffer;
+    }
+}
+
+static void mw_frame_buffers_mark_available(void)
+{
+    for (int i = 0; i < gFrameBufferCount; i++) {
+        struct mw_buffer_state *state = mw_buffer_state_of(gFrameBuffers[i]);
+
+        if (state != NULL) {
+            state->available = 1;
+        }
+        gFrameBuffers[i] = nil;
+    }
+    gFrameBufferCount = 0;
 }
 
 static void mw_pool_remember_buffer(struct mw_object_pool *pool, id object, uint64_t length)
@@ -389,15 +455,6 @@ struct mw_op {
     uint32_t slice, level;
 };
 
-struct mw_buffer_state {
-    uint32_t remote_id;
-    uint32_t created_generation;
-    uint64_t length;
-    unsigned long options;
-    void *memory;
-    id label;
-    uint64_t uploaded_seq; /* the last frame this buffer's bytes went to the host */
-};
 
 struct mw_texture_state {
     uint32_t remote_id;
@@ -1879,6 +1936,10 @@ static void mw_finish_frame(id cbobj)
         mw_wire_offline("no acknowledgement");
     }
     pthread_mutex_unlock(&gWireLock);
+    /* The frame is on the wire and its picture is in the host's hands: the buffers it used may be
+     * handed out again (CoreAnimation keeps its own references to them, so the pool cannot wait for
+     * a release). */
+    mw_frame_buffers_mark_available();
 
     if (gAwaitingCommandBuffer == cbobj) {
         [gAwaitingCommandBuffer release];
@@ -1950,7 +2011,7 @@ static void mw_cb_commit(id self, SEL _cmd)
     }
     state->committed = 1;
     state->seq = ++gFrameSeq;
-    if (state->seq % 1800 == 0) {
+    if (state->seq % 600 == 0) {
         mw_lifecycle_dump("periodic");
     }
     state->t_commit_ns = mw_now_ns();
@@ -1993,6 +2054,7 @@ static void mw_cb_commit(id self, SEL _cmd)
         mw_note_timing(state->encoded_ns, 0);
         mw_cb_set_error(state, 1, "the host at %s is unreachable (%s); the frame was not sent",
                         gWire.target, gWire.last_error);
+        mw_frame_buffers_mark_available();
         return;
     }
     if (gHelloGeneration != gGeneration) {
@@ -2004,6 +2066,7 @@ static void mw_cb_commit(id self, SEL _cmd)
             mw_note_timing(state->encoded_ns, 0);
             mw_cb_set_error(state, 1, "could not say hello to %s (%s)", gWire.target,
                             gWire.last_error);
+            mw_frame_buffers_mark_available();
             return;
         }
         gHelloGeneration = gGeneration;
@@ -2020,6 +2083,7 @@ static void mw_cb_commit(id self, SEL _cmd)
         mw_note_timing(state->encoded_ns, 0);
         mw_cb_set_error(state, 1, "sending the frame to %s failed (%s)", gWire.target,
                         gWire.last_error);
+        mw_frame_buffers_mark_available();
         return;
     }
     state->sent = 1;
@@ -3021,14 +3085,28 @@ static id mw_device_new_buffer(id self, SEL _cmd, NSUInteger length, NSUInteger 
             memset(state->memory, 0, (size_t)length);
             state->options = options;
             state->uploaded_seq = 0; /* the new frame's contents go to the host again */
+            state->available = 0;
             if (state->created_generation != gGeneration) {
                 /* A new connection may face a host that still holds the old id; a fresh id keeps
                  * the create unambiguous (the host rejects duplicate buffer ids). */
                 state->remote_id = mw_next_object_id();
                 state->created_generation = 0;
             }
+            mw_frame_buffer_track(buffer);
+            gBufferHits++;
+            if (mw_buffer_log_enabled() && (gBufferHits % 120) == 1) {
+                mw_log("buffer pool: %lu bytes hit (pool=%d frame=%d hits=%llu misses=%llu)",
+                       (unsigned long)length, gBufferPool.count, gFrameBufferCount,
+                       (unsigned long long)gBufferHits, (unsigned long long)gBufferMisses);
+            }
             return [buffer retain];
         }
+    }
+    gBufferMisses++;
+    if (mw_buffer_log_enabled() && (gBufferMisses % 30) == 1) {
+        mw_log("buffer pool: %lu bytes MISS (pool=%d frame=%d hits=%llu misses=%llu) -- a new "
+               "Metal buffer object", (unsigned long)length, gBufferPool.count, gFrameBufferCount,
+               (unsigned long long)gBufferHits, (unsigned long long)gBufferMisses);
     }
     buffer = mw_alloc_init(gBufferClass, "buffer");
     if (buffer == nil) {
@@ -3053,6 +3131,7 @@ static id mw_device_new_buffer(id self, SEL _cmd, NSUInteger length, NSUInteger 
     state->remote_id = mw_next_object_id();
     *slot = state;
     mw_pool_remember_buffer(&gBufferPool, buffer, (uint64_t)length);
+    mw_frame_buffer_track(buffer);
     mw_log("newBufferWithLength:%lu options:0x%lx: buffer %u (%lu bytes, sent on first use)",
            (unsigned long)length, (unsigned long)options, state->remote_id, (unsigned long)length);
     return buffer; /* +1, as a Metal "new" method */
