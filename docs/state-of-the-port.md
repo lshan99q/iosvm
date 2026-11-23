@@ -45,6 +45,7 @@ every frame after the first is dropped -- the panel then shows the boot logo for
 | the Weather and Calendar widgets are white | their content comes from extension processes, which are not running here |
 | 5-7 frames a second | 148 ms a frame, of which 141 ms is Mesa rasterising 2.7 M pixels on the guest's CPUs |
 | no GPU acceleration | the accelerated path needs the Adreno driver to create `HakiosGPU`; QEMU has no Adreno and no firmware for one |
+| SMP>1 (multi-core) | single vCPU is the baseline; 2 vCPUs give +58–60 % in short runs but the stage-44 T2 (`tb-size=4096`) and the delivery-value control **both panicked** on the `_pset0` ticket lock (2 frames at 14.6 min / 2,035 frames) with both vCPU threads busy — host starvation/preemption ruled out; T5 (a bootable probe kernel plus `isolcpus`/stopping win2022, which needs approval) is the only remaining path — see `docs/stage44-multicore.md` |
 
 ## The three boot arguments that matter
 
