@@ -72,6 +72,8 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <dispatch/dispatch.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,6 +120,161 @@ static void mw_log(const char *fmt, ...)
  * Globals. There is one device per process (Metal's model), one connection, one frame in flight
  * (the v1 wire is synchronous).
  * ---------------------------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------------------------------
+ * 4.1 Object lifecycle counters and the per-frame instance pools.
+ *
+ * The stub classes are built on Metal's private bases (_MTLCommandBuffer, _MTLCommandQueue, ...).
+ * Their base -dealloc dereferences dispatch state that a plain -init never creates; for the command
+ * queue the research (docs/research/ca-metallib-url.md §10.1) pins the exact site: ivar 0xb0
+ * `_submittedGroup`, released without a nil check. Two things keep the process from leaking a base
+ * allocation per frame:
+ *
+ *   1. the queue's dealloc now finds a real dispatch group in that ivar and the base -dealloc runs
+ *      (the same shape the analysis recommends: "create _submittedGroup with
+ *      dispatch_group_create()"), so the queue's own allocation is freed;
+ *   2. the command buffer and the encoders -- the objects CoreAnimation creates per frame and per
+ *      render pass -- are reused from a fixed pool instead of being allocated and thrown away. The
+ *      pool keeps one reference (so -dealloc never runs) and hands the instance out again once the
+ *      frame's autorelease pool released it; the state struct is rebuilt for the new frame.
+ *
+ * The counters below make the accounting visible in the serial log: one line per class at exit and
+ * on SIGTERM/SIGINT, plus a periodic line while frames are running. They are the soak's evidence:
+ * `alloc` must stop growing once the pool is warm, `base_dealloc` covers the queue (or
+ * `skipped` says why not), and `reused` should track the frames.
+ * ---------------------------------------------------------------------------------------------- */
+
+#define MW_LIFECYCLE_MAX 16
+enum {
+    MW_LIFE_ALLOC = 0,
+    MW_LIFE_DEALLOC,
+    MW_LIFE_BASE_DEALLOC,
+    MW_LIFE_BASE_SKIPPED,
+    MW_LIFE_REUSED,
+    MW_LIFE_COUNT
+};
+struct mw_lifecycle_entry {
+    char name[48];
+    uint64_t counts[MW_LIFE_COUNT];
+};
+static struct mw_lifecycle_entry gLifecycle[MW_LIFECYCLE_MAX];
+static int gLifecycleCount;
+static pthread_mutex_t gLifecycleLock = PTHREAD_MUTEX_INITIALIZER;
+static int gLifecycleInstalled;
+
+static struct mw_lifecycle_entry *mw_lifecycle_entry(Class cls)
+{
+    const char *name = cls != Nil ? class_getName(cls) : "?";
+    struct mw_lifecycle_entry *entry = NULL;
+
+    pthread_mutex_lock(&gLifecycleLock);
+    for (int i = 0; i < gLifecycleCount; i++) {
+        if (strcmp(gLifecycle[i].name, name) == 0) {
+            entry = &gLifecycle[i];
+            break;
+        }
+    }
+    if (entry == NULL && gLifecycleCount < MW_LIFECYCLE_MAX) {
+        entry = &gLifecycle[gLifecycleCount++];
+        snprintf(entry->name, sizeof(entry->name), "%s", name);
+    }
+    pthread_mutex_unlock(&gLifecycleLock);
+    return entry;
+}
+
+static void mw_lifecycle_note(Class cls, int kind)
+{
+    struct mw_lifecycle_entry *entry;
+
+    if (cls == Nil || kind < 0 || kind >= MW_LIFE_COUNT) {
+        return;
+    }
+    entry = mw_lifecycle_entry(cls);
+    pthread_mutex_lock(&gLifecycleLock);
+    if (entry != NULL) {
+        entry->counts[kind]++;
+    }
+    pthread_mutex_unlock(&gLifecycleLock);
+}
+
+static void mw_lifecycle_dump(const char *why)
+{
+    uint64_t allocs = 0, deallocs = 0, taker = 0, skipped = 0, reused = 0;
+
+    pthread_mutex_lock(&gLifecycleLock);
+    mw_log("lifecycle (%s): %d class(es) tracked", why != NULL ? why : "?", gLifecycleCount);
+    for (int i = 0; i < gLifecycleCount; i++) {
+        struct mw_lifecycle_entry *entry = &gLifecycle[i];
+
+        mw_log("lifecycle: %-32s alloc=%llu dealloc=%llu base_dealloc=%llu base_skipped=%llu "
+               "reused=%llu", entry->name, (unsigned long long)entry->counts[MW_LIFE_ALLOC],
+               (unsigned long long)entry->counts[MW_LIFE_DEALLOC],
+               (unsigned long long)entry->counts[MW_LIFE_BASE_DEALLOC],
+               (unsigned long long)entry->counts[MW_LIFE_BASE_SKIPPED],
+               (unsigned long long)entry->counts[MW_LIFE_REUSED]);
+        allocs += entry->counts[MW_LIFE_ALLOC];
+        deallocs += entry->counts[MW_LIFE_DEALLOC];
+        taker += entry->counts[MW_LIFE_BASE_DEALLOC];
+        skipped += entry->counts[MW_LIFE_BASE_SKIPPED];
+        reused += entry->counts[MW_LIFE_REUSED];
+    }
+    pthread_mutex_unlock(&gLifecycleLock);
+    mw_log("lifecycle: totals alloc=%llu dealloc=%llu base_dealloc=%llu base_skipped=%llu "
+           "reused=%llu", (unsigned long long)allocs, (unsigned long long)deallocs,
+           (unsigned long long)taker, (unsigned long long)skipped, (unsigned long long)reused);
+}
+
+static void mw_lifecycle_signal(int signal_number)
+{
+    mw_lifecycle_dump("signal");
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+}
+
+static void mw_lifecycle_atexit(void)
+{
+    mw_lifecycle_dump("exit");
+}
+
+static void mw_lifecycle_install(void)
+{
+    atexit(mw_lifecycle_atexit);
+    signal(SIGTERM, mw_lifecycle_signal);
+    signal(SIGINT, mw_lifecycle_signal);
+}
+
+/* The instance pools for the per-frame objects. An entry is handed out again only when the pool is
+ * its last owner (`-retainCount == 1`), so an object CoreAnimation still holds is never rewritten;
+ * in steady state the alloc counts stop at the pool size and `reused` grows with the frames. */
+#define MW_POOL_OBJECTS 16
+struct mw_object_pool {
+    id objects[MW_POOL_OBJECTS];
+    int count;
+    int capacity;
+};
+static struct mw_object_pool gCommandBufferPool = {.capacity = 4};
+static struct mw_object_pool gEncoderPool = {.capacity = MW_POOL_OBJECTS};
+
+static id mw_pool_take_free(struct mw_object_pool *pool, Class cls)
+{
+    for (int i = 0; i < pool->count; i++) {
+        id object = pool->objects[i];
+
+        /* The encoder pool carries two classes: only an instance of the class being asked for may
+         * come back, and only when the pool is its last owner. */
+        if (object != nil && object_getClass(object) == cls && [object retainCount] == 1) {
+            return object;
+        }
+    }
+    return nil;
+}
+
+static void mw_pool_remember(struct mw_object_pool *pool, id object)
+{
+    if (object != nil && pool->count < pool->capacity && pool->count < MW_POOL_OBJECTS) {
+        pool->objects[pool->count++] = [object retain];
+    }
+}
 
 static Class gDeviceBase;             /* Metal's private _MTLDevice */
 static Class gQueueClass;             /* HakiosMetalQueue, a _MTLCommandQueue */
@@ -676,6 +833,53 @@ static void mw_render_capture_sampler(struct mw_stub_state *state, id descriptor
 static void mw_render_capture_depth_stencil(struct mw_stub_state *state, id descriptor);
 static void mw_free_render_encoder(struct mw_render_encoder_state *state);
 
+/*
+ * 4.1: -[_MTLCommandQueue dealloc] releases the dispatch group at ivar 0xb0 (`_submittedGroup`)
+ * without a nil check (docs/research/ca-metallib-url.md §10.1: `ldr x0,[x19,#0xb0]; bl
+ * _dispatch_release`, everything around it cbz-guarded). A plain -init never creates that group, so
+ * the base dealloc is only safe after one is put there. This creates it when the slot is empty; the
+ * base dealloc's release then balances this create and the object's own allocation is freed.
+ * Classes without such a known-safe repair keep the old rule (free the instance, skip the base).
+ */
+/*
+ * The repair is opt-in: `/redwood/etc/metal-base-dealloc` (same marker pattern as the inject
+ * shims). It is correct as far as the analysis goes, but the rest of the inherited -dealloc chain
+ * on a stub instance has never run in this guest; a fault there kills the process, so the default
+ * boot keeps the old rule until a boot with the marker proves the chain. Removing the marker is
+ * enough to go back.
+ */
+static int mw_base_dealloc_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = access("/redwood/etc/metal-base-dealloc", F_OK) == 0;
+        mw_log("lifecycle: base-dealloc repair %s (/redwood/etc/metal-base-dealloc)",
+               enabled ? "enabled" : "disabled; the base allocation of each class stays leaked");
+    }
+    return enabled;
+}
+
+static int mw_base_dealloc_can_run(id self, Class base)
+{
+    Ivar ivar;
+    void **slot;
+
+    if (base == Nil || !mw_base_dealloc_enabled() ||
+        strcmp(class_getName(base), "_MTLCommandQueue") != 0) {
+        return 0;
+    }
+    ivar = class_getInstanceVariable(base, "_submittedGroup");
+    if (ivar == NULL) {
+        return 0;
+    }
+    slot = (void **)((char *)self + ivar_getOffset(ivar));
+    if (*slot == NULL) {
+        *slot = dispatch_group_create();
+    }
+    return *slot != NULL;
+}
+
 static void mw_object_dealloc(id self, SEL _cmd)
 {
     Class cls = object_getClass(self);
@@ -705,12 +909,29 @@ static void mw_object_dealloc(id self, SEL _cmd)
         }
         *slot = NULL;
     }
+    mw_lifecycle_note(cls, MW_LIFE_DEALLOC);
     if (base != Nil && strncmp(class_getName(base), "_MTL", 4) == 0) {
+        if (mw_base_dealloc_can_run(self, base)) {
+            /* A repair exists for this base: run its own -dealloc (it ends in NSObject's, which
+             * frees the instance) instead of leaking the base's allocation. */
+            IMP implementation = method_getImplementation(
+                class_getInstanceMethod(base, sel_registerName("dealloc")));
+
+            mw_lifecycle_note(cls, MW_LIFE_BASE_DEALLOC);
+            if (implementation != NULL) {
+                ((void (*)(id, SEL))implementation)(self, sel_registerName("dealloc"));
+                return;
+            }
+            mw_lifecycle_note(cls, MW_LIFE_BASE_SKIPPED);
+            object_dispose(self);
+            return;
+        }
         /* Apple's private -dealloc assumes the concrete class behind the base initialized the
          * base's internal dispatch objects; these stubs are made with a plain -init, so that
          * dealloc is the null-libdispatch fault ca-metal3-shim1 died in (x1 = @selector(dealloc),
          * pc = libdispatch, x0 = NULL). Free the instance ourselves and never call it; the rule
          * and the leak are logged once at registration (mw_make_class). */
+        mw_lifecycle_note(cls, MW_LIFE_BASE_SKIPPED);
         object_dispose(self);
         return;
     }
@@ -984,6 +1205,9 @@ static id mw_alloc_init(Class cls, const char *what)
         return nil;
     }
     object = ((id(*)(id, SEL))objc_msgSend)((id)cls, sel_registerName("alloc"));
+    if (object != nil) {
+        mw_lifecycle_note(cls, MW_LIFE_ALLOC);
+    }
     if (object == nil) {
         mw_log("%s: +alloc gave nil", what);
         return nil;
@@ -1674,6 +1898,9 @@ static void mw_cb_commit(id self, SEL _cmd)
     }
     state->committed = 1;
     state->seq = ++gFrameSeq;
+    if (state->seq % 1800 == 0) {
+        mw_lifecycle_dump("periodic");
+    }
     state->t_commit_ns = mw_now_ns();
     state->encoded_ns =
         state->t_commit_ns > state->t_begin_ns ? state->t_commit_ns - state->t_begin_ns : 0;
@@ -1922,26 +2149,42 @@ static id mw_cb_blit_encoder(id self, SEL _cmd)
     struct mw_command_buffer_state *state = mw_command_buffer_state_of(self);
     id encoder;
     void **slot;
+    int reused = 0;
 
     (void)_cmd;
     if (state == NULL || state->committed || gBlitEncoderClass == Nil) {
         return nil;
     }
-    encoder = mw_alloc_init(gBlitEncoderClass, "blit encoder");
-    if (encoder == nil) {
-        return nil;
+    encoder = mw_pool_take_free(&gEncoderPool, gBlitEncoderClass);
+    if (encoder != nil) {
+        void **cached = mw_slot(encoder, gBlitEncoderClass);
+
+        if (cached != NULL && *cached != NULL) {
+            mw_free_encoder(*cached);
+            *cached = NULL;
+        }
+        mw_lifecycle_note(gBlitEncoderClass, MW_LIFE_REUSED);
+        reused = 1;
+    } else {
+        encoder = mw_alloc_init(gBlitEncoderClass, "blit encoder");
+        if (encoder == nil) {
+            return nil;
+        }
+        mw_pool_remember(&gEncoderPool, encoder);
     }
     struct mw_encoder_state *encoder_state = calloc(1, sizeof(*encoder_state));
 
     slot = mw_slot(encoder, gBlitEncoderClass);
     if (encoder_state == NULL || slot == NULL) {
         free(encoder_state);
-        [encoder release];
+        if (!reused) {
+            [encoder release];
+        }
         return nil;
     }
     encoder_state->command_buffer = self; /* the command buffer keeps the encoder's memory safe */
     *slot = encoder_state;
-    return [encoder autorelease];
+    return reused ? [[encoder retain] autorelease] : [encoder autorelease];
 }
 
 static void mw_blit_copy_to_texture(id self, SEL _cmd, id source_buffer, NSUInteger source_offset,
@@ -2547,28 +2790,49 @@ static id mw_queue_command_buffer(id self, SEL _cmd)
     struct mw_command_buffer_state *state;
     id command_buffer;
     void **slot;
+    int reused = 0;
 
     (void)_cmd;
     if (gCommandBufferClass == Nil) {
         mw_log("commandBuffer: no command buffer class");
         return nil;
     }
-    command_buffer = mw_alloc_init(gCommandBufferClass, "command buffer");
-    if (command_buffer == nil) {
-        return nil;
+    command_buffer = mw_pool_take_free(&gCommandBufferPool, gCommandBufferClass);
+    if (command_buffer != nil) {
+        /* A pool hit keeps the base object (and whatever Metal's -init allocated in it) alive; the
+         * frame it carried last time is done, so its state goes and a fresh one is built below. */
+        void **cached = mw_slot(command_buffer, gCommandBufferClass);
+
+        if (cached != NULL && *cached != NULL) {
+            mw_free_command_buffer(*cached);
+            *cached = NULL;
+        }
+        mw_lifecycle_note(gCommandBufferClass, MW_LIFE_REUSED);
+        reused = 1;
+    } else {
+        command_buffer = mw_alloc_init(gCommandBufferClass, "command buffer");
+        if (command_buffer == nil) {
+            return nil;
+        }
+        mw_pool_remember(&gCommandBufferPool, command_buffer);
     }
     state = calloc(1, sizeof(*state));
     slot = mw_slot(command_buffer, gCommandBufferClass);
     if (state == NULL || slot == NULL) {
         free(state);
-        [command_buffer release];
+        if (!reused) {
+            [command_buffer release];
+        }
         return nil;
     }
     state->status = MTLCommandBufferStatusNotEnqueued;
     state->t_begin_ns = mw_now_ns();
     state->queue = [self retain];
     *slot = state;
-    return [command_buffer autorelease];
+    /* Both paths hand the caller a +0 reference while the pool keeps its own: a fresh object has
+     * the pool's retain plus the autorelease token; a reused one has count 1 from the pool, so it
+     * needs its own +1 for the token. The pool drains back to exactly one reference either way. */
+    return reused ? [[command_buffer retain] autorelease] : [command_buffer autorelease];
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -4690,6 +4954,7 @@ static id mw_cb_render_encoder(id self, SEL _cmd, id descriptor)
     struct mw_render_encoder_state *encoder_state;
     id encoder;
     void **slot;
+    int reused = 0;
 
     (void)_cmd;
     (void)descriptor;
@@ -4701,15 +4966,30 @@ static id mw_cb_render_encoder(id self, SEL _cmd, id descriptor)
         mw_log("renderCommandEncoderWithDescriptor: no render encoder class is registered; nil");
         return nil;
     }
-    encoder = mw_alloc_init(gRenderEncoderClass, "render command encoder");
-    if (encoder == nil) {
-        return nil;
+    encoder = mw_pool_take_free(&gEncoderPool, gRenderEncoderClass);
+    if (encoder != nil) {
+        void **cached = mw_slot(encoder, gRenderEncoderClass);
+
+        if (cached != NULL && *cached != NULL) {
+            mw_free_render_encoder(*cached);
+            *cached = NULL;
+        }
+        mw_lifecycle_note(gRenderEncoderClass, MW_LIFE_REUSED);
+        reused = 1;
+    } else {
+        encoder = mw_alloc_init(gRenderEncoderClass, "render command encoder");
+        if (encoder == nil) {
+            return nil;
+        }
+        mw_pool_remember(&gEncoderPool, encoder);
     }
     encoder_state = calloc(1, sizeof(*encoder_state));
     slot = mw_slot(encoder, gRenderEncoderClass);
     if (encoder_state == NULL || slot == NULL) {
         free(encoder_state);
-        [encoder release];
+        if (!reused) {
+            [encoder release];
+        }
         return nil;
     }
     encoder_state->command_buffer = self;
@@ -4717,7 +4997,7 @@ static id mw_cb_render_encoder(id self, SEL _cmd, id descriptor)
     mw_render_capture_pass(encoder_state, descriptor);
     *slot = encoder_state;
     state->render_encoder_count++;
-    return [encoder autorelease];
+    return reused ? [[encoder retain] autorelease] : [encoder autorelease];
 }
 
 static void mw_render_note_set(struct mw_render_encoder_state *state)
@@ -6654,6 +6934,7 @@ __attribute__((constructor)) static void mw_plugin_load(void)
         mw_log("HakiosMetalDevice is already registered; this load does nothing");
         return;
     }
+    mw_lifecycle_install();
     mw_register_device_class();
     mw_register_queue_class();
     mw_register_command_buffer_class();
