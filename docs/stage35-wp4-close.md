@@ -4,12 +4,14 @@
 > answered by a boot: the frame is upright, the background/Dock blur family exists on the host, and
 > Metal's RGBA16Float (format 115) is a real Vulkan image. The shading defects that the close
 > surfaced (D3 Dock white band, D4 red labels, D5 Search capsule) are fixed on the host, and the
-> record carries a frame-rate baseline for lavapipe and the V100. The picture is still not a finished
-> desktop: the wallpaper layer is black (D1), two widgets are white placeholders (D2), the status
-> bar carries the image's debug banner (D7), and every second presented frame loses the
-> status-bar/Dock/Search layers (D8 — a two-buffer defect that predates this work).** Branch
-> `experiment/ca-metal-device`, 2026-11-23. This closes WP-4 of ENG-METAL-006 and continues
-> [`docs/stage34-wp4-desktop.md`](stage34-wp4-desktop.md).
+> record carries a frame-rate baseline for lavapipe and the V100. The two-buffer alternation D8 that
+> this record left open is **fixed in stage 39**
+> ([`docs/stage39-d8-double-buffer.md`](stage39-d8-double-buffer.md)): the final boots hold the
+> complete desktop in both display surfaces, and the final frame rates are **2.83 fps** on lavapipe
+> and **2.55 fps** on the V100. The remaining boundaries are guest/image-side: the wallpaper layer
+> is black (D1), two widgets are white placeholders (D2), and the status bar carries the image's
+> debug banner (D7).** Branch `experiment/ca-metal-device`, 2026-11-23. This closes WP-4 of
+> ENG-METAL-006 and continues [`docs/stage34-wp4-desktop.md`](stage34-wp4-desktop.md).
 
 ![the upright desktop, executed on the host's Vulkan](demo/wp4-desktop-upright.png)
 
@@ -169,6 +171,11 @@ numbers are in §3.6 — recorded-frame rate, not a smoothness claim.
 | `b1add02` | per-draw diagnostic dump (off by default) |
 | `b232e33` | `Tmua` samples its support texture (D3/D5) |
 
+The D8 follow-up is documented in [`docs/stage39-d8-double-buffer.md`](stage39-d8-double-buffer.md)
+and lands as `13549ea` (converge the two display surfaces with a per-frame copy), `fb1f0b3` (the
+copy only pushes content at least as rich as the destination: the Dock/Search layers stay) and
+`85beab5` (Metal's RG8Unorm, format 30 — the second wire error boot `wp4-v14` exposed).
+
 ## 3. Evidence
 
 ### 3.1 The closing boot (lavapipe, `wp4-v13`)
@@ -245,6 +252,14 @@ The Dock's white now sits only in y1450–1570 (the icon glyphs); the band's top
 have 0 white pixels. The Search capsule is gone: a small grey square and the word "Search" float on
 the black wallpaper. This is the `Tmua` material sampling its support texture, not a white fill.
 
+**The final desktop (stage 39).** The D8 fix was verified by boots `wp4-v14b` (lavapipe) and
+`wp4-v15` (V100) at `85beab5`; [`docs/demo/wp4-desktop-final.png`](demo/wp4-desktop-final.png)
+(375×812, sha256 `40a80d02ca1014940883ead913f74f4f6a408e33d2fcd939e02c43c7393ec100`) is the final
+stage-2 frame from `wp4-v14b`, whose 750×1624 original has sha256
+`d9198e69b580942eebbc441304fd64b88b392ca9a915450678ed7c9529a3709b`; the V100's equivalent frame is
+`706290a9…`. Both boots show 0 black frames and both display surfaces holding the complete picture.
+The black-half captures in the table above are kept as the D8 evidence they are.
+
 ### 3.3 What the blur family executes, and what is fixture-only
 
 The unit fixture (`--blur` in `host/metalwire/metalwire_test.py`) creates all eight backdrop
@@ -265,9 +280,24 @@ every base function now exists.
 
 ### 3.4 The frame-rate baselines
 
-Measured with `tools/metalwire/fps-measure.py` from PPM mtimes; recorded-frame rate, not a
-smoothness claim. Both baselines are at commit `8327b39` (the frame-rate work was measured before
-the later D3/D4/D5 commits); the closing boot `wp4-v13` did not run the full window.
+Measured with `tools/metalwire/fps-measure.py` from PPM mtimes; this is recorded-frame rate, not a
+smoothness claim. The final numbers come from the two stage-39 regression boots (same binary
+generation, commit `85beab5` / md5 `3830787b…`) and use one method: the desktop window from the
+first desktop frame to the last recorded frame, aggregate only (the mtime has 1-second granularity,
+so per-frame p50/p95 are not claimed).
+
+| run | commit / binary | desktop window | recorded-frame rate |
+|---|---|---|---|
+| lavapipe `wp4-v14b` | `85beab5` / `3830787b` | 2,002 frames / 707 s | **2.83 fps** |
+| V100 `wp4-v15` | `85beab5` / `3830787b` | 1,979 frames / 776 s | **2.55 fps** |
+
+The near-equal V100/lavapipe rates — no meaningful V100 advantage — say the bottleneck is the
+guest's single TCG vCPU recording and the wire, not host rasterisation. This repeats the earlier
+generation's conclusion.
+
+**The earlier generation.** The numbers this record originally reported were measured on the
+`8327b39` tree (binary `c58b45b5…`) and are kept for comparison only; they are not the final state
+and must not be mixed with the table above:
 
 | window | lavapipe `wp4-v6` | V100 `wp4-v7-v100` |
 |---|---|---|
@@ -277,13 +307,9 @@ the later D3/D4/D5 commits); the closing boot `wp4-v13` did not run the full win
 | last 60 frames | 60 / 29.1 s = 2.03 fps | 60 frames = 1.40 fps (one 13.39 s stall) |
 | draws/frame | 11.44 | — |
 
-The lavapipe run: 2,037 recorded frames, 1,916 at the panel's 750×1624, 2,322.175 s overall,
-0.877 fps; the post-trigger window is 1.40 fps. The V100 run: 2,729 frames acknowledged, 27,058
-executed draws, `0 pipelines / 0 skipped draws`, 60/60 frames status 0 with `executed == total`,
-wire error 0, format 115 0; screen and host frame same-direction 0.88/255 vs 126.77 flipped. The
-V100 is ~7% faster in the steady window; the bottleneck remains the guest's single TCG vCPU
-recording and the wire, not host rasterisation. On the V100, `Tds4` and `Tn23` were executed;
-`Tn15` was never requested — deny it steady-desktop coverage and defer it to the backdrop path.
+(The V100 run then: 2,729 frames acknowledged, 27,058 executed draws, `0 pipelines / 0 skipped
+draws`, 60/60 frames status 0, screen and host frame 0.88/255 vs 126.77 flipped; on the V100,
+`Tds4` and `Tn23` executed and `Tn15` was never requested.)
 
 ### 3.5 Hashes of the inputs
 
@@ -336,29 +362,23 @@ design.
 
 ## 4. What this does not establish
 
-* **A finished, "100% correct" desktop.** Three defects are open, all named and none of them
-  introduced by this work:
-  - **D8 — the two presentation buffers are not equivalent.** Every second frame loses the
-    status-bar/Dock/Search layers: 250 consecutive frames are 125 good / 125 black in strict
-    alternation, and the host's render target alternates between textures 52 and 55 with different
-    non-zero byte counts (`t17`: 2,709,447 vs 2,361,858, difference 347,589 ≈ the three layers).
-    The same alternation exists in boots `t13` and `t19` (different binaries), so it predates the
-    `Tmua` fix; before it, both buffers drew the Dock white, and now the good buffer shows the
-    material while the other lacks the three layers. Screenshots must take the good frame; the
-    panel flashes at the alternation rate. This is the next task.
+D8 — the every-second-frame loss of the status bar/Dock/Search — is **fixed after this record**, in
+stage 39: both display surfaces now hold the complete picture (0 black frames over 260 lavapipe and
+472 V100 steady frames), and the final rates are 2.83/2.55 fps. What remains open is the following.
+
+* **A finished desktop.** The three guest/image-side boundaries are unchanged and outside this
+  record's host scope:
   - **D1/D2 — wallpaper and widgets.** The wallpaper layer arrives as black and the
-    Weather/Calendar cells are white placeholders; these are guest/image-side, outside this
-    record's host scope.
+    Weather/Calendar cells are white placeholders.
   - **D7 — the status bar's `rdar:45025538` banner** is the experiment image's debug overlay.
 * **Boot coverage of five blur kernels.** `Tds8`, `Tn27`, `Tn11`, `Tnb7`, `Tn15` are implemented
-  and fixture-verified, but Control Center/Spotlight could not be opened in three boots, so the
-  guest never requested them. Their visual correctness in a live backdrop remains to be measured.
+  and fixture-verified, but Control Center/Spotlight could not be opened in the earlier boots and
+  the final regression boots did not trigger it, so the guest never requested them (`Tn19` executed
+  once, during a backdrop transition in t11). Their visual correctness in a live backdrop remains
+  to be measured.
 * **A visible blur band in this screenshot.** With D1's wallpaper still black there is nothing for
   the blur to show; the Dock/Search now display the material's support texture, not a blur of a
   wallpaper.
-* **The final commit on the V100.** The V100 regression in §3.4 ran `8327b39`; the commits that
-  followed (`214fab4` … `b232e33`) have not been re-run there. The `0000:05:00.0` card was in use by
-  the other experiment, and the final V100 row is the follow-up.
 * **A guest-side per-frame checksum.** The CA render path's `ack.crc_ok` is set to 1 by the host
   (the guest did not hash a picture it did not draw), so 60/60 means status 0 and
   `executed == total`, not an end-to-end comparison.
@@ -372,10 +392,15 @@ design.
 - `docs/demo/NOTES.md` — its provenance block.
 - `docs/stage34-missing-pipelines.txt` — replaced with the closing boot's report
   (`frames 706, pipelines 0, skipped draws 0`); the stage-34 boot's report is quoted in
-  `docs/stage34-wp4-desktop.md`.
+  `docs/stage34-wp4-desktop.md`, and stage 39 refreshes the file to the final regression boot
+  (`frames 2295, pipelines 0, skipped draws 0`).
 - `docs/stage34-wp4-desktop.md` — §3.7's flip attribution corrected (it was the Metal→Vulkan NDC
   direction, not glwire's row order).
 - `docs/state-of-the-port.md`, `README.md` — the Metal state row and the milestone/index entries.
+
+The later stage-39 record adds `docs/stage39-d8-double-buffer.md` and
+`docs/demo/wp4-desktop-final.png`, marks D8 fixed, and refreshes the final frame-rate numbers; this
+note's status and §4 were updated to point there.
 
 The implementation commits listed in §2.6 changed `host/metalwire/` (shaders, `metalwire_host.c`,
 `metalwire_protocol.h`, `metalwire_gen.py`, `metalwire_test.py`, the Makefile and the READMEs),

@@ -179,7 +179,7 @@ vertically** (status bar at the bottom, icon glyphs upside down), on a black bac
 ![the home screen through the Metal path](demo/wp4-desktop-home.png)
 
 What was missing, by name, from this boot's report (the file `docs/stage34-missing-pipelines.txt`
-now carries the WP-4 close boot's report — `frames 706, pipelines 0, skipped draws 0`):
+now carries the final regression boot's report — `frames 2295, pipelines 0, skipped draws 0`):
 
 ```
 pipeline 111 vertex "downsample_blur_vert_lpf" fragment "downsample_4_frag_lpf"  skipped 290
@@ -227,8 +227,8 @@ remain the evidence that motivated it.
 - `docs/demo/wp4-desktop-composite.png`, `docs/demo/wp4-desktop-late.png`,
   `docs/demo/wp4-desktop-home.png` — the pictures here.
 - `docs/stage34-missing-pipelines.txt` — the `--missing-report` of boot `wp4-v4` when this note was
-  committed; the file now carries the WP-4 close boot's report (`frames 706, pipelines 0, skipped
-  draws 0`), and this note quotes the stage-34 report above.
+  committed; the file has since been refreshed to the final regression boot
+  (`frames 2295, pipelines 0, skipped draws 0`), and this note quotes the stage-34 report above.
 - `README.md`, `docs/state-of-the-port.md` — the state row.
 
 ## 6. Reproduce

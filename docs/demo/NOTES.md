@@ -171,9 +171,10 @@ One frame of boot `wp4-v13`, taken 2026-11-23 06:31 +08 on the branch
   RGBA16Float ramps are created as Vulkan images.
 - **What it does not show**: a finished or "100% correct" desktop. The wallpaper is black (D1),
   Weather/Calendar are white placeholders (D2), the status bar carries the image's debug banner
-  (D7), and the presentation alternates in two frames — every second frame loses the
+  (D7), and the presentation alternated in two frames — every second frame lost the
   status-bar/Dock/Search layers (D8; this capture is the good half, and the boot's stage-2/stage-3
-  captures happened to land on the other one). Five of the eight blur kernels are implemented and
+  captures happened to land on the other one; **D8 was fixed in stage 39** — see the final capture
+  below). Five of the eight blur kernels are implemented and
   fixture-verified but were never requested by the guest, because Control Center/Spotlight would
   not open. No frame-rate claim and no V100 claim here; the measured numbers are in
   `docs/stage35-wp4-close.md`.
@@ -182,3 +183,44 @@ One frame of boot `wp4-v13`, taken 2026-11-23 06:31 +08 on the branch
   the good 750×1624 frame (sha256
   `ee3d98bf03c606c251e729ffdec2e61b9befe56e204e39533c3ca7dff9202ae2`); it is pixel-identical to
   the run's own 375×812 thumbnail.
+
+# Metal translation acceptance capture — stage 39 / D8 (the final desktop)
+
+One frame of boot `wp4-v14b`, taken 2026-11-23 07:58 +08 on the branch
+`experiment/ca-metal-device`.
+
+- **Milestone**: stage 39 — D8 fixed, the two display buffers equivalent (experiment only; not a
+  delivered path)
+- **Commit**: `85beab5ea72e59a5f3e041b8530e8cab36765804` — the tree the boot ran (the D8 repair is
+  `13549ea` + `fb1f0b3`; format 30 is `85beab5`)
+- **Guest firmware**: Darwin 22.5.0, 20F66, iPhone10,3 — the contributor's own IPSW; run tree
+  `/home/lshan/DSH-desktop/mt-work`, image built by `tools/metalwire/prepare-guest.sh ui` plus
+  `bin/glremote_on`; clients `metal_frame`, `metal_probe`, `backboardd`; injected
+  `libcainject.dylib` (`aa123ccd…`) and `HakiosMetal` (`1152abab…`); `root.apfs` `964abbea…`
+  (baseline, zero difference)
+- **Host**: Linux x86_64; `metalwire_host` on device 0 = llvmpipe/lavapipe
+  (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json --gpu 0`; the V100 was not used for this
+  capture), with `--port 9111 --ram <ram.img> --out /tmp/wp4v14b-frames --png-every 1 --verbose
+  --missing-report /tmp/wp4v14b-missing.txt` and `MW_DUMP_DRAWS=1`; `host_glwire --no-panel 9210
+  <ram.img>` with `GLWIRE_SOFTWARE_GL=1` (0 clients); QEMU TCG, one vCPU,
+  `CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1"`, instance 3
+- **Command**: `MW_CMDLINE="cpus=1 fb_beat=0 fbscale=2 metal=1" tools/metalwire/run-guest.sh
+  wp4-v14b 1800`; the capture is `stage2-desktop-750x1624.png` of that run's `--out` tree,
+  downscaled to 375×812
+- **What it shows**: the complete, stable desktop through the Metal path — the status bar at the
+  top (with the image's `rdar:45025538` banner), the real app icons with their images and labels,
+  the Search row and the Dock at the bottom. Both display surfaces hold this picture: 2,119 frames
+  acknowledged, 20,924 draws executed, `pipelines 0 / skipped draws 0`, wire error 0, format 30 and
+  115 0; over 260 consecutive frames 0 are black, the Dock's median mean is 66.3 with 13,199
+  pure-white pixels (icon glyphs only) and Search's is 13.59. The V100 run (`wp4-v15`) shows the
+  same picture with the same stability (2,295 frames, 60/60 status 0, 0 black frames).
+- **What it does not show**: a finished desktop. The wallpaper is black (D1) and Weather/Calendar
+  are white placeholders (D2) — guest/image-side; the status bar carries the image's debug banner
+  (D7). Five of the eight blur kernels have fixture coverage only (Control Center/Spotlight never
+  opened), and no blur band is visible while the wallpaper is black. No frame-rate claim beyond the
+  numbers in `docs/stage39-d8-double-buffer.md`.
+- **Notes**: project's own pixels, no Apple asset. Committed file sha256
+  `40a80d02ca1014940883ead913f74f4f6a408e33d2fcd939e02c43c7393ec100` (375×812); the 750×1624
+  original is `d9198e69b580942eebbc441304fd64b88b392ca9a915450678ed7c9529a3709b`; the V100's
+  equivalent frames are `706290a9…` (750×1624) and `696df6f9…` (375×812). This is the good frame of
+  the final boot — unlike the stage-35 capture there is no black half any more.
