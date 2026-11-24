@@ -467,6 +467,35 @@ struct mw_server {
     uint16_t peer_version; /* the version the guest's first message carried; acks echo it */
 };
 
+/* ---- per-connection state ---------------------------------------------------------------------
+ *
+ * The translator was written for one client at a time: every field a message handler touches
+ * lives in mw_server. Two guests need to be served at once (backboardd holds a connection for the
+ * whole boot; an application extension that starts later must not wait for it to disconnect), so
+ * the connection-owned fields are listed once here, mw_client carries its own copy of each, and
+ * mw_client_enter/leave swap them in and out around one message. The handlers keep using
+ * s->field; with one client that is the old behaviour unchanged, and two clients cannot see each
+ * other's objects (a guest numbers its buffers, textures and pipelines from 1 in every process).
+ */
+#define MW_CLIENT_FIELDS(X)                                                                       \
+    X(client_fd) X(peer_version) X(frame) X(frames_done) X(pending_status) X(payload)             \
+    X(payload_cap) X(buffers) X(buffer_count) X(buffer_cap) X(images) X(image_count) X(image_cap) \
+    X(pipelines) X(pipeline_count) X(pipeline_cap) X(samplers) X(sampler_count) X(sampler_cap)     \
+    X(libraries) X(library_count) X(library_cap) X(replaces) X(replace_count) X(replace_cap)       \
+    X(buffer_bytes) X(buffers_reclaimed) X(stats) X(stats_count) X(stats_cap) X(completions)       \
+    X(completion_count) X(completion_cap) X(first_frame_begin_ns) X(last_completion_ns)           \
+    X(frames_ok) X(done)
+
+struct mw_client {
+    int fd;
+    unsigned char *inbuf; /* bytes received but not yet a whole message */
+    size_t inlen;
+    size_t incap;
+#define MW_CLIENT_FIELD(f) __typeof__(((struct mw_server *)0)->f) f;
+    MW_CLIENT_FIELDS(MW_CLIENT_FIELD)
+#undef MW_CLIENT_FIELD
+};
+
 static volatile sig_atomic_t g_stop;
 static int g_verbose;
 
@@ -5101,6 +5130,15 @@ static int mw_send_all(int fd, const void *data, size_t bytes)
         if (sent < 0) {
             if (errno == EINTR)
                 continue;
+            /* The sockets are non-blocking so one client's read cannot stall another; an ack
+             * waits for writability here instead of failing the frame. */
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = {fd, POLLOUT, 0};
+
+                if (poll(&pfd, 1, 10000) <= 0)
+                    return -1;
+                continue;
+            }
             return -1;
         }
         if (sent == 0)
@@ -5278,39 +5316,6 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
 }
 
 /* ---- protocol: connection ------------------------------------------------------------------- */
-
-static int mw_recv_full(int fd, void *data, size_t bytes)
-{
-    unsigned char *p = data;
-    size_t got = 0;
-
-    while (got < bytes) {
-        struct pollfd poll_fd = {fd, POLLIN, 0};
-        int ready;
-
-        if (g_stop)
-            return 0;
-        ready = poll(&poll_fd, 1, 200);
-        if (ready < 0) {
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        if (ready == 0)
-            continue;
-        ssize_t n = recv(fd, p + got, bytes - got, 0);
-
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        if (n == 0)
-            return 0;
-        got += (size_t)n;
-    }
-    return 1;
-}
 
 static const char *mw_type_name(uint16_t type)
 {
@@ -5821,97 +5826,346 @@ static int mw_handle_message(struct mw_server *s, uint16_t type, const unsigned 
     return 0;
 }
 
-static void mw_serve_client(struct mw_server *s)
+/* ---- clients ---------------------------------------------------------------------------------
+ *
+ * Several connections at once: backboardd holds one for the whole boot, and a poster extension
+ * that starts later has to have its hello and its frames answered without waiting for backboardd
+ * to disconnect. poll() watches the listener and every client; a readable client gets its bytes
+ * appended to its own input buffer and every whole message in it is handled in that client's
+ * context (mw_client_enter/leave), so one slow sender cannot stall another. The sockets are
+ * non-blocking, so no recv blocks; acks are small and mw_send_all waits for writability itself.
+ */
+
+#define MW_MAX_CLIENTS 8
+
+static void mw_client_init(struct mw_client *c, int fd)
 {
-    while (!s->done && !g_stop) {
-        struct mw_msg header;
-        int status;
-        int received;
+    memset(c, 0, sizeof(*c));
+    c->fd = fd;
+    c->client_fd = fd; /* the field the handlers send acks on (mw_client_enter copies it to s) */
+}
 
-        received = mw_recv_full(s->client_fd, &header, sizeof(header));
-        if (received <= 0)
-            break;
-        if (header.magic != MW_MAGIC || header.version < 2 || header.version > MW_VERSION) {
-            mw_log("protocol: bad header (magic 0x%08x version %u); closing the connection",
-                   header.magic, header.version);
-            break;
-        }
-        if (s->peer_version == 0 || s->peer_version != header.version) {
-            if (s->peer_version != 0 && s->peer_version != header.version)
-                mw_log("protocol: peer switched from version %u to %u; closing the connection",
-                       s->peer_version, header.version);
-            s->peer_version = header.version;
-        }
-        if (header.length > MW_MAX_MESSAGE) {
-            mw_log("protocol: message length %u over the %u-byte limit; closing the connection",
-                   header.length, MW_MAX_MESSAGE);
-            break;
-        }
-        if (header.length > s->payload_cap) {
-            unsigned char *grown = realloc(s->payload, header.length);
+static void mw_client_enter(struct mw_server *s, struct mw_client *c)
+{
+#define X(f) s->f = c->f;
+    MW_CLIENT_FIELDS(X)
+#undef X
+}
 
-            if (grown == NULL) {
-                mw_log("out of host memory for a %u-byte message", header.length);
-                break;
-            }
-            s->payload = grown;
-            s->payload_cap = header.length;
-        }
-        if (header.length > 0) {
-            received = mw_recv_full(s->client_fd, s->payload, header.length);
-            if (received <= 0)
-                break;
-        }
-        status = mw_handle_message(s, header.type, s->payload, header.length);
-        if (status < 0)
-            break;
+static void mw_client_leave(struct mw_server *s, struct mw_client *c)
+{
+#define X(f) c->f = s->f;
+    MW_CLIENT_FIELDS(X)
+#undef X
+}
+
+/* Free everything the connection-owned fields in mw_server point at, and empty them. Called with
+ * a client's state in context (mw_client_release), or on the state the last client left there for
+ * the summary and the missing-pipeline report. */
+static void mw_release_context(struct mw_server *s)
+{
+    while (s->image_count > 0)
+        mw_image_destroy(s, s->images[0]);
+    while (s->buffer_count > 0)
+        mw_buffer_destroy(s, s->buffers[0]);
+    while (s->pipeline_count > 0)
+        mw_pipeline_destroy(s, s->pipelines[0]);
+    while (s->sampler_count > 0)
+        mw_sampler_state_destroy(s, s->samplers[0]);
+    mw_drop_pending_replaces(s);
+    memset(&s->frame, 0, sizeof(s->frame));
+    s->pending_status = 0;
+    free(s->images);
+    s->images = NULL;
+    s->image_count = 0;
+    s->image_cap = 0;
+    free(s->buffers);
+    s->buffers = NULL;
+    s->buffer_count = 0;
+    s->buffer_cap = 0;
+    free(s->pipelines);
+    s->pipelines = NULL;
+    s->pipeline_count = 0;
+    s->pipeline_cap = 0;
+    free(s->samplers);
+    s->samplers = NULL;
+    s->sampler_count = 0;
+    s->sampler_cap = 0;
+    free(s->libraries);
+    s->libraries = NULL;
+    s->library_count = 0;
+    s->library_cap = 0;
+    free(s->replaces);
+    s->replaces = NULL;
+    s->replace_count = 0;
+    s->replace_cap = 0;
+    free(s->payload);
+    s->payload = NULL;
+    s->payload_cap = 0;
+    free(s->stats);
+    s->stats = NULL;
+    s->stats_count = 0;
+    s->stats_cap = 0;
+    free(s->completions);
+    s->completions = NULL;
+    s->completion_count = 0;
+    s->completion_cap = 0;
+    s->buffer_bytes = 0;
+    s->buffers_reclaimed = 0;
+    s->frames_done = 0;
+    s->frames_ok = 0;
+    s->first_frame_begin_ns = 0;
+    s->last_completion_ns = 0;
+}
+
+/* Drop everything a connection owns. The client is in context while its objects are destroyed so
+ * the existing destroy helpers, which take mw_server, see them. */
+static void mw_client_release(struct mw_server *s, struct mw_client *c)
+{
+    mw_client_enter(s, c);
+    mw_release_context(s);
+    mw_client_leave(s, c);
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
     }
+    free(c->inbuf);
+    c->inbuf = NULL;
+    c->inlen = 0;
+    c->incap = 0;
+}
+
+/* Keep the last client's objects in the server (the summary and the missing-pipeline report are
+ * written from there after the loop) and close its connection; ownership moves to mw_server. */
+static void mw_client_adopt(struct mw_server *s, struct mw_client *c)
+{
+    mw_client_enter(s, c);
     if (s->client_fd >= 0) {
         close(s->client_fd);
         s->client_fd = -1;
     }
-    mw_frame_reset(s);
-    mw_log("client disconnected after %" PRIu64 " frame(s)", s->frames_done);
+    free(c->inbuf);
+    memset(c, 0, sizeof(*c));
+    c->fd = -1;
 }
 
-static int mw_wait_for_client(struct mw_server *s)
+static int mw_client_grow_input(struct mw_client *c)
 {
-    while (!g_stop && !s->done) {
-        struct pollfd poll_fd = {s->listen_fd, POLLIN, 0};
-        int ready = poll(&poll_fd, 1, 200);
-        int fd;
+    size_t grown = c->incap != 0 ? c->incap * 2 : 65536;
+    unsigned char *buffer = realloc(c->inbuf, grown);
 
-        if (ready < 0) {
-            if (errno == EINTR)
-                continue;
-            mw_log("poll: %s", strerror(errno));
+    if (buffer == NULL)
+        return -1;
+    c->inbuf = buffer;
+    c->incap = grown;
+    return 0;
+}
+
+/* Drain what the socket has; returns -1 when the connection is to be closed. */
+static int mw_client_read(struct mw_client *c)
+{
+    for (;;) {
+        ssize_t got;
+
+        if (c->inlen == c->incap && mw_client_grow_input(c) != 0) {
+            mw_log("out of host memory for a client's input buffer");
             return -1;
         }
-        if (ready == 0)
-            continue;
-        fd = accept(s->listen_fd, NULL, NULL);
-        if (fd < 0) {
+        got = recv(c->fd, c->inbuf + c->inlen, c->incap - c->inlen, 0);
+        if (got < 0) {
             if (errno == EINTR)
                 continue;
-            mw_log("accept: %s", strerror(errno));
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return 0;
             return -1;
         }
-        {
-            int one = 1;
+        if (got == 0)
+            return 0; /* the peer closed; any whole messages left are parsed below */
+        c->inlen += (size_t)got;
+    }
+}
 
-            /* The guest is synchronous: without TCP_NODELAY its small command packets wait on
-             * delayed ACKs and each frame gains a spurious ~40 ms. */
-            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+/* Handle every whole message in the client's buffer. Returns -1 when the connection is to be
+ * closed (protocol error, the client said goodbye, or the frame target was reached); frames_total
+ * advances by the frames this client acknowledged. */
+static int mw_client_messages(struct mw_server *s, struct mw_client *c, uint64_t *frames_total,
+                              int *host_stop)
+{
+    while (c->inlen >= sizeof(struct mw_msg)) {
+        struct mw_msg header;
+        size_t need;
+        uint64_t before;
+        int status;
+
+        memcpy(&header, c->inbuf, sizeof(header));
+        if (header.magic != MW_MAGIC || header.version < 2 || header.version > MW_VERSION) {
+            mw_log("protocol: bad header (magic 0x%08x version %u); closing the connection",
+                   header.magic, header.version);
+            return -1;
         }
-        s->client_fd = fd;
-        s->pending_status = 0;
-        mw_frame_reset(s);
-        mw_log("client connected");
-        return 1;
+        if (header.length > MW_MAX_MESSAGE) {
+            mw_log("protocol: message length %u over the %u-byte limit; closing the connection",
+                   header.length, MW_MAX_MESSAGE);
+            return -1;
+        }
+        need = sizeof(header) + header.length;
+        if (c->inlen < need)
+            break;
+        if (c->peer_version == 0 || c->peer_version != header.version) {
+            if (c->peer_version != 0 && c->peer_version != header.version)
+                mw_log("protocol: peer switched from version %u to %u; closing the connection",
+                       c->peer_version, header.version);
+            c->peer_version = header.version;
+        }
+        before = c->frames_done;
+        mw_client_enter(s, c);
+        status = mw_handle_message(s, header.type, c->inbuf + sizeof(header), header.length);
+        mw_client_leave(s, c);
+        *frames_total += c->frames_done - before;
+        memmove(c->inbuf, c->inbuf + need, c->inlen - need);
+        c->inlen -= need;
+        if (status < 0 || c->done)
+            return -1;
+        if (s->frames_target != 0 && *frames_total >= s->frames_target) {
+            *host_stop = 1;
+            return -1;
+        }
     }
     return 0;
 }
 
+static void mw_client_drop(struct mw_server *s, struct mw_client *clients, int *nclients, int idx,
+                           int *adopted)
+{
+    struct mw_client *c = &clients[idx];
+
+    mw_client_enter(s, c);
+    mw_frame_reset(s);
+    mw_client_leave(s, c);
+    mw_log("client disconnected after %" PRIu64 " frame(s)", c->frames_done);
+    if (*nclients == 1) {
+        mw_client_adopt(s, c);
+        *nclients = 0;
+        *adopted = 1;
+        return;
+    }
+    mw_client_release(s, c);
+    clients[idx] = clients[*nclients - 1];
+    (*nclients)--;
+}
+
+static void mw_print_summary(struct mw_server *s);
+static void mw_write_missing_report(struct mw_server *s);
+
+static int mw_run_server(struct mw_server *s)
+{
+    struct mw_client clients[MW_MAX_CLIENTS];
+    int nclients = 0;
+    uint64_t frames_total = 0;
+    int stop = 0;
+    int adopted = 0; /* s holds the state of a client that has disconnected */
+
+    while (!g_stop && !stop) {
+        struct pollfd pfds[1 + MW_MAX_CLIENTS];
+        int index[1 + MW_MAX_CLIENTS];
+        int nfds = 1;
+        int ready;
+
+        pfds[0].fd = s->listen_fd;
+        pfds[0].events = POLLIN;
+        pfds[0].revents = 0;
+        for (int i = 0; i < nclients; i++) {
+            pfds[nfds].fd = clients[i].fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            index[nfds] = i;
+            nfds++;
+        }
+        ready = poll(pfds, (nfds_t)nfds, 200);
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            mw_log("poll: %s", strerror(errno));
+            break;
+        }
+        if (ready == 0)
+            continue;
+        if (pfds[0].revents & POLLIN) {
+            for (;;) {
+                int fd = accept(s->listen_fd, NULL, NULL);
+
+                if (fd < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    break; /* EAGAIN: no more connections waiting */
+                }
+                if (nclients == MW_MAX_CLIENTS) {
+                    mw_log("connection refused: %d clients is the limit", MW_MAX_CLIENTS);
+                    close(fd);
+                    continue;
+                }
+                {
+                    int one = 1;
+                    int flags;
+
+                    /* The guest is synchronous: without TCP_NODELAY its small command packets
+                     * wait on delayed ACKs and each frame gains a spurious ~40 ms. */
+                    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+                    flags = fcntl(fd, F_GETFL, 0);
+                    if (flags >= 0)
+                        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+                }
+                if (adopted) {
+                    mw_release_context(s);
+                    adopted = 0;
+                }
+                mw_client_init(&clients[nclients], fd);
+                mw_log("client connected (%d client(s))", nclients + 1);
+                nclients++;
+            }
+        }
+        for (int slot = 1; slot < nfds && !stop; slot++) {
+            int idx = index[slot];
+            struct mw_client *c;
+
+            if (idx >= nclients)
+                continue; /* a client removed earlier this pass owned that slot */
+            c = &clients[idx];
+            if (pfds[slot].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                mw_client_drop(s, clients, &nclients, idx, &adopted);
+                continue;
+            }
+            if (!(pfds[slot].revents & POLLIN))
+                continue;
+            if (mw_client_read(c) < 0) {
+                mw_client_drop(s, clients, &nclients, idx, &adopted);
+                continue;
+            }
+            if (mw_client_messages(s, c, &frames_total, &stop) < 0)
+                mw_client_drop(s, clients, &nclients, idx, &adopted);
+        }
+        if (s->frames_target != 0 && frames_total >= s->frames_target)
+            stop = 1;
+    }
+    if (nclients > 0) {
+        /* Still connected when the frame target stopped the loop: its state is what the summary
+         * and the missing-pipeline report describe. */
+        mw_log("client disconnected after %" PRIu64 " frame(s)",
+               clients[nclients - 1].frames_done);
+        mw_client_adopt(s, &clients[nclients - 1]);
+        nclients--;
+        adopted = 1;
+    }
+    while (nclients > 0) {
+        mw_client_release(s, &clients[nclients - 1]);
+        nclients--;
+    }
+    mw_print_summary(s);
+    mw_write_missing_report(s);
+    if (adopted)
+        mw_release_context(s);
+    return 0;
+}
 /* ---- summary -------------------------------------------------------------------------------- */
 
 static int mw_cmp_u64(const void *a, const void *b)
@@ -6022,10 +6276,16 @@ static int mw_open_listener(struct mw_server *s)
         close(fd);
         return -1;
     }
-    if (listen(fd, 1) < 0) {
+    if (listen(fd, 16) < 0) {
         mw_log("listen: %s", strerror(errno));
         close(fd);
         return -1;
+    }
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
     if (getsockname(fd, (struct sockaddr *)&address, &length) == 0)
         s->port = ntohs(address.sin_port);
@@ -6357,17 +6617,7 @@ int main(int argc, char **argv)
            server.frames_target == 0 ? "unbounded" : "capped", shm_path[0] ? shm_path : "(off)",
            csv_path != NULL ? csv_path : "(off)", server.crc_stride);
 
-    while (!g_stop && !server.done) {
-        if (server.client_fd < 0) {
-            int waited = mw_wait_for_client(&server);
-
-            if (waited <= 0)
-                break;
-        }
-        mw_serve_client(&server);
-    }
-    mw_print_summary(&server);
-    mw_write_missing_report(&server);
+    mw_run_server(&server);
     mw_server_cleanup(&server);
     return 0;
 }

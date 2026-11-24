@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zlib
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -1243,6 +1244,127 @@ def run_orientation(env):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def _multi_client_setup(client, width, height):
+    """Hello plus the object ids every guest starts from: buffer 1, texture 1."""
+    client.send(metalwire_gen.MW_HELLO,
+                struct.pack("<II32s", metalwire_gen.WIRE_VERSION, os.getpid(), b"metalwire_test"))
+    client.send(metalwire_gen.MW_CREATE_BUFFER, struct.pack("<IIQ", 1, 0, width * height * 4))
+    client.send(metalwire_gen.MW_CREATE_TEXTURE,
+                struct.pack("<IIIIII", 1, width, height, 80, 0, 0))
+
+
+def _multi_client_frame(client, picture, width, height, seq):
+    """One blit frame from this client's own buffer 1 / texture 1; returns (ack, ack_seconds)."""
+    crc = zlib.crc32(picture) & 0xFFFFFFFF
+    row_bytes = width * 4
+    client.send(metalwire_gen.MW_FRAME_BEGIN,
+                struct.pack("<QQ", seq, time.monotonic_ns()))
+    client.send(metalwire_gen.MW_UPLOAD_BUFFER,
+                struct.pack("<IIII", 1, 0, len(picture), 0) + picture)
+    client.send(metalwire_gen.MW_COPY_BUFFER_TO_TEXTURE,
+                struct.pack("<IIQIIIIII", 1, 1, 0, row_bytes, len(picture), width, height, 0, 0))
+    client.send(metalwire_gen.MW_PRESENT, struct.pack("<II", 1, 0))
+    client.send(metalwire_gen.MW_FRAME_END,
+                struct.pack("<QQIIII", seq, 0, crc, width, height, row_bytes))
+    started = time.monotonic()
+    ack = client.recv_ack()
+    return ack, time.monotonic() - started
+
+
+def run_multi_client(env):
+    """Two guests at once: the first holds its connection after its frame, the second connects
+    while it does and must get its own ack promptly.
+
+    The host used to accept one client and serve it until it disconnected, so a poster extension
+    that connected while backboardd held the wire waited for backboardd to go away -- longer than
+    launchd gives an extension to check in. Both clients here also use the same object ids (buffer
+    1, texture 1) with different pictures, so the acks only match if each client has its own
+    objects.
+    """
+    width, height = 128, 128
+    work = tempfile.mkdtemp(prefix="metalwire-multi-")
+    out_dir = os.path.join(work, "frames")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "2", "--shm", "", "--out", out_dir],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    first = second = None
+    ok = False
+    try:
+        require(listening.wait(60), "multi-client host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the multi-client host's port")
+        port = int(match.group(1))
+
+        picture_a = metalwire_gen.make_picture(width, height, 0, bgra=True)
+        picture_b = metalwire_gen.make_picture(width, height, 1, bgra=True)
+        first = metalwire_gen.Client("127.0.0.1", port, 10.0)
+        _multi_client_setup(first, width, height)
+        ack_a, _ = _multi_client_frame(first, picture_a, width, height, 0)
+        require(ack_a[2] == metalwire_gen.MW_STATUS_OK and ack_a[7] == 1,
+                "first client's frame was not acknowledged ok: %s" % (ack_a,))
+        require(ack_a[6] == zlib.crc32(picture_a) & 0xFFFFFFFF,
+                "first client's read-back CRC differs from its picture")
+
+        # The first client stays connected. The second one connects now and must be served too.
+        second = metalwire_gen.Client("127.0.0.1", port, 10.0)
+        _multi_client_setup(second, width, height)
+        ack_b, ack_seconds = _multi_client_frame(second, picture_b, width, height, 0)
+        require(ack_b[2] == metalwire_gen.MW_STATUS_OK and ack_b[7] == 1,
+                "second client's frame was not acknowledged ok: %s" % (ack_b,))
+        require(ack_b[6] == zlib.crc32(picture_b) & 0xFFFFFFFF,
+                "second client's read-back CRC differs from its picture (objects are shared?)")
+        require(ack_seconds < 5.0,
+                "the second client waited %.1f s for its ack while the first was connected" %
+                ack_seconds)
+
+        first.close()
+        first = None
+        second.close()
+        second = None
+        require(host.wait(timeout=120) == 0,
+                "multi-client host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("client connected (2 client(s))" in output,
+                "the host did not accept the second connection:\n%s" % output)
+        require(output.count("client disconnected after 1 frame(s)") == 2,
+                "the host did not account one frame per client:\n%s" % output)
+        print("PASS multi-client: two connections at once, each ack ok in %.3f s, "
+              "same ids stayed apart" % ack_seconds)
+        ok = True
+    except TestFailure:
+        if host.poll() is None:
+            host.kill()
+            host.wait()
+        raise
+    finally:
+        for client in (first, second):
+            if client is not None:
+                client.close()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     if not os.path.exists(LAVAPIPE):
         print("metalwire_test: SKIP: lavapipe ICD not found at %s" % LAVAPIPE)
@@ -1373,8 +1495,9 @@ def main():
         run_leak_check(env)
         run_chain(env)
         run_orientation(env)
+        run_multi_client(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, rg8, "
-              "blur, labels, draw-dump, material, dual-buffer, leak-check, chain, orientation)"
+              "blur, labels, draw-dump, material, dual-buffer, leak-check, chain, orientation, multi-client)"
               % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
