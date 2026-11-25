@@ -25,7 +25,7 @@ BUILD   := build
 VKBRIDGE := $(BUILD)/host/vkbridge/vkbridge
 PROBE   := $(BUILD)/guest/iosvm-probe
 
-.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check proto components
+.PHONY: help doctor test-open test test-gpu provenance style fmt host guest qemu run clean submodule unpack unpack-plan images qemu-open qemu-open-check proto components metalwire-host metalwire-test metalwire-guest metalwire-image metalwire-worktree ca-inject ca-inject-install
 
 help: ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -75,6 +75,35 @@ test-gpu: ## build the backend and run its probe on lavapipe (no Apple file, no 
 host: ## build the host Vulkan backend (host/vkbridge submodule)
 	@test -f host/vkbridge/Makefile || { echo "host/vkbridge is not fetched: run make submodule" >&2; exit 2; }
 	$(MAKE) -C host/vkbridge
+
+# ---------------------------------------------------------------------------
+# Metal experiment (branch experiment/metal-translation; docs/stage29-metal-translation.md).
+# The wire, the translator and the test harness; nothing here needs an Apple file. The guest
+# side needs the HakiOS cross toolchain and is not part of the CI gate.
+# ---------------------------------------------------------------------------
+
+metalwire-host: ## build the experiment's Metal->Vulkan translator (host/metalwire)
+	$(MAKE) -C host/metalwire
+
+metalwire-test: metalwire-host ## translator's own test on lavapipe (no GPU needed); CI-safe
+	$(MAKE) -C host/metalwire test
+
+metalwire-guest: ## build the guest Metal plug-in and client (needs HAKIOS_DIR + theos SDK)
+	@test -n "$(HAKIOS)" || { echo "give HAKIOS=/path/to/hakios checkout (see docs/stage29-metal-translation.md)" >&2; exit 2; }
+	HAKIOS_DIR="$(HAKIOS)" guest/metal-plugin/build.sh
+
+metalwire-worktree: ## make the experiment's private guest run tree (~90 MB, sudo once)
+	@test -n "$(HAKIOS)" || { echo "give HAKIOS=/path/to/hakios checkout" >&2; exit 2; }
+	HAKIOS_DIR="$(HAKIOS)" tools/metalwire/make-worktree.sh
+
+metalwire-image: ## install the translated Metal client's root image (sudo; needs metalwire-guest)
+	HAKIOS_DIR="$(HAKIOS)" tools/metalwire/prepare-guest.sh translate
+
+ca-inject: ## build the CA-on-Metal boot instrumentation (guest/ca-metal-inject)
+	guest/ca-metal-inject/build.sh
+
+ca-inject-install: ca-inject ## install it into the private guest run tree (sudo; needs metalwire-worktree)
+	guest/ca-metal-inject/install.sh on
 
 # ---------------------------------------------------------------------------
 # Guest side (needs the iPhoneOS SDK, so: a Mac — see ADR-009)

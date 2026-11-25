@@ -1,0 +1,3 @@
+# metalwire missing-pipeline report
+# frames 2295, pipelines 0, skipped draws 0
+library 6 kind url bytes 64 hash 0x0472d062082ed7b7 functions 0

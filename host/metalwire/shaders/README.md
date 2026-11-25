@@ -1,0 +1,95 @@
+# The metalwire shaders: eight CoreAnimation base functions in Vulkan GLSL
+
+These eight files are hand-written Vulkan GLSL. The first four are the WP-2 rewrite of the four
+Metal base functions the BootUI frame names (`fixed_vert_lpf_spc`, `fixed_frag_lpf_cpf`,
+`std_vert1_lpf`, `luma_boost_lpf`); the second four are the WP-4 rewrite of the background/Dock
+blur family (`downsample_blur_vert_lpf`, `downsample_4/8_frag_lpf`,
+`narrow_blur_7/11/15/19/23/27_frag_lpf`), which the desktop boots (wp4-v4, 674 skipped draws;
+wp4-v6, 1916 more when Control Center/Spotlight opened the backdrop chain) reported as
+missing. Together they are what `metalwire_host` uses to execute a render frame. The build
+compiles them with `glslangValidator -V --target-env vulkan1.1`, validates the SPIR-V with
+`spirv-val`, and embeds it into the host binary (`../embed_spirv.py`).
+
+## Provenance
+
+Nothing here is Apple code and nothing here is copied from an Apple binary.
+
+- The **interface** (which attributes, buffers, textures, samplers and offsets the functions take)
+  is the wire's: the 16-attribute vertex descriptor, the 13 sets and the captured buffer layout in
+  `docs/stage31-ca-metal-wire.md` and `docs/spike-wp2-vulkan-glsl.md`. That record is the
+  authoritative source, and the host prints it with `metalwire_host --dump DIR`.
+- The **shape of the semantics** was cross-checked against the guest image's sibling shader family
+  (`QuartzCore.framework/default.pipelinelib`, the `lph_*` specialisations) as read-only evidence:
+  its argument metadata gives the `CA::OGL::Metal::Uniform` byte table (176 B: `image_arg`,
+  `blend_colors`, `edr_factors`, `hdr_scale`, `premultiply`, `linear_edr`, `clamp_range`,
+  `filter_arg`, `coord_arg`, the 40-byte constant union), the `mvp_matrix`/`texture_matrix` buffer
+  roles, and the fact that 166 fragment modules take a framebuffer-fetch colour. No byte of Apple's
+  shaders is reproduced or committed; the analysis lives in `docs/research/ca-metallib-url.md` and
+  the WP-2 notes. This follows the project's provenance rule (Apple assets stay on the
+  contributor's disk).
+- `std_vert1_lpf` and `luma_boost_lpf` are **not** in the guest image. Their GLSL is a minimal
+  reconstruction from the wire and is marked `[INFERRED]` in the file header.
+- The four WP-4 blur functions are reconstructed from the recorded render calls and the names
+  alone: the wp4-v4 guest log (the same read-only serial log the stage records cite) gives each
+  blur pipeline's draw -- target size and scissor, the bound fragment texture 3, the absent
+  sampler, vertex buffers 1/2/3, and the index count (1, 2 or 25 quads). The kernel weights are
+  **not** in that record, so they are standard binomial (Pascal) kernels and every inferred part
+  is marked `[INFERRED]` in the file headers. Nothing is decompiled and no Apple byte is copied;
+  if QuartzCore's `default.metallib` ever becomes available, these four are the files to revisit.
+
+If the project ever obtains the missing `default.metallib`, the inferred two should be revisited
+first; everything else can be checked against the record.
+
+## Interface
+
+The host maps the wire to one descriptor set and a 16-byte push constant:
+
+| binding | type | stage | wire origin |
+|---|---|---|---|
+| set 0, binding 0 | `readonly buffer WireBuffer { uint wire[]; }` (std430, whole CA buffer) | vertex + fragment | the one buffer object the frame binds at five offsets |
+| set 0, binding 1 | sampled image | fragment | Metal fragment texture 3 (BGRA8 layer image, or the 128×1 R8Unorm ramp) |
+| set 0, binding 2 | sampler | fragment | Metal fragment sampler 0 |
+| set 0, binding 3 | sampled image | fragment | the colour-attachment snapshot that spells Metal's `[[color(0)]]` fetch |
+| push constant | `uint vertex_mvp, vertex_texmat, fragment_uniform, fragment_lod` | both | the byte offsets of the Metal buffers inside the wire buffer |
+
+The vertex attribute stream is a normal Vertex buffer: Metal stream 1, stride 48, four attributes
+(`Float4 position @0`, `Float2 texcoord0 @16`, `Float2 texcoord1 @24`, `Half4 colour @32`).
+
+Function constants of the Metal base functions are specialization constants here:
+
+| shader | constant | selects |
+|---|---|---|
+| `fixed_vert_lpf_spc.vert`, `std_vert1_lpf.vert` | `USE_TEXTURE_MATRIX` | `Timg`/`Tlub` variants that multiply texcoords by the texture matrix |
+| `fixed_frag_lpf_cpf.frag` | `HAS_TEXTURE` | the no-texture fill vs the textured layer draw |
+| | `FETCH_DEST` | the `Bsov` source-over path that reads the destination |
+| | `PREMULTIPLY` | a pipeline whose premultiply flag was baked (the uniform byte is the runtime flag) |
+
+`luma_boost_lpf.frag` always reads the destination and the R8Unorm ramp; when the recorded uniform's
+EDR scale is zero it is the identity, which is what the wire's BootUI frame asks for.
+
+## Files
+
+| file | base function |
+|---|---|
+| [`fixed_vert_lpf_spc.vert`](fixed_vert_lpf_spc.vert) | `fixed_vert_lpf_spc` |
+| [`fixed_frag_lpf_cpf.frag`](fixed_frag_lpf_cpf.frag) | `fixed_frag_lpf_cpf` |
+| [`std_vert1_lpf.vert`](std_vert1_lpf.vert) | `std_vert1_lpf` `[INFERRED]` |
+| [`luma_boost_lpf.frag`](luma_boost_lpf.frag) | `luma_boost_lpf` `[INFERRED]` |
+
+### WP-4: the background/Dock blur family
+
+| file | base function | what the recorded draw says |
+|---|---|---|
+| [`downsample_blur_vert_lpf.vert`](downsample_blur_vert_lpf.vert) | `downsample_blur_vert_lpf` | one vertex function for all eight blur pipelines (`downsample_4/8`, `narrow_blur_7/11/15/19/23/27`); the blur draws bind vertex buffers 1/2/3 as the layer draws do, so it is the ordinary transform `[INFERRED]` |
+| [`downsample_4_frag_lpf.frag`](downsample_4_frag_lpf.frag) | `downsample_4_frag_lpf` | renders a 180x72 target from `com.apple.coreanimation.framebuffer-surface`, no sampler bound; a 4x4 box average `[INFERRED]` |
+| [`downsample_8_frag_lpf.frag`](downsample_8_frag_lpf.frag) | `downsample_8_frag_lpf` | the 8x sibling (pipeline `Tds8`, 692 skipped draws in boot wp4-v6); an 8x8 box average, 64 taps at 1/64 `[INFERRED]` |
+| [`narrow_blur_7_frag_lpf.frag`](narrow_blur_7_frag_lpf.frag) | `narrow_blur_7_frag_lpf` | samples `com.apple.coreanimation.surface`, no sampler; 7 taps per axis, Pascal row 6 binomial `[INFERRED]` |
+| [`narrow_blur_11_frag_lpf.frag`](narrow_blur_11_frag_lpf.frag) | `narrow_blur_11_frag_lpf` | the same, 11 taps per axis, Pascal row 10 `[INFERRED]` |
+| [`narrow_blur_23_frag_lpf.frag`](narrow_blur_23_frag_lpf.frag) | `narrow_blur_23_frag_lpf` | the same, 23 taps per axis, Pascal row 22 `[INFERRED]` |
+| [`narrow_blur_15_frag_lpf.frag`](narrow_blur_15_frag_lpf.frag) | `narrow_blur_15_frag_lpf` | the same, 15 taps per axis, Pascal row 14 `[INFERRED]` |
+| [`narrow_blur_19_frag_lpf.frag`](narrow_blur_19_frag_lpf.frag) | `narrow_blur_19_frag_lpf` | the same, 19 taps per axis, Pascal row 18 `[INFERRED]` |
+| [`narrow_blur_27_frag_lpf.frag`](narrow_blur_27_frag_lpf.frag) | `narrow_blur_27_frag_lpf` | the same, 27 taps per axis, Pascal row 26 (the backdrop's widest kernel, 1202 skipped draws in boot wp4-v6) `[INFERRED]` |
+
+The blur fragment shaders use texel-exact access (`texelFetch`) because the recorded draws bind no
+sampler; they do not read the wire buffer. Their specialization constants carry the ids the host
+maps for every fragment base function, so one pipeline-specialization record works everywhere.

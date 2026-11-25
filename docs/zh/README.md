@@ -19,4 +19,14 @@
    QEMU `virt` 上用自编译 XNU + 自写驱动跑到主屏（Darwin 16.5），C3 是**起点**，不是退路。
    本机实测：同一份内核在 6.4 秒内走到 BSD 初始化（`docs/m0-host-report.md`）。见 ADR-008。
 
+## 其他中文文档
+
+以下三份是较新英文文档的中文译文，不属于上面的设计基线；数字以英文版为准。
+
+| 文件 | 内容 | 对应英文版 |
+|---|---|---|
+| `metal-translation-feasibility.md` | Metal → Vulkan 翻译可行性（M1 调研） | `docs/research/metal-translation-feasibility.md` |
+| `stage29-metal-translation.md` | 第 29 阶段实验记录 | `docs/stage29-metal-translation.md` |
+| `adr-013-metal-translation.md` | ADR-013 决策记录 | `docs/adr/ADR-013-metal-translation.md` |
+
 英文文档优先，冲突时以英文为准。
