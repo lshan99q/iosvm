@@ -461,6 +461,19 @@ struct mw_server {
     uint64_t first_frame_begin_ns;
     uint64_t last_completion_ns;
     uint64_t frames_ok;
+    uint64_t bytes_done;
+
+    /* Run totals. A connection's counters and timings are freed when it disconnects, but the exit
+     * summary describes the whole run; every finished connection is added to these before its
+     * state is released (and the last one is added just before the summary is printed). */
+    struct mw_timing *total_stats;
+    size_t total_stats_count;
+    size_t total_stats_cap;
+    uint64_t total_frames_done;
+    uint64_t total_frames_ok;
+    uint64_t total_bytes;
+    uint64_t total_first_ns;
+    uint64_t total_last_ns;
 
     int done;
     int verbose;
@@ -484,7 +497,7 @@ struct mw_server {
     X(libraries) X(library_count) X(library_cap) X(replaces) X(replace_count) X(replace_cap)       \
     X(buffer_bytes) X(buffers_reclaimed) X(stats) X(stats_count) X(stats_cap) X(completions)       \
     X(completion_count) X(completion_cap) X(first_frame_begin_ns) X(last_completion_ns)           \
-    X(frames_ok) X(done)
+    X(frames_ok) X(bytes_done) X(done)
 
 struct mw_client {
     int fd;
@@ -5087,6 +5100,47 @@ static void mw_completions_grow(struct mw_server *s, size_t needed)
     s->completion_cap = cap;
 }
 
+static void mw_total_stats_grow(struct mw_server *s, size_t needed)
+{
+    size_t cap;
+    struct mw_timing *grown;
+
+    if (needed <= s->total_stats_cap)
+        return;
+    cap = s->total_stats_cap == 0 ? 64 : s->total_stats_cap;
+    while (cap < needed)
+        cap *= 2;
+    grown = realloc(s->total_stats, cap * sizeof(*grown));
+    if (grown == NULL)
+        return;
+    s->total_stats = grown;
+    s->total_stats_cap = cap;
+}
+
+/* Add the connection currently in context to the run totals. Called before a connection's state
+ * is released, and once more for the last one just before the summary. */
+static void mw_totals_add(struct mw_server *s)
+{
+    if (s->frames_done == 0 && s->stats_count == 0)
+        return;
+    if (s->first_frame_begin_ns != 0 &&
+        (s->total_first_ns == 0 || s->first_frame_begin_ns < s->total_first_ns))
+        s->total_first_ns = s->first_frame_begin_ns;
+    if (s->last_completion_ns > s->total_last_ns)
+        s->total_last_ns = s->last_completion_ns;
+    s->total_frames_done += s->frames_done;
+    s->total_frames_ok += s->frames_ok;
+    s->total_bytes += s->bytes_done;
+    if (s->stats_count == 0)
+        return;
+    mw_total_stats_grow(s, s->total_stats_count + s->stats_count);
+    if (s->total_stats_count + s->stats_count <= s->total_stats_cap) {
+        memcpy(s->total_stats + s->total_stats_count, s->stats,
+               s->stats_count * sizeof(*s->stats));
+        s->total_stats_count += s->stats_count;
+    }
+}
+
 static double mw_rolling_fps(struct mw_server *s, uint64_t now)
 {
     uint64_t start = now > MW_ROLLING_NS ? now - MW_ROLLING_NS : 0;
@@ -5118,6 +5172,33 @@ static void mw_csv_row(struct mw_server *s, uint64_t seq, uint64_t bytes,
             mw_ns_to_us(timing->gpu_ns), mw_ns_to_us(timing->readback_ns),
             mw_ns_to_us(timing->publish_ns), mw_ns_to_us(timing->total_ns), crc_ok, fps);
     fflush(s->csv);
+}
+
+/* Account one finished frame: rolling-FPS inputs, the timing table, the byte counter, the CSV row.
+ * Both the picture-upload and the render-encoder paths go through here, so a render frame is
+ * measured exactly like the frames that came before render mode existed. */
+static double mw_record_frame(struct mw_server *s, uint64_t seq, uint64_t bytes,
+                              const struct mw_timing *timing, int crc_ok)
+{
+    uint64_t now = mw_now_ns();
+    double fps;
+
+    mw_completions_grow(s, s->completion_count + 1);
+    if (s->completion_count < s->completion_cap) {
+        s->completions[s->completion_count++] = now;
+        s->last_completion_ns = now;
+    }
+    fps = mw_rolling_fps(s, now);
+    mw_stats_grow(s, s->stats_count + 1);
+    if (s->stats_count < s->stats_cap) {
+        s->stats[s->stats_count] = *timing;
+        s->stats_count++;
+    }
+    s->bytes_done += bytes;
+    if (crc_ok)
+        s->frames_ok++;
+    mw_csv_row(s, seq, bytes, timing, crc_ok, fps);
+    return fps;
 }
 
 static int mw_send_all(int fd, const void *data, size_t bytes)
@@ -5196,6 +5277,8 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
         struct mw_frame_result result;
 
         memset(&result, 0, sizeof(result));
+        memset(&timing, 0, sizeof(timing));
+        timing.recv_ns = t_end > frame->begin_ns ? t_end - frame->begin_ns : 0;
         status = mw_run_render_frame(s, frame, &result);
         mw_drop_pending_replaces(s);
         memset(&ack, 0, sizeof(ack));
@@ -5227,6 +5310,23 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
         if (mw_send_all(s->client_fd, &ack, sizeof(ack)) < 0) {
             mw_frame_reset(s);
             return -1;
+        }
+        /* The ack is on the wire; the accounting comes after it, exactly where the picture path
+         * does it, so a render frame fills the CSV, the timing table and the summary too. */
+        timing.total_ns = mw_now_ns() - t_end;
+        bytes = (uint64_t)frame->width * frame->height * MW_PIXEL_BYTES;
+        if (status == MW_STATUS_BAD_COMMAND)
+            bytes = 0;
+        if (status == MW_STATUS_OK || status == MW_STATUS_CRC_MISMATCH) {
+            fps = mw_record_frame(s, frame->seq, bytes, &timing, 1);
+            mw_log("frame %" PRIu64 ": %" PRIu64
+                   " bytes, recv %.3f ms, exec %.3f ms, total %.3f ms, render crc 0x%08x, %.1f fps",
+                   frame->seq, bytes, (double)timing.recv_ns / 1e6, (double)timing.exec_ns / 1e6,
+                   (double)timing.total_ns / 1e6, result.crc, fps);
+        } else {
+            mw_csv_row(s, frame->seq, 0, &timing, 0, 0.0);
+            mw_log("frame %" PRIu64 ": failed with status %d%s", frame->seq, status,
+                   status == MW_STATUS_BAD_COMMAND ? " (bad command)" : "");
         }
         s->frames_done++;
         mw_frame_reset(s);
@@ -5273,25 +5373,7 @@ static int mw_handle_frame_end(struct mw_server *s, const struct mw_frame_end *r
     timing.total_ns = mw_now_ns() - t_end;
 
     if (status == MW_STATUS_OK || status == MW_STATUS_CRC_MISMATCH) {
-        mw_completions_grow(s, s->completion_count + 1);
-        if (s->completion_count < s->completion_cap) {
-            s->completions[s->completion_count++] = mw_now_ns();
-            s->last_completion_ns = s->completions[s->completion_count - 1];
-        }
-        fps = mw_rolling_fps(s, mw_now_ns());
-        mw_stats_grow(s, s->stats_count + 1);
-        if (s->stats_count < s->stats_cap) {
-            s->stats[s->stats_count].recv_ns = timing.recv_ns;
-            s->stats[s->stats_count].exec_ns = timing.exec_ns;
-            s->stats[s->stats_count].gpu_ns = timing.gpu_ns;
-            s->stats[s->stats_count].readback_ns = timing.readback_ns;
-            s->stats[s->stats_count].publish_ns = timing.publish_ns;
-            s->stats[s->stats_count].total_ns = timing.total_ns;
-            s->stats_count++;
-        }
-        if (status == MW_STATUS_OK)
-            s->frames_ok++;
-        mw_csv_row(s, frame->seq, bytes, &timing, result.crc_ok, fps);
+        fps = mw_record_frame(s, frame->seq, bytes, &timing, result.crc_ok);
         mw_log("frame %" PRIu64 ": %" PRIu64
                " bytes, recv %.3f ms, exec %.3f ms, gpu %.3f ms, readback %.3f ms, publish %.3f "
                "ms, total %.3f ms, crc %s (0x%08x), %.1f fps",
@@ -5914,6 +5996,7 @@ static void mw_release_context(struct mw_server *s)
     s->buffers_reclaimed = 0;
     s->frames_done = 0;
     s->frames_ok = 0;
+    s->bytes_done = 0;
     s->first_frame_begin_ns = 0;
     s->last_completion_ns = 0;
 }
@@ -5923,6 +6006,7 @@ static void mw_release_context(struct mw_server *s)
 static void mw_client_release(struct mw_server *s, struct mw_client *c)
 {
     mw_client_enter(s, c);
+    mw_totals_add(s); /* the run summary outlives this connection */
     mw_release_context(s);
     mw_client_leave(s, c);
     if (c->fd >= 0) {
@@ -6116,6 +6200,7 @@ static int mw_run_server(struct mw_server *s)
                         (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
                 }
                 if (adopted) {
+                    mw_totals_add(s);
                     mw_release_context(s);
                     adopted = 0;
                 }
@@ -6164,6 +6249,10 @@ static int mw_run_server(struct mw_server *s)
     mw_write_missing_report(s);
     if (adopted)
         mw_release_context(s);
+    free(s->total_stats);
+    s->total_stats = NULL;
+    s->total_stats_count = 0;
+    s->total_stats_cap = 0;
     return 0;
 }
 /* ---- summary -------------------------------------------------------------------------------- */
@@ -6228,24 +6317,28 @@ static uint64_t mw_get_total(const struct mw_timing *t)
 
 static void mw_print_summary(struct mw_server *s)
 {
+    double span = 0.0;
+
+    /* The connection still in context is the last one to disconnect; its frames belong to the run
+     * summary even though its own state is released right after this. */
+    mw_totals_add(s);
     mw_leak_check(s, "exit");
-    if (s->stats_count == 0) {
+    if (s->total_stats_count == 0) {
         mw_log("summary: no frames were executed");
         return;
     }
-    double span = 0.0;
-
-    if (s->last_completion_ns > s->first_frame_begin_ns)
-        span = (double)(s->last_completion_ns - s->first_frame_begin_ns) / 1e9;
+    if (s->total_last_ns > s->total_first_ns)
+        span = (double)(s->total_last_ns - s->total_first_ns) / 1e9;
     mw_log("summary: %" PRIu64 " frame(s) acknowledged, %" PRIu64
            " executed with crc_ok, %.3f s, %.1f fps",
-           s->frames_done, s->frames_ok, span, span > 0.0 ? (double)s->stats_count / span : 0.0);
-    mw_print_metric("recv", s->stats, s->stats_count, mw_get_recv);
-    mw_print_metric("exec", s->stats, s->stats_count, mw_get_exec);
-    mw_print_metric("gpu", s->stats, s->stats_count, mw_get_gpu);
-    mw_print_metric("readback", s->stats, s->stats_count, mw_get_readback);
-    mw_print_metric("publish", s->stats, s->stats_count, mw_get_publish);
-    mw_print_metric("total", s->stats, s->stats_count, mw_get_total);
+           s->total_frames_done, s->total_frames_ok, span,
+           span > 0.0 ? (double)s->total_stats_count / span : 0.0);
+    mw_print_metric("recv", s->total_stats, s->total_stats_count, mw_get_recv);
+    mw_print_metric("exec", s->total_stats, s->total_stats_count, mw_get_exec);
+    mw_print_metric("gpu", s->total_stats, s->total_stats_count, mw_get_gpu);
+    mw_print_metric("readback", s->total_stats, s->total_stats_count, mw_get_readback);
+    mw_print_metric("publish", s->total_stats, s->total_stats_count, mw_get_publish);
+    mw_print_metric("total", s->total_stats, s->total_stats_count, mw_get_total);
 }
 
 /* ---- setup / teardown ----------------------------------------------------------------------- */

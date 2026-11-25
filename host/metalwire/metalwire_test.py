@@ -1119,6 +1119,93 @@ def read_png_rgb(path):
     return width, height, bytes(out)
 
 
+def run_render_stats(env):
+    """t91: a render-encoder frame must be measured like any other frame.
+
+    The render path answered its ack and returned before the timing block, so a run made only of
+    render frames wrote a header-only CSV and the exit summary said no frames were executed, even
+    though both frames were acknowledged. Two chained render frames must leave two CSV rows and a
+    summary that counts them.
+    """
+    work = tempfile.mkdtemp(prefix="metalwire-stats-")
+    csv_path = os.path.join(work, "render.csv")
+    host = subprocess.Popen(
+        [HOST, "--gpu", "0", "--port", "0", "--frames", "2", "--shm", "", "--csv", csv_path,
+         "--verbose"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    host_lines = []
+    host_lock = threading.Lock()
+    listening = threading.Event()
+
+    def drain_host():
+        for line in host.stderr:
+            with host_lock:
+                host_lines.append(line.rstrip("\n"))
+            if "listening on" in line:
+                listening.set()
+
+    reader = threading.Thread(target=drain_host, daemon=True)
+    reader.start()
+    ok = False
+    try:
+        require(listening.wait(60), "stats host did not print a listening line within 60 s")
+        with host_lock:
+            match = None
+            for line in host_lines:
+                match = re.search(r"listening on .*:(\d+)$", line)
+                if match:
+                    break
+        require(match is not None, "cannot parse the stats host's port")
+        gen = subprocess.run(
+            [sys.executable, GEN, "--render-chain", "--port", match.group(1)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        require(gen.returncode == 0,
+                "stats generator exited %d\n%s\n%s" % (gen.returncode, gen.stdout, gen.stderr))
+        require(host.wait(timeout=120) == 0,
+                "stats host exited %s\n%s" % (host.returncode, "\n".join(host_lines)))
+        reader.join(timeout=10)
+        with host_lock:
+            output = "\n".join(host_lines)
+        require("chain frames: ack status=ok" in gen.stdout,
+                "the render frames were not acknowledged:\n%s" % gen.stdout)
+        require("render frame 0:" in output and "render frame 1:" in output,
+                "the host did not execute both render frames:\n%s" % output)
+        require(output.count("bytes, recv") >= 2,
+                "the render frames were not measured:\n%s" % output)
+        require("summary: no frames were executed" not in output,
+                "the summary ignored render frames:\n%s" % output)
+        require("summary: 2 frame(s) acknowledged" in output,
+                "the summary did not count the render frames:\n%s" % output)
+        require("2 executed with crc_ok" in output,
+                "the summary lost the render frames' crc state:\n%s" % output)
+        with open(csv_path, newline="") as f:
+            rows = list(csv.reader(f))
+        require(len(rows) == 3, "the render CSV has %d row(s), expected a header and two frames"
+                % len(rows))
+        require(rows[0][0] == "seq", "the render CSV header is %r" % (rows[0],))
+        for index in range(2):
+            row = rows[index + 1]
+            require(len(row) == 10, "render CSV row %d has %d column(s): %r"
+                    % (index, len(row), row))
+            require(row[0] == str(index), "render CSV row %d has seq %r" % (index, row[0]))
+            require(int(row[1]) > 0, "render CSV row %d has no bytes" % index)
+            require(int(row[7]) > 0, "render CSV row %d has no total time" % index)
+            require(int(row[8]) == 1, "render CSV row %d is not crc_ok: %r" % (index, row[8]))
+        print("PASS render-stats: render-encoder frames reach the CSV and the exit summary")
+        ok = True
+    except TestFailure:
+        with host_lock:
+            print("--- stats host stderr ---\n%s" % "\n".join(host_lines))
+        raise
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.wait()
+        reader.join(timeout=5)
+        if ok:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 def run_orientation(env):
     """WP-4 1.1: CA's Metal NDC y-up / Vulkan y-down must not mirror the picture.
 
@@ -1348,8 +1435,12 @@ def run_multi_client(env):
                 "the host did not accept the second connection:\n%s" % output)
         require(output.count("client disconnected after 1 frame(s)") == 2,
                 "the host did not account one frame per client:\n%s" % output)
+        require("summary: 2 frame(s) acknowledged" in output,
+                "the summary did not add the clients' frames together:\n%s" % output)
+        require("2 executed with crc_ok" in output,
+                "the summary lost a client's crc state:\n%s" % output)
         print("PASS multi-client: two connections at once, each ack ok in %.3f s, "
-              "same ids stayed apart" % ack_seconds)
+              "same ids stayed apart, summary counted both" % ack_seconds)
         ok = True
     except TestFailure:
         if host.poll() is None:
@@ -1494,10 +1585,12 @@ def main():
         run_dual_buffer(env)
         run_leak_check(env)
         run_chain(env)
+        run_render_stats(env)
         run_orientation(env)
         run_multi_client(env)
         print("metalwire_test: PASS (lavapipe, %dx%d, %d frames, v4 fallback, format 115, rg8, "
-              "blur, labels, draw-dump, material, dual-buffer, leak-check, chain, orientation, multi-client)"
+              "blur, labels, draw-dump, material, dual-buffer, leak-check, chain, render-stats, "
+              "orientation, multi-client)"
               % (WIDTH, HEIGHT, FRAMES))
         return 0
     except TestFailure as failure:
