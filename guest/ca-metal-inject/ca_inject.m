@@ -479,8 +479,15 @@ cai_resolve_crash_pcs(void)
 		gCacheSlide = gMetalBase - 0x181a12000; /* the unslid base of Metal.framework 16.5 */
 	}
 	cai_log("ca-inject: Metal image base %p; resolving crash offsets", (void *)gMetalBase);
-	cai_scan_imp(gMetalBase + 0xa7f7c, "Metal+0xa7f7c");
-	cai_scan_imp(gMetalBase + 0x2aa3c, "Metal+0x2aa3c");
+	/* The scan walks every class of the process; on this emulated CPU that is 20+ minutes and it
+	 * runs inside dyld, before main(). That is what delayed PosterBoard's migration to the point of
+	 * looking like a data-store stall. Opt-in only (touch /redwood/etc/ca-inject-scan to enable). */
+	if (access("/redwood/etc/ca-inject-scan", F_OK) == 0) {
+		cai_scan_imp(gMetalBase + 0xa7f7c, "Metal+0xa7f7c");
+		cai_scan_imp(gMetalBase + 0x2aa3c, "Metal+0x2aa3c");
+	} else {
+		cai_log("ca-inject: crash-PC scan off (no /redwood/etc/ca-inject-scan)");
+	}
 }
 
 
@@ -803,5 +810,11 @@ cai_load(void)
 	}
 	cai_install_fault_census();
 	cai_install_file_hooks();
+	/* PosterBoard is a second target of this library, and a program can only rely on one
+	 * injected library here. Load the poster-board helper from inside this one instead. */
+	if (getprogname() != NULL && strcmp(getprogname(), "PosterBoard") == 0) {
+		void *helper = dlopen("/redwood/lib/libhakios.pb.dylib", RTLD_NOW | RTLD_GLOBAL);
+		cai_log("ca-inject: poster board helper %s", helper != NULL ? "loaded" : dlerror());
+	}
 	[pool drain];
 }

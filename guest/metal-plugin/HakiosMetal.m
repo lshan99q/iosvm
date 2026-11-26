@@ -67,6 +67,7 @@
 #import <objc/runtime.h>
 
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <limits.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -78,6 +79,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /*
@@ -7072,11 +7074,172 @@ static void mw_census_install_if_requested(void)
     mw_log("census: %u classes on Metal private bases walked (device and queue excluded)", walked);
 }
 
+/*
+ * Boot w (wp4-d1-w) showed SBRendererService reaching the device and then dying with SIGABRT
+ * without any text: the process ending in -doesNotRecognizeSelector: would print an uncaught
+ * exception, but launchd only records the signal. The selector name is what the next iteration
+ * needs, so the diagnostic hook below prints it on fd2 (which reaches the serial log) and then
+ * lets the crash happen exactly as before.
+ */
+/*
+ * The selector diagnostic above never fired for SBRendererService (wp4-d1-z): the renderer aborts
+ * without going through -doesNotRecognizeSelector:. A SIGABRT handler cannot call mw_log (it
+ * allocates), so it writes a fixed-size line straight to fd2: the faulting pc, link register and
+ * a short frame-pointer walk, which is enough to name the image and function that aborted.
+ */
+static void mw_sigabrt_report(int sig, siginfo_t *info, void *context)
+{
+    char line[256];
+    int length;
+
+#if defined(__aarch64__)
+    {
+        ucontext_t *uc = (ucontext_t *)context;
+        struct __darwin_mcontext64 *mc = uc->uc_mcontext;
+        uint64_t pc = mc->__ss.__pc;
+        uint64_t lr = mc->__ss.__lr;
+        uint64_t fp = mc->__ss.__fp;
+        int i;
+
+        length = snprintf(line, sizeof(line), "metalwire: sigabrt: sig=%d code=%d pc=0x%llx lr=0x%llx\n",
+                          sig, info != NULL ? info->si_code : -1, (unsigned long long)pc, (unsigned long long)lr);
+        if (length > 0) {
+            (void)write(2, line, (size_t)length);
+        }
+        for (i = 0; i < 8 && fp != 0; i++) {
+            uint64_t next;
+            uint64_t ret;
+
+            memcpy(&next, (void *)fp, sizeof(next));
+            memcpy(&ret, (void *)(fp + 8), sizeof(ret));
+            length = snprintf(line, sizeof(line), "metalwire: sigabrt: frame %d ret=0x%llx\n", i,
+                              (unsigned long long)ret);
+            if (length > 0) {
+                (void)write(2, line, (size_t)length);
+            }
+            if (next <= fp || (next & 7) != 0) {
+                break;
+            }
+            fp = next;
+        }
+    }
+#else
+    (void)context;
+    length = snprintf(line, sizeof(line), "metalwire: sigabrt: sig=%d\n", sig);
+    (void)write(2, line, (size_t)length);
+#endif
+    signal(SIGABRT, SIG_DFL);
+    raise(SIGABRT);
+}
+
+static void mw_install_crash_diagnostics(void)
+{
+    struct sigaction action;
+
+    /* A crash line names runtime addresses; the dyld shared cache is slid per boot, so the slide
+     * has to be in the same log before the addresses can be resolved against the cache file. */
+    {
+        uint32_t count = _dyld_image_count();
+        uint32_t i;
+
+        for (i = 0; i < count; i++) {
+            const char *name = _dyld_get_image_name(i);
+
+            if (name != NULL && strstr(name, "libobjc.A.dylib") != NULL) {
+                mw_log("diagnostics: libobjc slide 0x%llx base 0x%llx", (unsigned long long)_dyld_get_image_vmaddr_slide(i),
+                       (unsigned long long)(uintptr_t)_dyld_get_image_header(i));
+                break;
+            }
+        }
+        if (i == count) {
+            mw_log("diagnostics: no libobjc image; image0 slide 0x%llx", (unsigned long long)_dyld_get_image_vmaddr_slide(0));
+        }
+    }
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = mw_sigabrt_report;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGABRT, &action, NULL) == 0) {
+        mw_log("diagnostics: SIGABRT handler writes pc/lr/frames to fd2");
+    }
+}
+
+/* CoreAnimation's OpenGL-over-Metal path (QuartzCore.framework, ogl-metal.mm) asks its own bundle
+ * for a precompiled shader library and asserts metallib_url != nil when it is not on disk. The
+ * image's select-system.py leaves every framework's .metallib out to save RAM, so the renderer
+ * aborts; this returns the image that the system root does have, from /redwood, instead. Narrow
+ * on purpose: only NSBundle lookups that fail, only the QuartzCore bundle, only .metallib. */
+static IMP g_orig_url_for_resource = NULL;
+
+static id mw_url_for_resource(id self, SEL _cmd, id name, id extension)
+{
+    id url = ((id (*)(id, SEL, id, id))g_orig_url_for_resource)(self, _cmd, name, extension);
+    const char *path;
+    const char *ext;
+    struct stat st;
+
+    if (url != nil) {
+        return url;
+    }
+    path = self != nil ? [[(NSBundle *)self bundlePath] UTF8String] : NULL;
+    ext = extension != nil ? [extension UTF8String] : "";
+    if (path == NULL || strstr(path, "QuartzCore.framework") == NULL || strcmp(ext, "metallib") != 0) {
+        return nil;
+    }
+    if (stat("/redwood/lib/QuartzCore-default.metallib", &st) != 0) {
+        return nil;
+    }
+    url = [NSURL fileURLWithPath:@"/redwood/lib/QuartzCore-default.metallib"];
+    mw_log("resources: %s/%s.%s -> /redwood/lib/QuartzCore-default.metallib (%lld byte(s))", path,
+           name != nil ? [name UTF8String] : "", ext, (long long)st.st_size);
+    return url;
+}
+
+static void mw_install_resource_overrides(void)
+{
+    Class bundle_class = objc_getClass("NSBundle");
+    Method method = bundle_class != Nil
+                        ? class_getInstanceMethod(bundle_class, sel_registerName("URLForResource:withExtension:"))
+                        : NULL;
+
+    if (method == NULL) {
+        mw_log("resources: no NSBundle URLForResource:withExtension:; QuartzCore shader library stays missing");
+        return;
+    }
+    g_orig_url_for_resource = method_getImplementation(method);
+    method_setImplementation(method, (IMP)mw_url_for_resource);
+    mw_log("resources: NSBundle URLForResource:withExtension: falls back to /redwood for QuartzCore.metallib");
+}
+
+static void mw_does_not_recognize_selector(id self, SEL _cmd, SEL selector)
+{
+    mw_log("doesNotRecognizeSelector: [%s %s] -> aborting as before",
+           object_getClassName(self), sel_getName(selector));
+    abort();
+}
+
+static void mw_install_selector_diagnostics(void)
+{
+    Class object_class = objc_getClass("NSObject");
+    Method method = object_class != Nil
+                        ? class_getInstanceMethod(object_class, sel_registerName("doesNotRecognizeSelector:"))
+                        : NULL;
+
+    if (method == NULL) {
+        return;
+    }
+    method_setImplementation(method, (IMP)mw_does_not_recognize_selector);
+    mw_log("diagnostics: doesNotRecognizeSelector: reports the selector before aborting");
+}
+
 __attribute__((constructor)) static void mw_plugin_load(void)
 {
     if (!mw_process_allowed()) {
         return;
     }
+    mw_install_selector_diagnostics();
+    mw_install_resource_overrides();
+    mw_install_crash_diagnostics();
     gWireReady = 0;
     mw_conn_init(&gWire);
     gWireReady = 1;
