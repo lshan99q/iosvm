@@ -1,0 +1,260 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index fd75363..186bcfd 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3362,6 +3362,177 @@ sb_probe_error(id error, const char *tag)
+ 	}
+ }
+ 
++
++/* t147: E4 (wp4-d1-be, serial 544439/509014) answered refresh with NSCocoaErrorDomain -1 and an
++ * empty userInfo although the three store directories existed (mkstore ok), so the write that
++ * fails is under the configuration's own assetDirectory, not under Library/PosterBoard. Ask the
++ * configuration for its paths (respondsToSelector first, then KVC; this file is built without
++ * exceptions, so no @try), create the directory and list what is in it before the ask, and again
++ * after a failed one. */
++static id
++sb_config_value(id config, const char *key)
++{
++	Class cls, string_class;
++	SEL sel, kvc;
++	id name;
++
++	if (config == nil) {
++		return nil;
++	}
++	cls = object_getClass(config);
++	sel = sel_registerName(key);
++	if (class_respondsToSelector(cls, sel)) {
++		return ((id (*)(id, SEL))objc_msgSend)(config, sel);
++	}
++	/* try the underscore spelling before KVC (the configuration keeps most of its state in
++	 * _-prefixed ivars); a key the class does not answer at all is skipped: -valueForKey: on an
++	 * unknown key raises NSUnknownKeyException, and this file is built as C without exceptions
++	 * (an @try here would abort the probe at 6440 s instead of printing nil). */
++	{
++		char alt[96];
++
++		snprintf(alt, sizeof(alt), "_%s", key);
++		sel = sel_registerName(alt);
++		if (class_respondsToSelector(cls, sel)) {
++			return ((id (*)(id, SEL))objc_msgSend)(config, sel);
++		}
++	}
++	kvc = sel_registerName("valueForKey:");
++	if (class_respondsToSelector(cls, kvc)) {
++		string_class = objc_lookUpClass("NSString");
++		if (string_class != Nil) {
++			name = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
++			    sel_registerName("stringWithUTF8String:"), key);
++			if (name != nil) {
++				/* KVC is safe only for a key the class resolves to a property/ivar; ask
++				 * for the property list check first (NSObject answers this on all
++				 * configurations, so an unknown key never reaches -valueForKey:). */
++				SEL glv = sel_registerName("valueForUndefinedKey:");
++				BOOL undefined = class_respondsToSelector(cls, glv);
++
++				if (!undefined) {
++					return ((id (*)(id, SEL, id))objc_msgSend)(config, kvc, name);
++				}
++			}
++		}
++	}
++	return nil;
++}
++
++/* an assetDirectory is a path string in the dumps, but a URL answers -path; keep both working */
++static id
++sb_config_path(id value)
++{
++	if (value != nil && strcmp(class_getName(object_getClass(value)), "NSString") != 0 &&
++	    class_respondsToSelector(object_getClass(value), sel_registerName("path"))) {
++		id path = ((id (*)(id, SEL))objc_msgSend)(value, sel_registerName("path"));
++
++		if (path != nil) {
++			return path;
++		}
++	}
++	return value;
++}
++
++static void
++sb_config_probe(id config, const char *tag, int make)
++{
++	Class manager_class = objc_lookUpClass("NSFileManager");
++	Class string_class = objc_lookUpClass("NSString");
++	Class dict_class = objc_lookUpClass("NSDictionary");
++	id asset, desc, uuid, provider, role, url, manager = nil;
++
++	if (config == nil) {
++		say("hakios: sbwp: cfg %s nil config\n", tag);
++		return;
++	}
++	desc = sb_config_value(config, "description");
++	uuid = sb_config_value(config, "posterUUID");
++	provider = sb_config_value(config, "provider");
++	role = sb_config_value(config, "role");
++	url = sb_config_value(config, "snapshotURL");
++	asset = sb_config_path(sb_config_value(config, "assetDirectory"));
++	say("hakios: sbwp: cfg %s desc %.300s\n", tag, sb_probe_text(desc));
++	say("hakios: sbwp: cfg %s uuid %.200s provider %.200s role %.200s url %.300s\n", tag,
++	    sb_probe_text(uuid), sb_probe_text(provider), sb_probe_text(role), sb_probe_text(url));
++	say("hakios: sbwp: cfg %s asset %.400s\n", tag, sb_probe_text(asset));
++	if (asset == nil || manager_class == Nil || string_class == Nil) {
++		return;
++	}
++	manager = ((id (*)(Class, SEL))objc_msgSend)(manager_class,
++	    sel_registerName("defaultManager"));
++	if (manager == nil) {
++		return;
++	}
++	if (make && dict_class != Nil) {
++		id key = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
++		    sel_registerName("stringWithUTF8String:"), "NSFilePosixPermissions");
++		id perm = ((id (*)(Class, SEL, int))objc_msgSend)(objc_lookUpClass("NSNumber"),
++		    sel_registerName("numberWithInt:"), 0755);
++		id attrs = key != nil && perm != nil ?
++		    ((id (*)(Class, SEL, id, id, ...))objc_msgSend)(dict_class,
++		        sel_registerName("dictionaryWithObjectsAndKeys:"), perm, key, nil) : nil;
++		BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, id, void *))objc_msgSend)(manager,
++		    sel_registerName("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
++		    asset, YES, attrs, NULL);
++		int err = ok ? 0 : errno;
++
++		say("hakios: sbwp: cfg %s mkdir %s errno %d\n", tag, ok ? "ok" : "err", err);
++	}
++	{
++		unsigned long count = 0, i;
++		id names = ((id (*)(id, SEL, id, void *))objc_msgSend)(manager,
++		    sel_registerName("contentsOfDirectoryAtPath:error:"), asset, NULL);
++
++		if (names != nil) {
++			count = ((unsigned long (*)(id, SEL))objc_msgSend)(names,
++			    sel_registerName("count"));
++		}
++		say("hakios: sbwp: cfg %s list count %lu\n", tag, count);
++		for (i = 0; i < count && i < 64; i++) {
++			id name = ((id (*)(id, SEL, unsigned long))objc_msgSend)(names,
++			    sel_registerName("objectAtIndex:"), i);
++			id sub = ((id (*)(id, SEL, id))objc_msgSend)(asset,
++			    sel_registerName("stringByAppendingPathComponent:"), name);
++			id info = ((id (*)(id, SEL, id, void *))objc_msgSend)(manager,
++			    sel_registerName("attributesOfItemAtPath:error:"), sub, NULL);
++			id skey = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
++			    sel_registerName("stringWithUTF8String:"), "NSFileSize");
++			id size = info != nil && skey != nil ? ((id (*)(id, SEL, id))objc_msgSend)(info,
++			    sel_registerName("objectForKey:"), skey) : nil;
++			unsigned long long bytes = size != nil ?
++			    ((unsigned long long (*)(id, SEL))objc_msgSend)(size,
++			        sel_registerName("unsignedLongLongValue")) : 0;
++
++			say("hakios: sbwp: cfg %s list %s %llu\n", tag, sb_probe_text(name), bytes);
++		}
++	}
++}
++
++/* t147: 6440 s lock / 6490 s home, just before the burst asks them at 6450/6500. */
++static void
++sb_probe_config_dirs(void *context)
++{
++	int use_home = (int)(intptr_t)context;
++	Class controller_class = objc_lookUpClass("SBWallpaperController");
++	id controller, config = nil;
++	Ivar config_ivar;
++
++	if (controller_class == Nil ||
++	    !class_respondsToSelector(object_getClass(controller_class), sel_registerName("sharedInstance"))) {
++		return;
++	}
++	controller = ((id (*)(Class, SEL))objc_msgSend)(controller_class,
++	    sel_registerName("sharedInstance"));
++	if (controller == nil) {
++		return;
++	}
++	config_ivar = class_getInstanceVariable(controller_class,
++	    use_home ? "_activeHomeScreenPosterConfiguration" : "_activeLockScreenPosterConfiguration");
++	config = config_ivar != NULL ? object_getIvar(controller, config_ivar) : nil;
++	sb_config_probe(config, use_home ? "home" : "lock", 1);
++}
++
+ /* t144: /redwood/var/d1test.png is the picture the secure window gets at 6600 s; the same bytes
+  * are put into the Wallpaper directory at 6100 s to show it writable. Plain read/write so a
+  * failure only costs its errno and never stops the boot. */
+@@ -3594,6 +3765,7 @@ sb_snapshot_refresh(void *context)
+ 	say("hakios: sbwp: snap: %s service %s config %s\n", which,
+ 	    service != nil ? class_getName(object_getClass(service)) : "nil",
+ 	    config != nil ? class_getName(object_getClass(config)) : "nil");
++	sb_config_probe(config, which, 1);
+ 	if (service == nil || config == nil ||
+ 	    !class_respondsToSelector(object_getClass(service), refresh)) {
+ 		say("hakios: sbwp: snap: %s cannot ask\n", which);
+@@ -3602,6 +3774,8 @@ sb_snapshot_refresh(void *context)
+ 	{
+ 		void (^completion)(id) = ^(id error) {
+ 			sb_probe_error(error, which);
++			/* t147: after a failure, say what the config's own directory holds */
++			sb_config_probe(config, which, 0);
+ 		};
+ 		void *raw = *(void **)&completion;
+ 
+@@ -4115,21 +4289,32 @@ sb_snapshot_scene(void *context)
+ 		/* t144: the completion may hand over the scene's image; an argument that was never
+ 		 * passed stays a pointer until sb_is_object has seen a class at its isa (t142's
+ 		 * no-argument blocks above cannot say whether one was passed). */
+-		void (^completion)(id) = ^(id snapshot) {
+-			say("hakios: sbwp: scene: snapshot completion %p\n", snapshot);
+-			if (snapshot != nil && sb_is_object(snapshot)) {
+-				id kept = ((id (*)(id, SEL))objc_msgSend)(snapshot,
+-				    sel_registerName("retain"));
+-
+-				say("hakios: sbwp: scene: snapshot %s\n",
+-				    class_getName(object_getClass(kept)));
+-				dispatch_async(dispatch_get_main_queue(), ^{
+-					sb_scene_png(kept);
+-					((void (*)(id, SEL))objc_msgSend)(kept,
+-					    sel_registerName("release"));
+-				});
+-			} else if (snapshot != nil) {
+-				say("hakios: sbwp: scene: snapshot argument is not an object\n");
++		/* t147: the E4 scene ask completed (serial 553993/554397) but the completion call
++		 * handed more than one argument, so t145's one-argument block read garbage (554400
++		 * "argument is not an object"). Declare (image, error): the image is what a scene
++		 * snapshot callbacks pass, the error follows it. */
++		void (^completion)(id, id) = ^(id image, id err) {
++			say("hakios: sbwp: scene: snapshot image %s\n",
++			    image != nil ? class_getName(object_getClass(image)) : "nil");
++			if (err != nil) {
++				sb_probe_error(err, "scene");
++			}
++			if (image != nil && sb_is_object(image)) {
++				BOOL has_cg = class_respondsToSelector(object_getClass(image),
++				    sel_registerName("CGImage"));
++				id cg = has_cg ? ((id (*)(id, SEL))objc_msgSend)(image,
++				    sel_registerName("CGImage")) : nil;
++
++				if (cg != nil) {
++					id kept = ((id (*)(id, SEL))objc_msgSend)(image,
++					    sel_registerName("retain"));
++
++					dispatch_async(dispatch_get_main_queue(), ^{
++						sb_scene_png(kept);
++						((void (*)(id, SEL))objc_msgSend)(kept,
++						    sel_registerName("release"));
++					});
++				}
+ 			}
+ 		};
+ 		void *raw = *(void **)&completion;
+@@ -4934,6 +5119,12 @@ hakios_springboard_init(void)
+ 	 * remote controller (t140 did that at 6600 s, right where the serial has to stay readable). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6400 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_wp_handover);
++	/* t147: the configuration's own assetDirectory is what the failing refresh writes into, so
++	 * look at it before the burst: lock at 6440 s, home at 6490 s (the refresh asks follow). */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6440 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), (void *)(intptr_t)0, sb_probe_config_dirs);
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6490 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), (void *)(intptr_t)1, sb_probe_config_dirs);
+ 	/* t142: after the handover there is a home configuration in the ivar, so look below the
+ 	 * remote controller once (6435 s, after the 6420 s apply), ask the lock configuration as the
+ 	 * control (6450 s), ask the home one (6500 s), and try the scene snapshot that bypasses the

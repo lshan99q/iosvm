@@ -1,0 +1,18 @@
+diff --git a/userland/src/inject_pb.c b/userland/src/inject_pb.c
+index 2d65e69..a1b616f 100644
+--- a/userland/src/inject_pb.c
++++ b/userland/src/inject_pb.c
+@@ -1052,7 +1052,12 @@ posterboard_wallpaper_constructor(void)
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)60 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, home_role_dump);
+ 	{
+-		static const int at[] = { 6000, 6600, 6900 };
++		/* t142: 6000/6600/6900 s never fired in wp4-d1-bg: PosterBoard was restarted at 3408 s
++		 * of that boot, so its own clock only reached 3853 s before the serial ended, and no
++		 * posterdump line exists. 1200 s says whether the store starts empty, 3000 s lands after
++		 * the poster was generated (4023 s) and after SpringBoard's 6400 s handover when the
++		 * process was restarted late -- and before the 6600 s window in both schedules. */
++		static const int at[] = { 1200, 3000 };
+ 		size_t i;
+ 
+ 		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {

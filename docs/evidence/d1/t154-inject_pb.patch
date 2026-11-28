@@ -1,0 +1,414 @@
+diff --git a/userland/src/inject_pb.c b/userland/src/inject_pb.c
+index 6ebc212..32d2668 100644
+--- a/userland/src/inject_pb.c
++++ b/userland/src/inject_pb.c
+@@ -21,6 +21,9 @@
+  * One line when it is in effect, and one when it is not; nothing is retried for long: the class
+  * is already in the process by the time an inserted library's constructors run.
+  */
++#include <CoreFoundation/CoreFoundation.h>
++#include <CoreGraphics/CoreGraphics.h>
++#include <ImageIO/ImageIO.h>
+ #include <dispatch/dispatch.h>
+ #include <dlfcn.h>
+ #include <mach-o/dyld.h>
+@@ -1010,6 +1013,384 @@ home_ca_inject_open(void *context)
+ 	say("hakios: pb: ca-inject %s (deferred)\n", handle != NULL ? "loaded" : dlerror());
+ }
+ 
++
++/*
++ * t153 (bz6, E7): the poster's snapshot is taken by the poster's own view controller, inside this
++ * process: be serial 540486-540539 (t141 boot) shows PBUIPosterLockViewController and
++ * PBUIPosterHomeViewController answering -snapshotIfNeeded, -performSnapshotOnQueue:completion:
++ * and -_snapshotURL, and that boot did not crash. So put the test picture on that controller's
++ * view and ask for the snapshot. The live objects are found by walking the windows' view
++ * controllers (never by guessing a class name); addSubview is chosen over changing the
++ * backgroundColor or replacing subviews because a snapshot renders the view tree, so a subview on
++ * top is the one change a snapshot can show.
++ */
++static id
++pb_e7_image(void)
++{
++	static const char *const file = "/redwood/var/d1test.png";
++	Class image_class = objc_lookUpClass("UIImage");
++	CFURLRef url;
++	CGImageSourceRef source;
++	CGImageRef cg;
++	id image = nil;
++
++	if (image_class == Nil) {
++		say("hakios: pb: e7 no UIKit\n");
++		return nil;
++	}
++	/* ImageIO, not -imageWithContentsOfFile: (t154): the PNG is decoded by the same path the
++	 * snapshot renderer uses, and every step is checked before the next. */
++	url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
++	    (const UInt8 *)file, (CFIndex)strlen(file), false);
++	if (url == NULL) {
++		say("hakios: pb: e7 image no url\n");
++		return nil;
++	}
++	source = CGImageSourceCreateWithURL(url, NULL);
++	CFRelease(url);
++	if (source == NULL) {
++		say("hakios: pb: e7 image no source\n");
++		return nil;
++	}
++	cg = CGImageSourceCreateImageAtIndex(source, 0, NULL);
++	CFRelease(source);
++	if (cg == NULL) {
++		say("hakios: pb: e7 image no cg\n");
++		return nil;
++	}
++	if (class_respondsToSelector(object_getClass((id)image_class),
++	        sel_registerName("imageWithCGImage:scale:orientation:"))) {
++		image = ((id (*)(Class, SEL, void *, double, long))objc_msgSend)(image_class,
++		    sel_registerName("imageWithCGImage:scale:orientation:"), (void *)cg, 1.0, 0);
++	}
++	say("hakios: pb: e7 image %s cg %zux%zu\n",
++	    image != nil ? class_getName(object_getClass(image)) : "nil",
++	    CGImageGetWidth(cg), CGImageGetHeight(cg));
++	return image;
++}
++
++static int
++pb_e7_candidate(const char *name)
++{
++	return strstr(name, "PBUIPoster") != NULL && (strstr(name, "Lock") != NULL ||
++	    strstr(name, "Home") != NULL || strstr(name, "Variant") != NULL);
++}
++
++static void
++pb_e7_walk(id vc, id image, int depth, unsigned *found)
++{
++	Class cls;
++	id children;
++	unsigned long count, i;
++
++	if (vc == nil || depth > 10) {
++		return;
++	}
++	cls = object_getClass(vc);
++	if (pb_e7_candidate(class_getName(cls))) {
++		id view = ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("view"));
++
++		if (view != nil) {
++			Class iv_class = objc_lookUpClass("UIImageView");
++			CGRect frame = ((CGRect (*)(id, SEL))objc_msgSend)(view, sel_registerName("bounds"));
++
++			say("hakios: pb: e7 vc %s view %s frame %gx%g\n", class_getName(cls),
++			    class_getName(object_getClass(view)), (double)frame.size.width,
++			    (double)frame.size.height);
++			{
++				Class color_class = objc_lookUpClass("UIColor");
++				id window = ((id (*)(id, SEL))objc_msgSend)(view, sel_registerName("window"));
++
++				if (window == nil) {
++					say("hakios: pb: e7 no window %s\n", class_getName(cls));
++					if (color_class != Nil) {
++						id c = ((id (*)(Class, SEL, double, double, double, double))objc_msgSend)(
++						    color_class, sel_registerName("colorWithRed:green:blue:alpha:"),
++						    0.2, 0.6, 1.0, 1.0);
++						if (c != nil) {
++							((void (*)(id, SEL, id))objc_msgSend)(view,
++							    sel_registerName("setBackgroundColor:"), c);
++							say("hakios: pb: e7 bg set %s\n", class_getName(cls));
++						}
++					}
++				}
++			}
++			if (iv_class != Nil && image != nil) {
++				id iv = ((id (*)(Class, SEL))objc_msgSend)(iv_class, sel_registerName("alloc"));
++
++				iv = iv != nil ? ((id (*)(id, SEL, id))objc_msgSend)(iv,
++				    sel_registerName("initWithImage:"), image) : nil;
++				if (iv != nil) {
++					((void (*)(id, SEL, CGRect))objc_msgSend)(iv, sel_registerName("setFrame:"), frame);
++					/* contentMode 2 = UIViewContentModeScaleAspectFill */
++					((void (*)(id, SEL, long))objc_msgSend)(iv, sel_registerName("setContentMode:"), 2);
++					/* index 0: the picture goes under the poster's own layers (t154). */
++					((void (*)(id, SEL, id, long))objc_msgSend)(view,
++					    sel_registerName("insertSubview:atIndex:"), iv, 0);
++					say("hakios: pb: e7 injected %s index 0\n",
++					    class_getName(object_getClass(iv)));
++					(*found)++;
++				}
++			}
++		}
++	}
++	children = ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("childViewControllers"));
++	if (children != nil &&
++	    class_respondsToSelector(object_getClass(children), sel_registerName("count"))) {
++		count = ((unsigned long (*)(id, SEL))objc_msgSend)(children, sel_registerName("count"));
++		for (i = 0; i < count && i < 24; i++) {
++			pb_e7_walk(((id (*)(id, SEL, unsigned long))objc_msgSend)(children,
++			    sel_registerName("objectAtIndex:"), i), image, depth + 1, found);
++		}
++	}
++	{
++		id presented = ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("presentedViewController"));
++
++		if (presented != nil) {
++			pb_e7_walk(presented, image, depth + 1, found);
++		}
++	}
++}
++
++static unsigned
++pb_e7_inject(id image)
++{
++	Class app_class = objc_lookUpClass("UIApplication");
++	unsigned found = 0;
++
++	if (app_class == Nil ||
++	    !class_respondsToSelector(object_getClass((id)app_class), sel_registerName("sharedApplication"))) {
++		say("hakios: pb: e7 no UIApplication\n");
++		return 0;
++	}
++	{
++		id app = ((id (*)(Class, SEL))objc_msgSend)(app_class, sel_registerName("sharedApplication"));
++		id windows;
++		unsigned long count, i;
++
++		if (app == nil) {
++			say("hakios: pb: e7 no app\n");
++			return 0;
++		}
++		windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
++		if (windows == nil) {
++			say("hakios: pb: e7 no windows\n");
++			return 0;
++		}
++		count = ((unsigned long (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count"));
++		say("hakios: pb: e7 windows %lu\n", count);
++		for (i = 0; i < count && i < 8; i++) {
++			id window = ((id (*)(id, SEL, unsigned long))objc_msgSend)(windows,
++			    sel_registerName("objectAtIndex:"), i);
++			id root = window != nil ? ((id (*)(id, SEL))objc_msgSend)(window,
++			    sel_registerName("rootViewController")) : nil;
++
++			say("hakios: pb: e7 window %lu %s root %s\n", i,
++			    window != nil ? class_getName(object_getClass(window)) : "nil",
++			    root != nil ? class_getName(object_getClass(root)) : "nil");
++			pb_e7_walk(root, image, 0, &found);
++		}
++	}
++	return found;
++}
++
++static id
++pb_e7_find(id vc, int depth)
++{
++	Class cls;
++	id children;
++	unsigned long count, i;
++
++	if (vc == nil || depth > 10) {
++		return nil;
++	}
++	cls = object_getClass(vc);
++	if (pb_e7_candidate(class_getName(cls)) &&
++	    class_respondsToSelector(cls, sel_registerName("performSnapshotOnQueue:completion:"))) {
++		return vc;
++	}
++	children = ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("childViewControllers"));
++	if (children != nil &&
++	    class_respondsToSelector(object_getClass(children), sel_registerName("count"))) {
++		count = ((unsigned long (*)(id, SEL))objc_msgSend)(children, sel_registerName("count"));
++		for (i = 0; i < count && i < 24; i++) {
++			id hit = pb_e7_find(((id (*)(id, SEL, unsigned long))objc_msgSend)(children,
++			    sel_registerName("objectAtIndex:"), i), depth + 1);
++
++			if (hit != nil) {
++				return hit;
++			}
++		}
++	}
++	return nil;
++}
++
++static id
++pb_e7_first_vc(void)
++{
++	Class app_class = objc_lookUpClass("UIApplication");
++	id app, windows;
++	unsigned long count, i;
++
++	if (app_class == Nil) {
++		return nil;
++	}
++	app = ((id (*)(Class, SEL))objc_msgSend)(app_class, sel_registerName("sharedApplication"));
++	windows = app != nil ? ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows")) : nil;
++	if (windows == nil) {
++		return nil;
++	}
++	count = ((unsigned long (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count"));
++	for (i = 0; i < count && i < 8; i++) {
++		id window = ((id (*)(id, SEL, unsigned long))objc_msgSend)(windows,
++		    sel_registerName("objectAtIndex:"), i);
++		id root = window != nil ? ((id (*)(id, SEL))objc_msgSend)(window,
++		    sel_registerName("rootViewController")) : nil;
++		id hit = pb_e7_find(root, 0);
++
++		if (hit != nil) {
++			return hit;
++		}
++	}
++	return nil;
++}
++
++static void
++pb_e7_url_path(id vc, const char *tag, const char *sel_name)
++{
++	SEL sel = sel_registerName(sel_name);
++	id url;
++
++	if (vc == nil || !class_respondsToSelector(object_getClass(vc), sel)) {
++		say("hakios: pb: e7 %s %s no\n", tag, sel_name);
++		return;
++	}
++	url = ((id (*)(id, SEL))objc_msgSend)(vc, sel);
++	say("hakios: pb: e7 %s %s %s\n", tag, sel_name,
++	    url != nil ? class_getName(object_getClass(url)) : "nil");
++	if (url != nil && class_respondsToSelector(object_getClass(url), sel_registerName("path"))) {
++		id path = ((id (*)(id, SEL))objc_msgSend)(url, sel_registerName("path"));
++
++		if (path != nil &&
++		    class_respondsToSelector(object_getClass(path), sel_registerName("UTF8String"))) {
++			const char *text = ((const char *(*)(id, SEL))objc_msgSend)(path,
++			    sel_registerName("UTF8String"));
++
++			if (text != NULL) {
++				say("hakios: pb: e7 %s %s path %.400s\n", tag, sel_name, text);
++			}
++		}
++	}
++}
++
++static void
++pb_e7_inject_call(void *context)
++{
++	id image;
++	unsigned n;
++
++	(void)context;
++	image = pb_e7_image();
++	if (image == nil) {
++		return;
++	}
++	n = pb_e7_inject(image);
++	say("hakios: pb: e7 injected total %u\n", n);
++}
++
++static void
++pb_e7_error(id error)
++{
++	id domain, desc;
++	long code;
++
++	if (error == nil) {
++		say("hakios: pb: e7 snap done error nil\n");
++		return;
++	}
++	domain = ((id (*)(id, SEL))objc_msgSend)(error, sel_registerName("domain"));
++	desc = ((id (*)(id, SEL))objc_msgSend)(error, sel_registerName("localizedDescription"));
++	code = (long)((long (*)(id, SEL))objc_msgSend)(error, sel_registerName("code"));
++	say("hakios: pb: e7 snap done error %s domain %s code %ld desc %.300s\n",
++	    class_getName(object_getClass(error)),
++	    domain != nil && class_respondsToSelector(object_getClass(domain), sel_registerName("UTF8String")) ?
++	        ((const char *(*)(id, SEL))objc_msgSend)(domain, sel_registerName("UTF8String")) : "?",
++	    code,
++	    desc != nil && class_respondsToSelector(object_getClass(desc), sel_registerName("UTF8String")) ?
++	        ((const char *(*)(id, SEL))objc_msgSend)(desc, sel_registerName("UTF8String")) : "?");
++}
++
++static void
++pb_e7_snapshot_call(void *context)
++{
++	static dispatch_queue_t queue;
++	id vc = pb_e7_first_vc();
++
++	(void)context;
++	if (vc == nil) {
++		say("hakios: pb: e7 snapshot no vc\n");
++		return;
++	}
++	say("hakios: pb: e7 snapshot vc %s\n", class_getName(object_getClass(vc)));
++	pb_e7_url_path(vc, "snap", "_snapshotURL");
++	if (class_respondsToSelector(object_getClass(vc),
++	        sel_registerName("performSnapshotOnQueue:completion:"))) {
++		/* t154: a background serial queue (the snapshot is not a UI update), the completion
++		 * is declared with the one NSError argument the header names and passed as a raw
++		 * pointer, as t141 did for the refresh block. */
++		void (^completion)(id) = ^(id error) {
++			pb_e7_error(error);
++		};
++		void *raw = *(void **)&completion;
++
++		if (queue == NULL) {
++			queue = dispatch_queue_create("hakios.e7snap", NULL);
++		}
++		say("hakios: pb: e7 snap asked queue serial\n");
++		((void (*)(id, SEL, dispatch_queue_t, void *))objc_msgSend)(vc,
++		    sel_registerName("performSnapshotOnQueue:completion:"), queue, raw);
++	} else {
++		say("hakios: pb: e7 no performSnapshot\n");
++	}
++	if (class_respondsToSelector(object_getClass(vc), sel_registerName("snapshotIfNeeded"))) {
++		((void (*)(id, SEL))objc_msgSend)(vc, sel_registerName("snapshotIfNeeded"));
++		say("hakios: pb: e7 snapshotIfNeeded sent\n");
++	}
++}
++
++static void
++pb_e7_store_call(void *context)
++{
++	id vc = pb_e7_first_vc();
++
++	(void)context;
++	if (vc != nil) {
++		pb_e7_url_path(vc, "store", "_snapshotURL");
++		pb_e7_url_path(vc, "store", "snapshotContentDirectory");
++	} else {
++		say("hakios: pb: e7 store no vc\n");
++	}
++	{
++		static const char *const roots[] = {
++			"/private/var/mobile/Library/PosterBoard",
++			"/var/mobile/Library/PosterBoard",
++			"/private/var/mobile/Library/Wallpaper",
++		};
++		unsigned i;
++
++		for (i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
++			struct stat status;
++
++			if (stat(roots[i], &status) != 0) {
++				say("hakios: pb: e7 store absent %s\n", roots[i]);
++				continue;
++			}
++			say("hakios: pb: e7 store root %s\n", roots[i]);
++			poster_scan_directory(roots[i], 0);
++		}
++	}
++}
++
+ __attribute__((constructor)) static void
+ posterboard_wallpaper_constructor(void)
+ {
+@@ -1096,6 +1477,14 @@ posterboard_wallpaper_constructor(void)
+ 	    dispatch_get_main_queue(), NULL, wp_mgr_migrate);
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)900 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, migration_state);
++	/* t153 (bz6): E7 runs in this process, independent of the SpringBoard setwp path: the view
++	 * is painted at 3800 s, the snapshot asked at 3900 s and the store listed at 4300 s. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3800 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, pb_e7_inject_call);
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3900 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, pb_e7_snapshot_call);
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)4300 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, pb_e7_store_call);
+ 	if (probe_enabled()) {
+ 		dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+ 

@@ -1,0 +1,163 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index d1abce1..b785d64 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -37,6 +37,7 @@
+ #include <IOSurface/IOSurfaceRef.h>
+ #include <CoreGraphics/CoreGraphics.h>
+ #include <dispatch/dispatch.h>
++#include <dirent.h>
+ #include <dlfcn.h>
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -3434,14 +3435,70 @@ sb_config_path(id value)
+ 	return value;
+ }
+ 
++static void
++sb_config_stat(const char *tag, id asset)
++{
++	const char *path;
++	struct stat st;
++	char names[16][256];
++	unsigned count = 0, i;
++	DIR *dir;
++
++	if (asset == nil) {
++		say("hakios: sbwp: cfg %s stat nil\n", tag);
++		return;
++	}
++	path = ((const char *(*)(id, SEL))objc_msgSend)(asset, sel_registerName("UTF8String"));
++	if (path == NULL) {
++		say("hakios: sbwp: cfg %s stat path nil\n", tag);
++		return;
++	}
++	if (access(path, F_OK) != 0) {
++		say("hakios: sbwp: cfg %s stat %s absent errno %d (%s)\n", tag, path, errno,
++		    strerror(errno));
++		return;
++	}
++	if (lstat(path, &st) != 0) {
++		say("hakios: sbwp: cfg %s stat %s lstat errno %d (%s)\n", tag, path, errno,
++		    strerror(errno));
++		return;
++	}
++	say("hakios: sbwp: cfg %s stat %s mode %o uid %u gid %u size %lld\n", tag, path,
++	    (unsigned)st.st_mode, (unsigned)st.st_uid, (unsigned)st.st_gid, (long long)st.st_size);
++	dir = opendir(path);
++	if (dir == NULL) {
++		say("hakios: sbwp: cfg %s open %s errno %d (%s)\n", tag, path, errno, strerror(errno));
++		return;
++	}
++	while (count < 16) {
++		struct dirent *entry = readdir(dir);
++
++		if (entry == NULL) {
++			break;
++		}
++		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
++			continue;
++		}
++		snprintf(names[count], sizeof(names[count]), "%s", entry->d_name);
++		count++;
++	}
++	closedir(dir);
++	say("hakios: sbwp: cfg %s list count %u\n", tag, count);
++	for (i = 0; i < count; i++) {
++		say("hakios: sbwp: cfg %s list %s\n", tag, names[i]);
++	}
++}
++
++/* t150: the t147 version called createDirectoryAtPath:withIntermediateDirectories:... from the
++ * SpringBoard main thread and never returned (t7 serial 542679-542681 stopped at the asset line,
++ * then SIGABRT at 546928), which cost the whole 6450-6600 s burst. This version writes nothing and
++ * does not go through NSFileManager: access/lstat/opendir only. */
+ static void
+ sb_config_probe(id config, const char *tag, int make)
+ {
+-	Class manager_class = objc_lookUpClass("NSFileManager");
+-	Class string_class = objc_lookUpClass("NSString");
+-	Class dict_class = objc_lookUpClass("NSDictionary");
+-	id asset, desc, uuid, provider, role, url, manager = nil;
++	id asset, desc, uuid, provider, role, url;
+ 
++	(void)make;
+ 	if (config == nil) {
+ 		say("hakios: sbwp: cfg %s nil config\n", tag);
+ 		return;
+@@ -3456,57 +3513,7 @@ sb_config_probe(id config, const char *tag, int make)
+ 	say("hakios: sbwp: cfg %s uuid %.200s provider %.200s role %.200s url %.300s\n", tag,
+ 	    sb_probe_text(uuid), sb_probe_text(provider), sb_probe_text(role), sb_probe_text(url));
+ 	say("hakios: sbwp: cfg %s asset %.400s\n", tag, sb_probe_text(asset));
+-	if (asset == nil || manager_class == Nil || string_class == Nil) {
+-		return;
+-	}
+-	manager = ((id (*)(Class, SEL))objc_msgSend)(manager_class,
+-	    sel_registerName("defaultManager"));
+-	if (manager == nil) {
+-		return;
+-	}
+-	if (make && dict_class != Nil) {
+-		id key = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
+-		    sel_registerName("stringWithUTF8String:"), "NSFilePosixPermissions");
+-		id perm = ((id (*)(Class, SEL, int))objc_msgSend)(objc_lookUpClass("NSNumber"),
+-		    sel_registerName("numberWithInt:"), 0755);
+-		id attrs = key != nil && perm != nil ?
+-		    ((id (*)(Class, SEL, id, id, ...))objc_msgSend)(dict_class,
+-		        sel_registerName("dictionaryWithObjectsAndKeys:"), perm, key, nil) : nil;
+-		BOOL ok = ((BOOL (*)(id, SEL, id, BOOL, id, void *))objc_msgSend)(manager,
+-		    sel_registerName("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+-		    asset, YES, attrs, NULL);
+-		int err = ok ? 0 : errno;
+-
+-		say("hakios: sbwp: cfg %s mkdir %s errno %d\n", tag, ok ? "ok" : "err", err);
+-	}
+-	{
+-		unsigned long count = 0, i;
+-		id names = ((id (*)(id, SEL, id, void *))objc_msgSend)(manager,
+-		    sel_registerName("contentsOfDirectoryAtPath:error:"), asset, NULL);
+-
+-		if (names != nil) {
+-			count = ((unsigned long (*)(id, SEL))objc_msgSend)(names,
+-			    sel_registerName("count"));
+-		}
+-		say("hakios: sbwp: cfg %s list count %lu\n", tag, count);
+-		for (i = 0; i < count && i < 64; i++) {
+-			id name = ((id (*)(id, SEL, unsigned long))objc_msgSend)(names,
+-			    sel_registerName("objectAtIndex:"), i);
+-			id sub = ((id (*)(id, SEL, id))objc_msgSend)(asset,
+-			    sel_registerName("stringByAppendingPathComponent:"), name);
+-			id info = ((id (*)(id, SEL, id, void *))objc_msgSend)(manager,
+-			    sel_registerName("attributesOfItemAtPath:error:"), sub, NULL);
+-			id skey = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
+-			    sel_registerName("stringWithUTF8String:"), "NSFileSize");
+-			id size = info != nil && skey != nil ? ((id (*)(id, SEL, id))objc_msgSend)(info,
+-			    sel_registerName("objectForKey:"), skey) : nil;
+-			unsigned long long bytes = size != nil ?
+-			    ((unsigned long long (*)(id, SEL))objc_msgSend)(size,
+-			        sel_registerName("unsignedLongLongValue")) : 0;
+-
+-			say("hakios: sbwp: cfg %s list %s %llu\n", tag, sb_probe_text(name), bytes);
+-		}
+-	}
++	sb_config_stat(tag, asset);
+ }
+ 
+ /* t147: 6440 s lock / 6490 s home, just before the burst asks them at 6450/6500. */
+@@ -5299,11 +5306,12 @@ hakios_springboard_init(void)
+ 	 * remote controller (t140 did that at 6600 s, right where the serial has to stay readable). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6400 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_wp_handover);
+-	/* t147: the configuration's own assetDirectory is what the failing refresh writes into, so
+-	 * look at it before the burst: lock at 6440 s, home at 6490 s (the refresh asks follow). */
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6440 * NSEC_PER_SEC),
++	/* t150: the t147 probe called createDirectoryAtPath: on the main thread and never returned
++	 * (t7 serial 542679-542681, SIGABRT 546928 at 6524 s), losing the 6450-6600 s burst. The
++	 * read-only stat/opendir version now runs after all of it, at 6650 s. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6650 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), (void *)(intptr_t)0, sb_probe_config_dirs);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6490 * NSEC_PER_SEC),
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6650 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), (void *)(intptr_t)1, sb_probe_config_dirs);
+ 	/* t142: after the handover there is a home configuration in the ivar, so look below the
+ 	 * remote controller once (6435 s, after the 6420 s apply), ask the lock configuration as the

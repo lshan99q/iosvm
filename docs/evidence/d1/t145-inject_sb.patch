@@ -1,0 +1,25 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index d8d38e9..9a8c88a 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -4000,8 +4000,18 @@ sb_snapshot_scene(void *context)
+ 
+ 		if (scenes != nil &&
+ 		    ((unsigned long (*)(id, SEL))objc_msgSend)(scenes, sel_registerName("count")) > 0) {
+-			scene = ((id (*)(id, SEL, unsigned long))objc_msgSend)(scenes,
+-			    sel_registerName("objectAtIndex:"), 0);
++			/* t145: this is a set (the bp boot got __NSSingleObjectSetI at 6617 s and
++			 * -objectAtIndex: killed SpringBoard, serial 532177), so ask it the set way
++			 * first; an array handed over here still answers -objectAtIndex:. */
++			if (class_respondsToSelector(object_getClass(scenes),
++			        sel_registerName("anyObject"))) {
++				scene = ((id (*)(id, SEL))objc_msgSend)(scenes,
++				    sel_registerName("anyObject"));
++			} else if (class_respondsToSelector(object_getClass(scenes),
++			        sel_registerName("objectAtIndex:"))) {
++				scene = ((id (*)(id, SEL, unsigned long))objc_msgSend)(scenes,
++				    sel_registerName("objectAtIndex:"), 0);
++			}
+ 		}
+ 	}
+ 	if (scene == nil) {

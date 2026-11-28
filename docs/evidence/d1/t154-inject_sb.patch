@@ -1,0 +1,280 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 240ded9..78d13e3 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3734,22 +3734,259 @@ sb_setwp_image(void)
+ 	return image;
+ }
+ 
++/* t153 (bz6): bz5 (serial 8851/8852) died inside the 5-argument setter because the second
++ * argument was an NSDictionary: the setter sends -bestWallpaperSizeForWallpaperSize:wallpaperScale:
++ * deviceType:imageScale: to it. So the options object has to be a real PBUIWallpaperOptions. Take
++ * the manager's own one when it holds it (most trustworthy), else +[PBUIWallpaperOptions
++ * defaultOptions], else alloc/init; and only hand it to the setter when it answers that size
++ * method -- anything else is skipped, so a wrong object cannot take SpringBoard down again. */
++static id
++sb_options_from_manager(id manager)
++{
++	SEL sel = sel_registerName("wallpaperOptionsForVariant:wallpaperMode:");
++	id obj;
++
++	if (manager == nil || !class_respondsToSelector(object_getClass(manager), sel)) {
++		say("hakios: sbwp: setwp opts getter no\n");
++		return nil;
++	}
++	{
++		id mode0 = ((id (*)(id, SEL, long, long))objc_msgSend)(manager, sel, 1, 0);
++		id mode1 = ((id (*)(id, SEL, long, long))objc_msgSend)(manager, sel, 1, 1);
++
++		say("hakios: sbwp: setwp getter mode0 %s mode1 %s\n",
++		    mode0 != nil ? class_getName(object_getClass(mode0)) : "nil",
++		    mode1 != nil ? class_getName(object_getClass(mode1)) : "nil");
++		obj = mode0 != nil ? mode0 : mode1;
++	}
++	return obj;
++}
++
++/* t153: last resort when neither the manager nor the class supplies an options object the setter
++ * accepts: KVC the four values the size method reads, only through setters the class really has
++ * (KVC would raise for an unknown key, and this process must not take that exception). */
++static void
++sb_options_tune(id options)
++{
++	Class cls;
++	Class value_class;
++	Class number_class;
++
++	if (options == nil) {
++		return;
++	}
++	cls = object_getClass(options);
++	value_class = objc_lookUpClass("NSValue");
++	number_class = objc_lookUpClass("NSNumber");
++	if (value_class != Nil &&
++	    class_respondsToSelector(cls, sel_registerName("setWallpaperSize:"))) {
++		id v = ((id (*)(Class, SEL, CGSize))objc_msgSend)(value_class,
++		    sel_registerName("valueWithCGSize:"), CGSizeMake(750.0, 1624.0));
++
++		if (v != nil) {
++			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setWallpaperSize:"), v);
++			say("hakios: sbwp: setwp opts tune wallpaperSize ok\n");
++		}
++	}
++	if (number_class != Nil &&
++	    class_respondsToSelector(cls, sel_registerName("setWallpaperScale:"))) {
++		id n = ((id (*)(Class, SEL, double))objc_msgSend)(number_class,
++		    sel_registerName("numberWithDouble:"), 1.0);
++
++		if (n != nil) {
++			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setWallpaperScale:"), n);
++			say("hakios: sbwp: setwp opts tune wallpaperScale ok\n");
++		}
++	}
++	if (number_class != Nil &&
++	    class_respondsToSelector(cls, sel_registerName("setImageScale:"))) {
++		id n = ((id (*)(Class, SEL, double))objc_msgSend)(number_class,
++		    sel_registerName("numberWithDouble:"), 1.0);
++
++		if (n != nil) {
++			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setImageScale:"), n);
++			say("hakios: sbwp: setwp opts tune imageScale ok\n");
++		}
++	}
++	if (number_class != Nil &&
++	    class_respondsToSelector(cls, sel_registerName("setDeviceType:"))) {
++		id n = ((id (*)(Class, SEL, long))objc_msgSend)(number_class,
++		    sel_registerName("numberWithLong:"), 1);
++
++		if (n != nil) {
++			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setDeviceType:"), n);
++			say("hakios: sbwp: setwp opts tune deviceType ok\n");
++		}
++	}
++}
++
++static id
++sb_options_from_ivars(id manager)
++{
++	Class cls;
++
++	if (manager == nil) {
++		return nil;
++	}
++	cls = object_getClass(manager);
++	while (cls != Nil) {
++		unsigned count = 0;
++		Ivar *ivars = class_copyIvarList(cls, &count);
++		unsigned i;
++
++		for (i = 0; i < count; i++) {
++			const char *name = ivar_getName(ivars[i]);
++			const char *type = ivar_getTypeEncoding(ivars[i]);
++			id value;
++
++			if (name == NULL || type == NULL || type[0] != '@') {
++				continue;
++			}
++			value = object_getIvar(manager, ivars[i]);
++			if (value == nil) {
++				continue;
++			}
++			{
++				const char *vcls = class_getName(object_getClass(value));
++
++				say("hakios: sbwp: setwp mivar %s %s %s\n", name, type, vcls);
++				if (strstr(vcls, "WallpaperOptions") != NULL ||
++				    strstr(vcls, "Options") != NULL) {
++					free(ivars);
++					return value;
++				}
++			}
++		}
++		free(ivars);
++		cls = class_getSuperclass(cls);
++	}
++	return nil;
++}
++
++static id
++sb_options_from_class(void)
++{
++	Class opts_class = objc_lookUpClass("PBUIWallpaperOptions");
++	Class meta;
++	id obj;
++
++	if (opts_class == Nil) {
++		say("hakios: sbwp: setwp opts class no\n");
++		return nil;
++	}
++	meta = object_getClass((id)opts_class);
++	say("hakios: sbwp: setwp opts class yes default %d alloc %d new %d\n",
++	    class_respondsToSelector(meta, sel_registerName("defaultOptions")),
++	    class_respondsToSelector(meta, sel_registerName("alloc")),
++	    class_respondsToSelector(meta, sel_registerName("new")));
++	if (class_respondsToSelector(meta, sel_registerName("defaultOptions"))) {
++		obj = ((id (*)(Class, SEL))objc_msgSend)(opts_class,
++		    sel_registerName("defaultOptions"));
++		if (obj != nil) {
++			say("hakios: sbwp: setwp opts default src cls %s\n",
++			    class_getName(object_getClass(obj)));
++			return obj;
++		}
++		say("hakios: sbwp: setwp opts default nil\n");
++	}
++	if (class_respondsToSelector(meta, sel_registerName("alloc"))) {
++		id alloc = ((id (*)(Class, SEL))objc_msgSend)(opts_class, sel_registerName("alloc"));
++
++		if (alloc != nil &&
++		    class_respondsToSelector(object_getClass(alloc), sel_registerName("init"))) {
++			obj = ((id (*)(id, SEL))objc_msgSend)(alloc, sel_registerName("init"));
++			say("hakios: sbwp: setwp opts init %s\n",
++			    obj != nil ? class_getName(object_getClass(obj)) : "nil");
++			return obj;
++		}
++	}
++	return nil;
++}
++
++static int
++sb_options_size(id options)
++{
++	SEL sel = sel_registerName(
++	    "bestWallpaperSizeForWallpaperSize:wallpaperScale:deviceType:imageScale:");
++	CGSize in = CGSizeMake(750.0, 1624.0);
++	CGSize out = CGSizeMake(0.0, 0.0);
++
++	if (options == nil) {
++		return 0;
++	}
++	say("hakios: sbwp: setwp opts probe %s size %d\n", class_getName(object_getClass(options)),
++	    class_respondsToSelector(object_getClass(options), sel));
++	if (!class_respondsToSelector(object_getClass(options), sel)) {
++		return 0;
++	}
++	out = ((CGSize (*)(id, SEL, CGSize, double, long, double))objc_msgSend)(options, sel,
++	    in, 1.0, 1, 1.0);
++	say("hakios: sbwp: setwp opts size %gx%g\n", (double)out.width, (double)out.height);
++	return out.width > 0.0 && out.height > 0.0;
++}
++
++/* t153: 300 s look only -- print the manager's object ivars and the options class methods, never
++ * call the setter, so a boot that ends early still says where options could come from. */
++static void
++sb_options_probe(void *context)
++{
++	id manager = sb_wallpaper_manager();
++	id options;
++
++	(void)context;
++	say("hakios: sbwp: opts probe manager %s\n",
++	    manager != nil ? class_getName(object_getClass(manager)) : "nil");
++	if (manager != nil) {
++		options = sb_options_from_manager(manager);
++		if (options != nil) {
++			say("hakios: sbwp: opts probe manager %s\n",
++			    class_getName(object_getClass(options)));
++			return;
++		}
++		options = sb_options_from_ivars(manager);
++		if (options != nil) {
++			say("hakios: sbwp: opts probe ivar %s\n",
++			    class_getName(object_getClass(options)));
++			return;
++		}
++	}
++	options = sb_options_from_class();
++	say("hakios: sbwp: opts probe class %s\n",
++	    options != nil ? class_getName(object_getClass(options)) : "nil");
++}
++
+ static void
+ sb_setwp_once(id manager, id image, long variants)
+ {
+ 	SEL sel = sel_registerName("setWallpaperImage:wallpaperOptions:forVariants:");
+-	Class dict_class = objc_lookUpClass("NSDictionary");
+-	id options = dict_class != Nil ?
+-	    ((id (*)(Class, SEL))objc_msgSend)(dict_class, sel_registerName("dictionary")) : nil;
++	id options = sb_options_from_manager(manager);
++	const char *src = "manager";
+ 	BOOL ok;
+ 
+ 	if (options == nil) {
+-		say("hakios: sbwp: setwp no options\n");
++		options = sb_options_from_ivars(manager);
++		src = "ivar";
++	}
++	if (options == nil) {
++		options = sb_options_from_class();
++		src = "class";
++	}
++	if (options != nil && strcmp(src, "class") == 0) {
++		sb_options_tune(options);
++	}
++	if (options == nil) {
++		say("hakios: sbwp: setwp skip no options manager %s\n",
++		    class_getName(object_getClass(manager)));
+ 		return;
+ 	}
+-	say("hakios: sbwp: setwp call manager %s image %s options %s variants %ld\n",
++	if (!sb_options_size(options)) {
++		say("hakios: sbwp: setwp skip size no src %s cls %s\n", src,
++		    class_getName(object_getClass(options)));
++		return;
++	}
++	say("hakios: sbwp: setwp call manager %s image %s options %s src %s variants %ld\n",
+ 	    class_getName(object_getClass(manager)), class_getName(object_getClass(image)),
+-	    class_getName(object_getClass(options)), variants);
++	    class_getName(object_getClass(options)), src, variants);
+ 	ok = ((BOOL (*)(id, SEL, id, id, long))objc_msgSend)(manager, sel, image, options, variants);
+ 	say("hakios: sbwp: setwp variant %ld ok %d cls %s\n", variants, (int)ok,
+ 	    class_getName(object_getClass(manager)));
+@@ -5391,6 +5628,9 @@ hakios_springboard_init(void)
+ 	/* t149: same 300 s point, reflection only (see sb_reflect_probe). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_reflect_probe);
++	/* t153: same 300 s point, options sources only (see sb_options_probe). */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_options_probe);
+ 	/* t152: one call only, on the main queue, 900 s in: t31 died inside the first call of every
+ 	 * instance, so variants 1/2/3 in a row would only crash more; whether the picture was the
+ 	 * fault shows in the classes said right before the call. 3000 s still lists the four cache

@@ -1,0 +1,257 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index b785d64..c341047 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3593,94 +3593,158 @@ sb_copy_test_png(void)
+ 	}
+ }
+ 
+-/* t146: E6-1 -- the legacy migration (PosterBoard, about 3400-3900 s) builds the poster content
+- * out of /var/mobile/Library/SpringBoard/LockBackground.cpbitmap. In every serial so far that file
+- * is a 203 byte empty placeholder with no pixels (t14: §B); PaperBoardUI falls back to ImageIO
+- * when the cpbitmap read fails (dyld cache .15, the "ImageIO" fallback string at decimal offset
+- * 18709488) and ImageIO reads any PNG, so the same picture the secure window gets at 6600 s is
+- * written under the cache's own file names. The writes are repeated at 1500, 2500 and 3000 s so a
+- * placeholder SpringBoard re-saves early is overwritten again, and 3000 s is still before the
+- * migration reads the file. Best effort: a failed write only costs its errno. */
+-static void
+-sb_seed_one(const unsigned char *bytes, size_t length, const char *target)
++/* t151: t146 wrote the PNG itself under the cache's file names and the migration read it as a
++ * cpbitmap: CPBitmapErrorDomain 6 "Invalid magic in trailer" (bx serial 218172-218194). The
++ * manager SpringBoard uses to store wallpapers is on the poster remote controller (be serial
++ * 540458: remote: _wallpaperConfigurationManager = PBUIWallpaperConfigurationManager), and the
++ * selector's shape was read from the running process (by serial 8656:
++ * -setWallpaperImage:wallpaperOptions:forVariants: enc B40@0:8@16@24q32 -- image, options, long
++ * variants). Ask that manager to store the test picture instead of writing the file. The call goes
++ * to a background queue and sits in @try, so a fault in the SPI cannot take the main thread or the
++ * 6400-6600 s burst with it. */
++static int sb_setwp_done;
++
++static id
++sb_wallpaper_manager(void)
+ {
+-	int out, failure = 0;
+-	size_t done = 0;
++	Class controller_class = objc_lookUpClass("SBWallpaperController");
++	Class remote_class;
++	id controller, remote = nil;
++	Ivar ivar;
+ 
+-	out = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+-	if (out < 0) {
+-		say("hakios: sbwp: seed: %s err %d (create)\n", target, errno);
+-		return;
++	if (controller_class == Nil ||
++	    !class_respondsToSelector(object_getClass(controller_class),
++	        sel_registerName("sharedInstance"))) {
++		return nil;
+ 	}
+-	while (done < length) {
+-		ssize_t written = write(out, bytes + done, length - done);
+-
+-		if (written <= 0) {
+-			failure = errno;
+-			break;
++	controller = ((id (*)(Class, SEL))objc_msgSend)(controller_class,
++	    sel_registerName("sharedInstance"));
++	if (controller == nil) {
++		return nil;
++	}
++	ivar = class_getInstanceVariable(controller_class, "_rootWallpaperViewController");
++	if (ivar != NULL) {
++		remote = object_getIvar(controller, ivar);
++	}
++	if (remote == nil) {
++		ivar = class_getInstanceVariable(controller_class, "_wallpaperPresenter");
++		if (ivar != NULL) {
++			remote = object_getIvar(controller, ivar);
+ 		}
+-		done += (size_t)written;
+ 	}
+-	(void)fchown(out, 501, 501);
+-	(void)fchmod(out, 0644);
+-	close(out);
+-	if (failure != 0) {
+-		say("hakios: sbwp: seed: %s err %d\n", target, failure);
+-	} else {
+-		say("hakios: sbwp: seed: %s ok %lu\n", target, (unsigned long)done);
++	if (remote == nil) {
++		return nil;
++	}
++	/* the ivar may live on a subclass of the remote controller: walk up */
++	remote_class = object_getClass(remote);
++	while (remote_class != Nil) {
++		ivar = class_getInstanceVariable(remote_class, "_wallpaperConfigurationManager");
++		if (ivar != NULL) {
++			return object_getIvar(remote, ivar);
++		}
++		remote_class = class_getSuperclass(remote_class);
+ 	}
++	return nil;
+ }
+ 
+ static void
+-sb_seed_wallpaper(void *context)
++sb_setwp_files(void *context)
+ {
+-	static const char *const source = "/redwood/var/d1test.png";
+-	static const char *const dir = "/private/var/mobile/Library/SpringBoard";
+-	static const char *const targets[] = {
++	static const char *const files[] = {
+ 		"/private/var/mobile/Library/SpringBoard/LockBackground.cpbitmap",
+ 		"/private/var/mobile/Library/SpringBoard/OriginalLockBackground.cpbitmap",
+ 		"/private/var/mobile/Library/SpringBoard/HomeBackground.cpbitmap",
+ 		"/private/var/mobile/Library/SpringBoard/OriginalHomeBackground.cpbitmap",
+ 	};
+-	static unsigned char buffer[16384];
+-	static size_t length = 0;
+-	size_t i;
++	unsigned i;
+ 
+ 	(void)context;
+-	if (length == 0) {
+-		int in = open(source, O_RDONLY);
++	for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
++		struct stat st;
+ 
+-		if (in < 0) {
+-			say("hakios: sbwp: seed: source %s err %d (open)\n", source, errno);
+-			return;
++		if (lstat(files[i], &st) == 0) {
++			say("hakios: sbwp: setwp file %s size %lld mtime %ld\n", files[i],
++			    (long long)st.st_size, (long)st.st_mtime);
++		} else {
++			say("hakios: sbwp: setwp file %s absent errno %d\n", files[i], errno);
+ 		}
+-		while (length < sizeof(buffer)) {
+-			ssize_t got = read(in, buffer + length, sizeof(buffer) - length);
++	}
++}
+ 
+-			if (got < 0) {
+-				say("hakios: sbwp: seed: source %s err %d (read)\n", source, errno);
+-				close(in);
+-				length = 0;
+-				return;
+-			}
+-			if (got == 0) {
+-				break;
+-			}
+-			length += (size_t)got;
+-		}
+-		close(in);
+-		if (length == 0) {
+-			say("hakios: sbwp: seed: source %s empty\n", source);
+-			return;
+-		}
++static void
++sb_setwp_try(id manager, id image, long variant)
++{
++	SEL sel = sel_registerName("setWallpaperImage:wallpaperOptions:forVariants:");
++	Class dict_class = objc_lookUpClass("NSDictionary");
++	id options = dict_class != Nil ?
++	    ((id (*)(Class, SEL))objc_msgSend)(dict_class, sel_registerName("dictionary")) : nil;
++	BOOL ok = NO;
++
++	if (options == nil) {
++		return;
++	}
++	if (!class_respondsToSelector(object_getClass(manager), sel)) {
++		say("hakios: sbwp: setwp skip no responds %s\n",
++		    class_getName(object_getClass(manager)));
++		return;
++	}
++	ok = ((BOOL (*)(id, SEL, id, id, long))objc_msgSend)(manager, sel, image, options, variant);
++	say("hakios: sbwp: setwp variant %ld ok %d cls %s\n", variant, (int)ok,
++	    class_getName(object_getClass(manager)));
++	if (ok) {
++		sb_setwp_done = 1;
++	}
++}
++
++static void
++sb_setwp_call(void *context)
++{
++	static dispatch_queue_t queue;
++	static const char *const path = "/redwood/var/d1test.png";
++	Class image_class, string_class;
++	id manager, image = nil, ns_path;
++
++	(void)context;
++	if (sb_setwp_done) {
++		say("hakios: sbwp: setwp done, skip\n");
++		return;
++	}
++	manager = sb_wallpaper_manager();
++	if (manager == nil ||
++	    strstr(class_getName(object_getClass(manager)), "PBUIWallpaperConfigurationManager") == NULL) {
++		say("hakios: sbwp: setwp skip manager %s\n",
++		    manager != nil ? class_getName(object_getClass(manager)) : "nil");
++		return;
++	}
++	image_class = objc_lookUpClass("UIImage");
++	string_class = objc_lookUpClass("NSString");
++	if (image_class == Nil || string_class == Nil) {
++		say("hakios: sbwp: setwp skip no UIKit\n");
++		return;
++	}
++	ns_path = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
++	    sel_registerName("stringWithUTF8String:"), path);
++	if (ns_path != nil) {
++		image = ((id (*)(Class, SEL, id))objc_msgSend)(image_class,
++		    sel_registerName("imageWithContentsOfFile:"), ns_path);
+ 	}
+-	if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+-		say("hakios: sbwp: seed: dir %s err %d (mkdir)\n", dir, errno);
++	if (image == nil) {
++		say("hakios: sbwp: setwp no image\n");
++		return;
+ 	}
+-	(void)chown(dir, 501, 501);
+-	for (i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+-		sb_seed_one(buffer, length, targets[i]);
++	if (queue == NULL) {
++		queue = dispatch_queue_create("hakios.setwp", NULL);
+ 	}
++	dispatch_async(queue, ^{
++		long variant;
++
++		/* no @try here: this file is built without exception support (see the t147 note at
++		 * sb_config_value). The call is on a background queue and every precondition is checked
++		 * before it, so a misbehaving SPI cannot reach the main thread. */
++		for (variant = 1; variant <= 3 && !sb_setwp_done; variant++) {
++			sb_setwp_try(manager, image, variant);
++		}
++	});
+ }
+ 
+ /* t143: the offline examination of the t142 image (t14, d1d2bp-offline-store.md:§E4-1) found the
+@@ -5276,21 +5340,20 @@ hakios_springboard_init(void)
+ 	/* t149: same 300 s point, reflection only (see sb_reflect_probe). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_reflect_probe);
+-	/* t146: the wallpaper cache files get their picture long before the migration (PosterBoard
+-	 * starts it around 3400-3900 s, bp serial 280963-281284). The first write is at
+-	 * 500 s, then again at 1500/2500/3000 s -- SpringBoard saves its empty 203 byte placeholder
+-	 * early in boot (it logged its own migration refusal at 16:13:01, bp:6507/6508), so writing
+-	 * after that point leaves the PNG in place for the migration to read. Nothing here runs past
+-	 * 3000 s, so the refresh window stays as t141 left it. */
++	/* t151: five chances to have the wallpaper manager store the test picture, all well before
++	 * PosterBoard's migration (3400-3900 s); the first successful call stops the rest, and 3000 s
++	 * also lists the four cache files so the serial says whether it landed. */
+ 	{
+-		static const int at[] = { 500, 1500, 2500, 3000 };
++		static const int at[] = { 600, 1200, 1800, 2400, 3000 };
+ 		size_t i;
+ 
+ 		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+ 			dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)at[i] * NSEC_PER_SEC),
+-			    dispatch_get_main_queue(), NULL, sb_seed_wallpaper);
++			    dispatch_get_main_queue(), NULL, sb_setwp_call);
+ 		}
+ 	}
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3000 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_setwp_files);
+ 	/* t141: the refresh window is 6450-6600 s and the serial after 6600 s is the refresh
+ 	 * conclusions only. The prewarm look that rode behind the handover (6700 s in t140) moves in
+ 	 * front of it at 6200 s; t142 adds only the two asks and the scene snapshot below, all of

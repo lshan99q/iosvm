@@ -1,0 +1,134 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 403e61f..d1abce1 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -4295,6 +4295,119 @@ sb_content_probe(void *context)
+ 	say("hakios: sbwp: content: probe done (no setter called)\n");
+ }
+ 
++/* t149: the t148 probe only asked one guessed selector per class. That is not enough to call a
++ * wall-image setter: the arity and the argument types decide the objc_msgSend cast. This walks the
++ * classes the running SpringBoard actually has and prints, for every set/update/write/save/cache
++ * method whose name mentions Wallpaper/Image/Snapshot, the full type encoding, the argument count
++ * and the first two argument types. It calls nothing. */
++static void
++sb_reflect_class(Class cls, const char *label)
++{
++	Method *methods;
++	unsigned count = 0, i;
++
++	if (cls == Nil) {
++		say("hakios: sbwp: content: refl %s absent\n", label);
++		return;
++	}
++	say("hakios: sbwp: content: refl %s %s\n", label, class_getName(cls));
++	methods = class_copyMethodList(cls, &count);
++	for (i = 0; i < count && i < 220; i++) {
++		const char *name = sel_getName(method_getName(methods[i]));
++		const char *enc;
++		char *arg0 = NULL, *arg1 = NULL;
++		unsigned args;
++
++		if (strncmp(name, "set", 3) != 0 && strncmp(name, "update", 6) != 0 &&
++		    strncmp(name, "write", 5) != 0 && strncmp(name, "save", 4) != 0 &&
++		    strncmp(name, "cache", 5) != 0) {
++			continue;
++		}
++		if (strstr(name, "Wallpaper") == NULL && strstr(name, "Image") == NULL &&
++		    strstr(name, "Snapshot") == NULL) {
++			continue;
++		}
++		enc = method_getTypeEncoding(methods[i]);
++		args = method_getNumberOfArguments(methods[i]);
++		if (args > 0) {
++			arg0 = method_copyArgumentType(methods[i], 0);
++		}
++		if (args > 1) {
++			arg1 = method_copyArgumentType(methods[i], 1);
++		}
++		say("hakios: sbwp: content: refl %s -%s enc %s nargs %u a0 %s a1 %s\n", label, name,
++		    enc != NULL ? enc : "?", args, arg0 != NULL ? arg0 : "-", arg1 != NULL ? arg1 : "-");
++		if (arg0 != NULL) {
++			free(arg0);
++		}
++		if (arg1 != NULL) {
++			free(arg1);
++		}
++	}
++	if (methods != NULL) {
++		free(methods);
++	}
++}
++
++static void
++sb_reflect_probe(void *context)
++{
++	static const char *const classes[] = {
++		"SBWallpaperController",
++		"PBUIWallpaperConfigurationManager",
++		"PBUIWallpaperCache",
++		"SBWallpaperView",
++		"PBUIPosterWallpaperViewController",
++		"PBUIPosterWallpaperRemoteViewController",
++	};
++	static const char *const candidates[] = {
++		"setWallpaperImage:wallpaperOptions:forVariants:",
++		"setWallpaperImage:wallpaperOptions:forVariants:options:",
++		"setWallpaperImage:forVariant:options:",
++		"setImage:forWallpaperOptions:",
++		"setWallpaper:forVariant:",
++		"_setWallpaperImage:",
++		"cacheImage:forWallpaperOptions:",
++	};
++	Class controller = objc_lookUpClass("SBWallpaperController");
++	Class config = objc_lookUpClass("PBUIWallpaperConfigurationManager");
++	Class cache = objc_lookUpClass("PBUIWallpaperCache");
++	Class *list;
++	unsigned total = 0, i, shown = 0;
++
++	(void)context;
++	list = objc_copyClassList(&total);
++	for (i = 0; i < total; i++) {
++		const char *name = class_getName(list[i]);
++
++		if ((strstr(name, "Wallpaper") != NULL || strstr(name, "Poster") != NULL) && shown < 40) {
++			say("hakios: sbwp: content: refl cls %s\n", name);
++			shown++;
++		}
++	}
++	if (list != NULL) {
++		free(list);
++	}
++	say("hakios: sbwp: content: refl cls total %u shown %u\n", total, shown);
++	for (i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
++		sb_reflect_class(objc_lookUpClass(classes[i]), classes[i]);
++	}
++	for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
++		SEL sel = sel_registerName(candidates[i]);
++
++		say("hakios: sbwp: content: cand -%s sb %d cfg %d cache %d\n", candidates[i],
++		    controller != Nil && class_getInstanceMethod(controller, sel) != NULL,
++		    config != Nil && class_getInstanceMethod(config, sel) != NULL,
++		    cache != Nil && class_getInstanceMethod(cache, sel) != NULL);
++	}
++	{
++		void *write = dlsym(RTLD_DEFAULT, "_CPBitmapWriteImagesToPath");
++		void *create = dlsym(RTLD_DEFAULT, "_CPBitmapCreateImagesFromData");
++
++		say("hakios: sbwp: content: refl sym _write %p _create %p\n", write, create);
++	}
++}
++
+ static void
+ sb_snapshot_scene(void *context)
+ {
+@@ -5153,6 +5266,9 @@ hakios_springboard_init(void)
+ 	/* t148: what the runtime offers for a real cpbitmap (see sb_content_probe) */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_content_probe);
++	/* t149: same 300 s point, reflection only (see sb_reflect_probe). */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_reflect_probe);
+ 	/* t146: the wallpaper cache files get their picture long before the migration (PosterBoard
+ 	 * starts it around 3400-3900 s, bp serial 280963-281284). The first write is at
+ 	 * 500 s, then again at 1500/2500/3000 s -- SpringBoard saves its empty 203 byte placeholder

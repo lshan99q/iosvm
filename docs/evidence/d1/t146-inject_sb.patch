@@ -1,0 +1,123 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 9a8c88a..fd75363 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3415,6 +3415,96 @@ sb_copy_test_png(void)
+ 	}
+ }
+ 
++/* t146: E6-1 -- the legacy migration (PosterBoard, about 3400-3900 s) builds the poster content
++ * out of /var/mobile/Library/SpringBoard/LockBackground.cpbitmap. In every serial so far that file
++ * is a 203 byte empty placeholder with no pixels (t14: §B); PaperBoardUI falls back to ImageIO
++ * when the cpbitmap read fails (dyld cache .15, the "ImageIO" fallback string at decimal offset
++ * 18709488) and ImageIO reads any PNG, so the same picture the secure window gets at 6600 s is
++ * written under the cache's own file names. The writes are repeated at 1500, 2500 and 3000 s so a
++ * placeholder SpringBoard re-saves early is overwritten again, and 3000 s is still before the
++ * migration reads the file. Best effort: a failed write only costs its errno. */
++static void
++sb_seed_one(const unsigned char *bytes, size_t length, const char *target)
++{
++	int out, failure = 0;
++	size_t done = 0;
++
++	out = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	if (out < 0) {
++		say("hakios: sbwp: seed: %s err %d (create)\n", target, errno);
++		return;
++	}
++	while (done < length) {
++		ssize_t written = write(out, bytes + done, length - done);
++
++		if (written <= 0) {
++			failure = errno;
++			break;
++		}
++		done += (size_t)written;
++	}
++	(void)fchown(out, 501, 501);
++	(void)fchmod(out, 0644);
++	close(out);
++	if (failure != 0) {
++		say("hakios: sbwp: seed: %s err %d\n", target, failure);
++	} else {
++		say("hakios: sbwp: seed: %s ok %lu\n", target, (unsigned long)done);
++	}
++}
++
++static void
++sb_seed_wallpaper(void *context)
++{
++	static const char *const source = "/redwood/var/d1test.png";
++	static const char *const dir = "/private/var/mobile/Library/SpringBoard";
++	static const char *const targets[] = {
++		"/private/var/mobile/Library/SpringBoard/LockBackground.cpbitmap",
++		"/private/var/mobile/Library/SpringBoard/OriginalLockBackground.cpbitmap",
++		"/private/var/mobile/Library/SpringBoard/HomeBackground.cpbitmap",
++		"/private/var/mobile/Library/SpringBoard/OriginalHomeBackground.cpbitmap",
++	};
++	static unsigned char buffer[16384];
++	static size_t length = 0;
++	size_t i;
++
++	(void)context;
++	if (length == 0) {
++		int in = open(source, O_RDONLY);
++
++		if (in < 0) {
++			say("hakios: sbwp: seed: source %s err %d (open)\n", source, errno);
++			return;
++		}
++		while (length < sizeof(buffer)) {
++			ssize_t got = read(in, buffer + length, sizeof(buffer) - length);
++
++			if (got < 0) {
++				say("hakios: sbwp: seed: source %s err %d (read)\n", source, errno);
++				close(in);
++				length = 0;
++				return;
++			}
++			if (got == 0) {
++				break;
++			}
++			length += (size_t)got;
++		}
++		close(in);
++		if (length == 0) {
++			say("hakios: sbwp: seed: source %s empty\n", source);
++			return;
++		}
++	}
++	if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
++		say("hakios: sbwp: seed: dir %s err %d (mkdir)\n", dir, errno);
++	}
++	(void)chown(dir, 501, 501);
++	for (i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
++		sb_seed_one(buffer, length, targets[i]);
++	}
++}
++
+ /* t143: the offline examination of the t142 image (t14, d1d2bp-offline-store.md:§E4-1) found the
+  * store directories missing -- /var/mobile/Library/PosterBoard, PosterBoard/Extensions and
+  * Wallpaper were neither in the data volume's template (var.skel has no line for them) nor made
+@@ -4814,6 +4904,21 @@ hakios_springboard_init(void)
+ 	 * for var.skel:122-124, not a replacement. */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6100 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_mkstore);
++	/* t146: the wallpaper cache files get their picture long before the migration (PosterBoard
++	 * starts it around 3400-3900 s, bp serial 280963-281284). The first write is at
++	 * 500 s, then again at 1500/2500/3000 s -- SpringBoard saves its empty 203 byte placeholder
++	 * early in boot (it logged its own migration refusal at 16:13:01, bp:6507/6508), so writing
++	 * after that point leaves the PNG in place for the migration to read. Nothing here runs past
++	 * 3000 s, so the refresh window stays as t141 left it. */
++	{
++		static const int at[] = { 500, 1500, 2500, 3000 };
++		size_t i;
++
++		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
++			dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)at[i] * NSEC_PER_SEC),
++			    dispatch_get_main_queue(), NULL, sb_seed_wallpaper);
++		}
++	}
+ 	/* t141: the refresh window is 6450-6600 s and the serial after 6600 s is the refresh
+ 	 * conclusions only. The prewarm look that rode behind the handover (6700 s in t140) moves in
+ 	 * front of it at 6200 s; t142 adds only the two asks and the scene snapshot below, all of

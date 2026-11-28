@@ -1,0 +1,52 @@
+diff --git a/userland/src/inject_pb.c b/userland/src/inject_pb.c
+index 32d2668..da69dfb 100644
+--- a/userland/src/inject_pb.c
++++ b/userland/src/inject_pb.c
+@@ -1296,6 +1296,7 @@ pb_e7_inject_call(void *context)
+ 	}
+ 	n = pb_e7_inject(image);
+ 	say("hakios: pb: e7 injected total %u\n", n);
++	say("hakios: pb: e7: injected at 300 s total %u\n", n);
+ }
+ 
+ static void
+@@ -1347,8 +1348,10 @@ pb_e7_snapshot_call(void *context)
+ 			queue = dispatch_queue_create("hakios.e7snap", NULL);
+ 		}
+ 		say("hakios: pb: e7 snap asked queue serial\n");
++		say("hakios: pb: e7: snap ask\n");
+ 		((void (*)(id, SEL, dispatch_queue_t, void *))objc_msgSend)(vc,
+ 		    sel_registerName("performSnapshotOnQueue:completion:"), queue, raw);
++		say("hakios: pb: e7: snap ret\n");
+ 	} else {
+ 		say("hakios: pb: e7 no performSnapshot\n");
+ 	}
+@@ -1364,6 +1367,7 @@ pb_e7_store_call(void *context)
+ 	id vc = pb_e7_first_vc();
+ 
+ 	(void)context;
++	say("hakios: pb: e7: scan ask\n");
+ 	if (vc != nil) {
+ 		pb_e7_url_path(vc, "store", "_snapshotURL");
+ 		pb_e7_url_path(vc, "store", "snapshotContentDirectory");
+@@ -1477,13 +1481,15 @@ posterboard_wallpaper_constructor(void)
+ 	    dispatch_get_main_queue(), NULL, wp_mgr_migrate);
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)900 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, migration_state);
+-	/* t153 (bz6): E7 runs in this process, independent of the SpringBoard setwp path: the view
+-	 * is painted at 3800 s, the snapshot asked at 3900 s and the store listed at 4300 s. */
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3800 * NSEC_PER_SEC),
++	/* t156 (bz8): E7 runs in this process, independent of the SpringBoard setwp path. cb showed
++	 * PosterBoard starts around el 3036 s and the boot ends at 7240 s, so the t153 ticks
++	 * (3800/3900/4300) fell at el 6836/6936/7336 -- the last one outside the boot. Paint at
++	 * 300 s after init, ask the snapshot at 500 s and list the store at 900 s: el 3336/3536/3936. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, pb_e7_inject_call);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3900 * NSEC_PER_SEC),
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)500 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, pb_e7_snapshot_call);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)4300 * NSEC_PER_SEC),
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)900 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, pb_e7_store_call);
+ 	if (probe_enabled()) {
+ 		dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);

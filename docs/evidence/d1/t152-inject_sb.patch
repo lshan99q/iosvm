@@ -1,0 +1,226 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index c341047..240ded9 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -36,6 +36,7 @@
+ #include <IOKit/IOKitLib.h>
+ #include <IOSurface/IOSurfaceRef.h>
+ #include <CoreGraphics/CoreGraphics.h>
++#include <ImageIO/ImageIO.h>
+ #include <dispatch/dispatch.h>
+ #include <dirent.h>
+ #include <dlfcn.h>
+@@ -3593,15 +3594,15 @@ sb_copy_test_png(void)
+ 	}
+ }
+ 
+-/* t151: t146 wrote the PNG itself under the cache's file names and the migration read it as a
+- * cpbitmap: CPBitmapErrorDomain 6 "Invalid magic in trailer" (bx serial 218172-218194). The
+- * manager SpringBoard uses to store wallpapers is on the poster remote controller (be serial
+- * 540458: remote: _wallpaperConfigurationManager = PBUIWallpaperConfigurationManager), and the
+- * selector's shape was read from the running process (by serial 8656:
+- * -setWallpaperImage:wallpaperOptions:forVariants: enc B40@0:8@16@24q32 -- image, options, long
+- * variants). Ask that manager to store the test picture instead of writing the file. The call goes
+- * to a background queue and sits in @try, so a fault in the SPI cannot take the main thread or the
+- * 6400-6600 s burst with it. */
++/* t152: t151 handed the manager a UIImage from -imageWithContentsOfFile: and called it from a
++ * background queue; t31 killed SpringBoard before one setwp line was said (serial 71430 exited
++ * due to SIGSEGV; serial 122059 *** Terminating app, NSInvalidArgumentException, reason:
++ * '-\[OS_dispatch_mach scale\]: unrecognized selector sent to instance 0x28252db90', stack
++ * 0x1ce49201c/0x1ce491f78 in WallpaperKit/PosterKit) -- so what reached the manager was not a real
++ * UIImage. The file is decoded with ImageIO into a CGImage and a UIImage is made from it with
++ * -imageWithCGImage:scale:orientation: (1.0, up); the one call goes to the main queue with
++ * variants 1, and manager/image/options classes are said right before it. The alternates are
++ * printed, never called. */
+ static int sb_setwp_done;
+ 
+ static id
+@@ -3671,38 +3672,95 @@ sb_setwp_files(void *context)
+ 	}
+ }
+ 
++static id
++sb_setwp_image(void)
++{
++	static const char *const path = "/redwood/var/d1test.png";
++	Class string_class = objc_lookUpClass("NSString");
++	Class url_class = objc_lookUpClass("NSURL");
++	Class image_class = objc_lookUpClass("UIImage");
++	CGImageSourceRef source;
++	CGImageRef cgimage;
++	id ns_path, ns_url, image = nil;
++	size_t width, height;
++
++	if (string_class == Nil || url_class == Nil || image_class == Nil) {
++		say("hakios: sbwp: setwp img skip no UIKit\n");
++		return nil;
++	}
++	ns_path = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
++	    sel_registerName("stringWithUTF8String:"), path);
++	if (ns_path == nil) {
++		say("hakios: sbwp: setwp img no path\n");
++		return nil;
++	}
++	ns_url = ((id (*)(Class, SEL, id))objc_msgSend)(url_class,
++	    sel_registerName("fileURLWithPath:"), ns_path);
++	if (ns_url == nil) {
++		say("hakios: sbwp: setwp img no url %s\n", path);
++		return nil;
++	}
++	source = CGImageSourceCreateWithURL((CFURLRef)ns_url, NULL);
++	if (source == NULL) {
++		say("hakios: sbwp: setwp img no source %s\n", path);
++		return nil;
++	}
++	cgimage = CGImageSourceCreateImageAtIndex(source, 0, NULL);
++	CFRelease(source);
++	if (cgimage == NULL) {
++		say("hakios: sbwp: setwp img no cgimage %s\n", path);
++		return nil;
++	}
++	width = CGImageGetWidth(cgimage);
++	height = CGImageGetHeight(cgimage);
++	if (class_respondsToSelector(object_getClass(image_class),
++	        sel_registerName("imageWithCGImage:scale:orientation:"))) {
++		image = ((id (*)(Class, SEL, CGImageRef, double, long))objc_msgSend)(image_class,
++		    sel_registerName("imageWithCGImage:scale:orientation:"), cgimage, 1.0, 0);
++	}
++	if (image == nil &&
++	    class_respondsToSelector(object_getClass(image_class),
++	        sel_registerName("imageWithCGImage:"))) {
++		image = ((id (*)(Class, SEL, CGImageRef))objc_msgSend)(image_class,
++		    sel_registerName("imageWithCGImage:"), cgimage);
++	}
++	CGImageRelease(cgimage);
++	if (image == nil) {
++		say("hakios: sbwp: setwp img no UIImage %ux%u\n", (unsigned)width, (unsigned)height);
++		return nil;
++	}
++	say("hakios: sbwp: setwp img cls %s %p cg %ux%u\n", class_getName(object_getClass(image)),
++	    image, (unsigned)width, (unsigned)height);
++	return image;
++}
++
+ static void
+-sb_setwp_try(id manager, id image, long variant)
++sb_setwp_once(id manager, id image, long variants)
+ {
+ 	SEL sel = sel_registerName("setWallpaperImage:wallpaperOptions:forVariants:");
+ 	Class dict_class = objc_lookUpClass("NSDictionary");
+ 	id options = dict_class != Nil ?
+ 	    ((id (*)(Class, SEL))objc_msgSend)(dict_class, sel_registerName("dictionary")) : nil;
+-	BOOL ok = NO;
++	BOOL ok;
+ 
+ 	if (options == nil) {
++		say("hakios: sbwp: setwp no options\n");
+ 		return;
+ 	}
+-	if (!class_respondsToSelector(object_getClass(manager), sel)) {
+-		say("hakios: sbwp: setwp skip no responds %s\n",
+-		    class_getName(object_getClass(manager)));
+-		return;
+-	}
+-	ok = ((BOOL (*)(id, SEL, id, id, long))objc_msgSend)(manager, sel, image, options, variant);
+-	say("hakios: sbwp: setwp variant %ld ok %d cls %s\n", variant, (int)ok,
++	say("hakios: sbwp: setwp call manager %s image %s options %s variants %ld\n",
++	    class_getName(object_getClass(manager)), class_getName(object_getClass(image)),
++	    class_getName(object_getClass(options)), variants);
++	ok = ((BOOL (*)(id, SEL, id, id, long))objc_msgSend)(manager, sel, image, options, variants);
++	say("hakios: sbwp: setwp variant %ld ok %d cls %s\n", variants, (int)ok,
+ 	    class_getName(object_getClass(manager)));
+-	if (ok) {
+-		sb_setwp_done = 1;
+-	}
++	sb_setwp_done = (ok != NO);
+ }
+ 
+ static void
+ sb_setwp_call(void *context)
+ {
+-	static dispatch_queue_t queue;
+-	static const char *const path = "/redwood/var/d1test.png";
+-	Class image_class, string_class;
+-	id manager, image = nil, ns_path;
++	Class manager_class;
++	id manager, image;
+ 
+ 	(void)context;
+ 	if (sb_setwp_done) {
+@@ -3716,34 +3774,27 @@ sb_setwp_call(void *context)
+ 		    manager != nil ? class_getName(object_getClass(manager)) : "nil");
+ 		return;
+ 	}
+-	image_class = objc_lookUpClass("UIImage");
+-	string_class = objc_lookUpClass("NSString");
+-	if (image_class == Nil || string_class == Nil) {
+-		say("hakios: sbwp: setwp skip no UIKit\n");
+-		return;
+-	}
+-	ns_path = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
+-	    sel_registerName("stringWithUTF8String:"), path);
+-	if (ns_path != nil) {
+-		image = ((id (*)(Class, SEL, id))objc_msgSend)(image_class,
+-		    sel_registerName("imageWithContentsOfFile:"), ns_path);
++	manager_class = object_getClass(manager);
++	{
++		SEL alt = sel_registerName("setWallpaperImage:originalImage:forVariants:options:");
++		Method method = class_getInstanceMethod(manager_class, alt);
++
++		say("hakios: sbwp: setwp alt %s %s enc %s\n", sel_getName(alt),
++		    method != NULL ? "yes" : "no",
++		    method != NULL ? method_getTypeEncoding(method) : "none");
+ 	}
++	say("hakios: sbwp: setwp sym write %p\n", dlsym(RTLD_DEFAULT, "_CPBitmapWriteImagesToPath"));
++	image = sb_setwp_image();
+ 	if (image == nil) {
+-		say("hakios: sbwp: setwp no image\n");
+ 		return;
+ 	}
+-	if (queue == NULL) {
+-		queue = dispatch_queue_create("hakios.setwp", NULL);
+-	}
+-	dispatch_async(queue, ^{
+-		long variant;
+-
+-		/* no @try here: this file is built without exception support (see the t147 note at
+-		 * sb_config_value). The call is on a background queue and every precondition is checked
+-		 * before it, so a misbehaving SPI cannot reach the main thread. */
+-		for (variant = 1; variant <= 3 && !sb_setwp_done; variant++) {
+-			sb_setwp_try(manager, image, variant);
+-		}
++	/* no ARC here: hold both across the hop to the main queue */
++	((id (*)(id, SEL))objc_msgSend)(manager, sel_registerName("retain"));
++	((id (*)(id, SEL))objc_msgSend)(image, sel_registerName("retain"));
++	dispatch_async(dispatch_get_main_queue(), ^{
++		sb_setwp_once(manager, image, 1);
++		((void (*)(id, SEL))objc_msgSend)(image, sel_registerName("release"));
++		((void (*)(id, SEL))objc_msgSend)(manager, sel_registerName("release"));
+ 	});
+ }
+ 
+@@ -5340,18 +5391,12 @@ hakios_springboard_init(void)
+ 	/* t149: same 300 s point, reflection only (see sb_reflect_probe). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_reflect_probe);
+-	/* t151: five chances to have the wallpaper manager store the test picture, all well before
+-	 * PosterBoard's migration (3400-3900 s); the first successful call stops the rest, and 3000 s
+-	 * also lists the four cache files so the serial says whether it landed. */
+-	{
+-		static const int at[] = { 600, 1200, 1800, 2400, 3000 };
+-		size_t i;
+-
+-		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+-			dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)at[i] * NSEC_PER_SEC),
+-			    dispatch_get_main_queue(), NULL, sb_setwp_call);
+-		}
+-	}
++	/* t152: one call only, on the main queue, 900 s in: t31 died inside the first call of every
++	 * instance, so variants 1/2/3 in a row would only crash more; whether the picture was the
++	 * fault shows in the classes said right before the call. 3000 s still lists the four cache
++	 * files so the serial says whether a real cpbitmap landed. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)900 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_setwp_call);
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)3000 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_setwp_files);
+ 	/* t141: the refresh window is 6450-6600 s and the serial after 6600 s is the refresh

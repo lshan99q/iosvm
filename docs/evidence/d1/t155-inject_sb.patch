@@ -1,0 +1,203 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 78d13e3..020afe2 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3768,55 +3768,21 @@ sb_options_from_manager(id manager)
+ static void
+ sb_options_tune(id options)
+ {
+-	Class cls;
+-	Class value_class;
+-	Class number_class;
++	static const char *const names[] = {
++		"setWallpaperSize:", "setWallpaperScale:", "setImageScale:", "setDeviceType:",
++	};
++	unsigned i;
+ 
++	/* t155: t154 tuned a class-made object through KVC; cb:8729-8732 shows the manager's own
++	 * object is what reaches the setter, and one unknown key would raise inside SpringBoard.
++	 * Record which of them the class answers, set nothing. */
+ 	if (options == nil) {
+ 		return;
+ 	}
+-	cls = object_getClass(options);
+-	value_class = objc_lookUpClass("NSValue");
+-	number_class = objc_lookUpClass("NSNumber");
+-	if (value_class != Nil &&
+-	    class_respondsToSelector(cls, sel_registerName("setWallpaperSize:"))) {
+-		id v = ((id (*)(Class, SEL, CGSize))objc_msgSend)(value_class,
+-		    sel_registerName("valueWithCGSize:"), CGSizeMake(750.0, 1624.0));
+-
+-		if (v != nil) {
+-			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setWallpaperSize:"), v);
+-			say("hakios: sbwp: setwp opts tune wallpaperSize ok\n");
+-		}
+-	}
+-	if (number_class != Nil &&
+-	    class_respondsToSelector(cls, sel_registerName("setWallpaperScale:"))) {
+-		id n = ((id (*)(Class, SEL, double))objc_msgSend)(number_class,
+-		    sel_registerName("numberWithDouble:"), 1.0);
+-
+-		if (n != nil) {
+-			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setWallpaperScale:"), n);
+-			say("hakios: sbwp: setwp opts tune wallpaperScale ok\n");
+-		}
+-	}
+-	if (number_class != Nil &&
+-	    class_respondsToSelector(cls, sel_registerName("setImageScale:"))) {
+-		id n = ((id (*)(Class, SEL, double))objc_msgSend)(number_class,
+-		    sel_registerName("numberWithDouble:"), 1.0);
+-
+-		if (n != nil) {
+-			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setImageScale:"), n);
+-			say("hakios: sbwp: setwp opts tune imageScale ok\n");
+-		}
+-	}
+-	if (number_class != Nil &&
+-	    class_respondsToSelector(cls, sel_registerName("setDeviceType:"))) {
+-		id n = ((id (*)(Class, SEL, long))objc_msgSend)(number_class,
+-		    sel_registerName("numberWithLong:"), 1);
+-
+-		if (n != nil) {
+-			((void (*)(id, SEL, id))objc_msgSend)(options, sel_registerName("setDeviceType:"), n);
+-			say("hakios: sbwp: setwp opts tune deviceType ok\n");
+-		}
++	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++		say("hakios: sbwp: setwp opts tune %s %s\n", names[i],
++		    class_respondsToSelector(object_getClass(options), sel_registerName(names[i])) ?
++		    "yes" : "no");
+ 	}
+ }
+ 
+@@ -3955,14 +3921,65 @@ sb_options_probe(void *context)
+ 	    options != nil ? class_getName(object_getClass(options)) : "nil");
+ }
+ 
++/* t155: what PBUIWallpaperOptions says about its size and scale. The t154 size precheck asked
++ * bestWallpaperSizeForWallpaperSize:wallpaperScale:deviceType:imageScale: and got 0x0 back
++ * (cb:8731) while the object came from the manager itself (cb:8730), so list the properties and
++ * the size/scale methods; the answer says which argument the 900 s call is missing. */
++static void
++sb_opt_props(void *context)
++{
++	Class cls = objc_lookUpClass("PBUIWallpaperOptions");
++	unsigned count = 0;
++
++	(void)context;
++	if (cls == Nil) {
++		say("hakios: sbwp: optprop class absent\n");
++		return;
++	}
++	say("hakios: sbwp: optprop class %s\n", class_getName(cls));
++	{
++		objc_property_t *props = class_copyPropertyList(cls, &count);
++
++		say("hakios: sbwp: optprop count %u\n", count);
++		for (unsigned i = 0; props != NULL && i < count; i++) {
++			say("hakios: sbwp: optprop: %s %s\n", property_getName(props[i]),
++			    property_getAttributes(props[i]));
++		}
++		free(props);
++	}
++	{
++		Method *methods = class_copyMethodList(cls, &count);
++
++		say("hakios: sbwp: optmeth count %u\n", count);
++		for (unsigned i = 0; methods != NULL && i < count; i++) {
++			const char *name = sel_getName(method_getName(methods[i]));
++
++			if (strstr(name, "size") == NULL && strstr(name, "Size") == NULL &&
++			    strstr(name, "scale") == NULL && strstr(name, "Scale") == NULL) {
++				continue;
++			}
++			say("hakios: sbwp: optmeth: -%s %s\n", name,
++			    method_getTypeEncoding(methods[i]));
++		}
++		free(methods);
++	}
++}
++
+ static void
+ sb_setwp_once(id manager, id image, long variants)
+ {
+-	SEL sel = sel_registerName("setWallpaperImage:wallpaperOptions:forVariants:");
+-	id options = sb_options_from_manager(manager);
++	Class manager_class = object_getClass(manager);
++	SEL five = sel_registerName("setWallpaperImage:wallpaperOptions:forVariants:");
++	SEL four = sel_registerName("setWallpaperImage:originalImage:forVariants:options:");
++	SEL eleven = sel_registerName("setWallpaperImage:originalImage:thumbnailData:imageHashData:"
++	    "wallpaperOptions:forVariants:options:wallpaperMode:isMigrating:");
++	id options;
+ 	const char *src = "manager";
+-	BOOL ok;
++	int sent1 = 0, sent2 = 0, sent3 = 0;
++	int ret1 = -1, ret2 = -1, ret3 = -1;
+ 
++	(void)variants;
++	options = sb_options_from_manager(manager);
+ 	if (options == nil) {
+ 		options = sb_options_from_ivars(manager);
+ 		src = "ivar";
+@@ -3975,24 +3992,39 @@ sb_setwp_once(id manager, id image, long variants)
+ 		sb_options_tune(options);
+ 	}
+ 	if (options == nil) {
+-		say("hakios: sbwp: setwp skip no options manager %s\n",
+-		    class_getName(object_getClass(manager)));
++		say("hakios: sbwp: setwp2: no options manager %s\n", class_getName(manager_class));
+ 		return;
+ 	}
+-	if (!sb_options_size(options)) {
+-		say("hakios: sbwp: setwp skip size no src %s cls %s\n", src,
+-		    class_getName(object_getClass(options)));
+-		return;
++	/* (a) five parameters, no size precheck: t154 stopped here (cb:8732). */
++	if (class_respondsToSelector(manager_class, five)) {
++		sent1 = 1;
++		ret1 = (int)((BOOL (*)(id, SEL, id, id, long))objc_msgSend)(manager, five, image,
++		    options, 1);
++	}
++	say("hakios: sbwp: setwp2: try1 sel=%s sent=%d ret=%d src %s\n", sel_getName(five), sent1,
++	    ret1, src);
++	/* (b) four parameters when (a) said no: image and original the same picture, variant 1,
++	 * options as the task asks. */
++	if (sent1 && ret1 != 1 && class_respondsToSelector(manager_class, four)) {
++		sent2 = 1;
++		ret2 = (int)((BOOL (*)(id, SEL, id, id, long, unsigned long))objc_msgSend)(manager,
++		    four, image, image, 1, (unsigned long)(uintptr_t)options);
++	}
++	say("hakios: sbwp: setwp2: try2 sel=%s sent=%d ret=%d\n", sel_getName(four), sent2, ret2);
++	/* (c) eleven parameters only when neither shorter selector was answered, with the t26
++	 * encoding: image, original, nil thumbnail, nil hash, options, variant 1, options 0,
++	 * mode 0, not migrating. */
++	if (!sent1 && !sent2 && class_respondsToSelector(manager_class, eleven)) {
++		sent3 = 1;
++		ret3 = (int)((BOOL (*)(id, SEL, id, id, id, id, id, long, unsigned long, long,
++		    BOOL))objc_msgSend)(manager, eleven, image, image, nil, nil, options, 1,
++		    (unsigned long)0, 0, NO);
+ 	}
+-	say("hakios: sbwp: setwp call manager %s image %s options %s src %s variants %ld\n",
+-	    class_getName(object_getClass(manager)), class_getName(object_getClass(image)),
+-	    class_getName(object_getClass(options)), src, variants);
+-	ok = ((BOOL (*)(id, SEL, id, id, long))objc_msgSend)(manager, sel, image, options, variants);
+-	say("hakios: sbwp: setwp variant %ld ok %d cls %s\n", variants, (int)ok,
+-	    class_getName(object_getClass(manager)));
+-	sb_setwp_done = (ok != NO);
++	say("hakios: sbwp: setwp2: try3 sel=%s sent=%d ret=%d\n", sel_getName(eleven), sent3, ret3);
++	sb_setwp_done = (ret1 == 1 || ret2 == 1 || ret3 == 1);
+ }
+ 
++
+ static void
+ sb_setwp_call(void *context)
+ {
+@@ -5631,6 +5663,9 @@ hakios_springboard_init(void)
+ 	/* t153: same 300 s point, options sources only (see sb_options_probe). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_options_probe);
++	/* t155: same 300 s point, the size/scale property dump (see sb_opt_props). */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_opt_props);
+ 	/* t152: one call only, on the main queue, 900 s in: t31 died inside the first call of every
+ 	 * instance, so variants 1/2/3 in a row would only crash more; whether the picture was the
+ 	 * fault shows in the classes said right before the call. 3000 s still lists the four cache

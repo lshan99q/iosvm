@@ -1,0 +1,73 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 46c7e69..fdff7de 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3452,8 +3452,12 @@ sb_wp_handover(void *context)
+ 	    sel_registerName("setConfiguration:withAnimationSettings:"))) {
+ 		((void (*)(id, SEL, id, id))objc_msgSend)(remote,
+ 		    sel_registerName("setConfiguration:withAnimationSettings:"), lock_config, nil);
+-		say("hakios: sbwp: wp: remote setConfiguration handed\n");
+-		sb_remote_dump(remote);
++		/* t141: the remote ivar/selector/view dump used to run here and was the last thing in
++		 * the 6600-7200 s window that could still flood the serial. The conclusion -- which
++		 * class took the configuration -- is the say; sb_wpvc_force_load (6200 s) is where the
++		 * remote controller is looked at now. */
++		say("hakios: sbwp: wp: remote %s setConfiguration handed\n",
++		    class_getName(object_getClass(remote)));
+ 	}
+ 	if (remote != nil &&
+ 	    class_respondsToSelector(object_getClass(remote), sel_registerName("scenesForBacklightSession"))) {
+@@ -4109,17 +4113,32 @@ hakios_springboard_init(void)
+ 	 * the remote controller after it. */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)5900 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_prs_classes);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6700 * NSEC_PER_SEC),
++	/* t141: the refresh window is 6450-6600 s and the serial after 6600 s is the refresh
++	 * conclusions only. The prewarm look that rode behind the handover (6700 s in t140) moves in
++	 * front of it at 6200 s, so nothing but the four refreshes is queued past 6600 s. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6200 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_wpvc_force_load);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6600 * NSEC_PER_SEC),
++	/* t141: the handover is the last action before the refresh burst. It no longer dumps the
++	 * remote controller (t140 did that at 6600 s, right where the serial has to stay readable). */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6400 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_wp_handover);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6650 * NSEC_PER_SEC),
+-	    dispatch_get_main_queue(), NULL, sb_snapshot_refresh);
+-	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6700 * NSEC_PER_SEC),
+-	    dispatch_get_main_queue(), NULL, sb_snapshot_refresh);
+-	/* t127: aq's PosterBoard took ninety minutes to reach the poster, far past every look above. */
++	/* t141: four asks, fifty seconds apart, so the completion of one is on the serial before the
++	 * next goes out; all four land inside 6450-6600 s and the window after them only carries the
++	 * refresh conclusions and whatever hud line PosterBoard prints by itself. */
+ 	{
+-		static const int at[] = { 6000, 6600 };
++		static const int at[] = { 6450, 6500, 6550, 6600 };
++		size_t i;
++
++		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
++			dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)at[i] * NSEC_PER_SEC),
++			    dispatch_get_main_queue(), NULL, sb_snapshot_refresh);
++		}
++	}
++	/* t127: aq's PosterBoard took ninety minutes to reach the poster, far past every look above.
++	 * t141: only the 6000 s look stays; its 6600/6660/6720/6750 s twin is exactly what made the
++	 * serial unreadable in the window the refresh burst now owns. */
++	{
++		static const int at[] = { 6000 };
+ 		size_t i;
+ 
+ 		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+@@ -4139,9 +4158,10 @@ hakios_springboard_init(void)
+ 	    dispatch_get_main_queue(), NULL, sb_poster_remote_probe);
+ 	/* t121: the poster's arrival is not on a fixed clock (an: SpringBoard booted 10:13:57 and
+ 	 * had its poster at 11:01:48), so the layer look goes out every five minutes and the frame
+-	 * that carries a filled secure window says when it happened by itself. */
++	 * that carries a filled secure window says when it happened by itself. t141: the 6600/6900 s
++	 * points are gone, the last look is at 6300 s. */
+ 	{
+-		static const int at[] = { 2400, 2700, 3000, 3300, 3600, 3900, 4200, 4500, 4800, 5100, 5400, 5700, 6000, 6300, 6600, 6900 };
++		static const int at[] = { 2400, 2700, 3000, 3300, 3600, 3900, 4200, 4500, 4800, 5100, 5400, 5700, 6000, 6300 };
+ 		size_t i;
+ 
+ 		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {

@@ -1,0 +1,462 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index fdff7de..2c185cf 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -3313,17 +3313,63 @@ sb_dump_ivars(const char *where, id object)
+ 	free(list);
+ }
+ 
+-/* t140: the home wallpaper is a snapshot the poster side never produces; ask the poster service
+- * for it directly, through the controller's own PRSService instance. */
++/* t142: whatever an NSString says, or the class behind it when there is no string to ask. */
++static const char *
++sb_probe_text(id object)
++{
++	const char *text;
++
++	if (object == nil) {
++		return "nil";
++	}
++	if (class_respondsToSelector(object_getClass(object), sel_registerName("UTF8String"))) {
++		text = ((const char *(*)(id, SEL))objc_msgSend)(object, sel_registerName("UTF8String"));
++		if (text != NULL) {
++			return text;
++		}
++	}
++	return class_getName(object_getClass(object));
++}
++
++/* t142: the refresh completion used to say only the class of the error (t141, :3348-3351). The
++ * domain and the code are what tell a store with nothing in it (ENOENT) from a service that
++ * refuses the configuration. */
++static void
++sb_probe_error(id error, const char *tag)
++{
++	id domain, description, userinfo;
++	long code;
++
++	if (error == nil) {
++		say("hakios: sbwp: err: %s nil\n", tag);
++		return;
++	}
++	domain = ((id (*)(id, SEL))objc_msgSend)(error, sel_registerName("domain"));
++	description = ((id (*)(id, SEL))objc_msgSend)(error, sel_registerName("localizedDescription"));
++	userinfo = ((id (*)(id, SEL))objc_msgSend)(error, sel_registerName("userInfo"));
++	code = (long)((long (*)(id, SEL))objc_msgSend)(error, sel_registerName("code"));
++	say("hakios: sbwp: err: %s %s domain %s code %ld desc %.400s\n",
++	    tag, class_getName(object_getClass(error)), sb_probe_text(domain), code,
++	    sb_probe_text(description));
++	if (userinfo != nil) {
++		say("hakios: sbwp: err: %s userInfo %.600s\n", tag, sb_probe_text(userinfo));
++	}
++}
++
++/* t142: two asks, each after the handover has put a home configuration in the ivar: the lock
++ * configuration at 6450 s as the control, the home one at 6500 s. The controller, the service and
++ * the configuration are re-read at every ask (the ivars change), and the completion now says what
++ * the poster service refused with instead of only the class of the error. */
+ static void
+ sb_snapshot_refresh(void *context)
+ {
++	int use_home = (int)(intptr_t)context;
+ 	Class controller_class = objc_lookUpClass("SBWallpaperController");
+-	id controller = nil, service = nil, lock_config = nil;
++	id controller = nil, service = nil, config = nil;
+ 	SEL refresh = sel_registerName("refreshSnapshotForPosterConfiguration:completion:");
+-	Ivar service_ivar, lock_ivar;
++	Ivar service_ivar, config_ivar;
++	const char *which = use_home ? "home" : "lock";
+ 
+-	(void)context;
+ 	if (controller_class == Nil ||
+ 	    !class_respondsToSelector(object_getClass(controller_class), sel_registerName("sharedInstance"))) {
+ 		return;
+@@ -3333,26 +3379,333 @@ sb_snapshot_refresh(void *context)
+ 		return;
+ 	}
+ 	service_ivar = class_getInstanceVariable(controller_class, "_posterBoardService");
+-	lock_ivar = class_getInstanceVariable(controller_class, "_activeLockScreenPosterConfiguration");
++	config_ivar = class_getInstanceVariable(controller_class,
++	    use_home ? "_activeHomeScreenPosterConfiguration" : "_activeLockScreenPosterConfiguration");
+ 	service = service_ivar != NULL ? object_getIvar(controller, service_ivar) : nil;
+-	lock_config = lock_ivar != NULL ? object_getIvar(controller, lock_ivar) : nil;
+-	say("hakios: sbwp: snap: service %s config %s\n",
++	config = config_ivar != NULL ? object_getIvar(controller, config_ivar) : nil;
++	say("hakios: sbwp: snap: %s service %s config %s\n", which,
+ 	    service != nil ? class_getName(object_getClass(service)) : "nil",
+-	    lock_config != nil ? class_getName(object_getClass(lock_config)) : "nil");
+-	if (service == nil || lock_config == nil ||
++	    config != nil ? class_getName(object_getClass(config)) : "nil");
++	if (service == nil || config == nil ||
+ 	    !class_respondsToSelector(object_getClass(service), refresh)) {
+-		say("hakios: sbwp: snap: cannot ask\n");
++		say("hakios: sbwp: snap: %s cannot ask\n", which);
+ 		return;
+ 	}
+ 	{
+ 		void (^completion)(id) = ^(id error) {
+-			say("hakios: sbwp: snap: refreshed, error %s\n",
+-			    error != nil ? class_getName(object_getClass(error)) : "nil");
++			sb_probe_error(error, which);
++		};
++		void *raw = *(void **)&completion;
++
++		say("hakios: sbwp: snap: %s refresh asked\n", which);
++		((void (*)(id, SEL, id, void *))objc_msgSend)(service, refresh, config, raw);
++	}
++}
++
++/* t142: the two replica protocols and the four poster view controller classes were absent from
++ * every class dump because those dumps name their classes by hand (t141 :3004-3006, :3059,
++ * :3481-3486). Ask the runtime: class_copyMethodList says whether a class exists at all and what
++ * its whole instance surface is, protocol_copyMethodDescriptionList gives the real signatures. */
++static void
++sb_dump_protocol_methods(const char *name)
++{
++	Protocol *protocol = objc_getProtocol(name);
++	struct objc_method_description *required_list = NULL;
++	struct objc_method_description *optional_list = NULL;
++	unsigned required = 0, optional = 0, i;
++
++	if (protocol == NULL) {
++		say("hakios: sbwp: proto %s: absent\n", name);
++		return;
++	}
++	required_list = protocol_copyMethodDescriptionList(protocol, YES, YES, &required);
++	optional_list = protocol_copyMethodDescriptionList(protocol, NO, YES, &optional);
++	say("hakios: sbwp: proto %s required %u optional %u\n", name, required, optional);
++	for (i = 0; i < required && required_list != NULL; i++) {
++		say("hakios: sbwp: proto %s -%s %s\n", name,
++		    sel_getName(required_list[i].name),
++		    required_list[i].types != NULL ? required_list[i].types : "?");
++	}
++	for (i = 0; i < optional && optional_list != NULL; i++) {
++		say("hakios: sbwp: proto %s opt -%s %s\n", name,
++		    sel_getName(optional_list[i].name),
++		    optional_list[i].types != NULL ? optional_list[i].types : "?");
++	}
++	free(required_list);
++	free(optional_list);
++}
++
++static void
++sb_probe_snapshot_classes(void *context)
++{
++	static const char *const classes[] = {
++		"PBUIPosterWallpaperViewController", "PBUIPosterHomeViewController",
++		"PBUIPosterLockViewController", "PBUIPosterVariantViewController",
++		"PBUIPosterPortalImageProvider", "PBUIPosterActiveVariantImageProvider",
++		"PBUIPosterWindowScene", "PBUIPosterWallpaperRemoteViewController",
++	};
++	unsigned i;
++
++	(void)context;
++	for (i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
++		sb_dump_class_methods(classes[i], 260);
++	}
++	sb_dump_protocol_methods("PBUIPosterReplicaPortalProviding");
++	sb_dump_protocol_methods("PBUIPosterReplicaSnapshotProviding");
++}
++
++/* t142: one object on the poster side. Only the ivars that would name a store, a provider or a
++ * configuration are printed (the rest is the object's own business), then the selectors around
++ * snapshots, then the entry points PaperBoardUI's strings name. */
++static void
++sb_probe_poster_object(const char *label, id object)
++{
++	static const char *const selectors[] = {
++		"snapshotURL", "_snapshotURL", "snapshotDirectory", "snapshotSource",
++		"portalImageProvider", "activeVariantProvider", "processedImage",
++		"wallpaperView", "posterConfiguration", "configuration", "traitCollection",
++	};
++	static const char *const entries[] = {
++		"snapshotIfNeeded", "_scheduleSnapshotIfNeeded",
++	};
++	static const char *const ask[] = {
++		"performSnapshotOnQueue:completion:", "_performSnapshotOnQueue:completion:",
++	};
++	Class cls;
++	Ivar *list;
++	unsigned count = 0, i;
++
++	if (object == nil) {
++		say("hakios: sbwp: poster %s: (nil)\n", label);
++		return;
++	}
++	cls = object_getClass(object);
++	say("hakios: sbwp: poster %s %s\n", label, class_getName(cls));
++	list = class_copyIvarList(cls, &count);
++	for (i = 0; list != NULL && i < count && i < 160; i++) {
++		const char *name = ivar_getName(list[i]);
++		const char *type = ivar_getTypeEncoding(list[i]);
++
++		if (name == NULL) {
++			continue;
++		}
++		if (strstr(name, "snapshot") == NULL && strstr(name, "Snapshot") == NULL &&
++		    strstr(name, "portal") == NULL && strstr(name, "Portal") == NULL &&
++		    strstr(name, "provider") == NULL && strstr(name, "Provider") == NULL &&
++		    strstr(name, "URL") == NULL && strstr(name, "url") == NULL &&
++		    strstr(name, "config") == NULL && strstr(name, "Config") == NULL &&
++		    strstr(name, "variant") == NULL && strstr(name, "Variant") == NULL) {
++			continue;
++		}
++		if (type != NULL && type[0] == '@') {
++			id held = object_getIvar(object, list[i]);
++
++			say("hakios: sbwp: poster %s: %s %s = %s\n", label, name, type,
++			    held != nil ? class_getName(object_getClass(held)) : "nil");
++		} else {
++			say("hakios: sbwp: poster %s: %s %s\n", label, name,
++			    type != NULL ? type : "?");
++		}
++	}
++	free(list);
++	for (i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
++		SEL sel = sel_registerName(selectors[i]);
++
++		if (!class_respondsToSelector(cls, sel)) {
++			continue;
++		}
++		{
++			id value = ((id (*)(id, SEL))objc_msgSend)(object, sel);
++
++			say("hakios: sbwp: poster %s: -%s %s\n", label, selectors[i],
++			    sb_probe_text(value));
++		}
++	}
++	for (i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
++		SEL sel = sel_registerName(entries[i]);
++
++		if (!class_respondsToSelector(cls, sel)) {
++			continue;
++		}
++		say("hakios: sbwp: poster %s: calling -%s\n", label, entries[i]);
++		((void (*)(id, SEL))objc_msgSend)(object, sel);
++		say("hakios: sbwp: poster %s: -%s returned\n", label, entries[i]);
++	}
++	for (i = 0; i < sizeof(ask) / sizeof(ask[0]); i++) {
++		SEL sel = sel_registerName(ask[i]);
++
++		if (!class_respondsToSelector(cls, sel)) {
++			continue;
++		}
++		{
++			/* the block takes no argument on purpose: an extra one the callee passes is
++			 * ignored, while reading one that was never passed would be a bad pointer */
++			void (^completion)(void) = ^{
++				say("hakios: sbwp: poster %s: -%s completion\n", label, ask[i]);
++			};
++			void *raw = *(void **)&completion;
++
++			say("hakios: sbwp: poster %s: calling -%s\n", label, ask[i]);
++			((void (*)(id, SEL, void *, void *))objc_msgSend)(object, sel,
++			    (void *)dispatch_get_main_queue(), raw);
++		}
++	}
++}
++
++/* t142: the store route said ENOENT (bg:397628/397633), so go below it: the remote poster
++ * controller's _viewController and its child controllers are where the poster's provider and
++ * its store URL live. Nothing before t142 looked below that ivar. */
++static void
++sb_poster_vc_dump(void *context)
++{
++	Class controller_class = objc_lookUpClass("SBWallpaperController");
++	Class remote_class;
++	id controller = nil, lock_config = nil, home_config = nil, remote = nil, vc = nil;
++	Ivar lock_ivar, home_ivar, remote_ivar, vc_ivar;
++	int budget = 40;
++
++	(void)context;
++	if (controller_class == Nil ||
++	    !class_respondsToSelector(object_getClass(controller_class), sel_registerName("sharedInstance"))) {
++		return;
++	}
++	controller = ((id (*)(Class, SEL))objc_msgSend)(controller_class, sel_registerName("sharedInstance"));
++	if (controller == nil) {
++		return;
++	}
++	lock_ivar = class_getInstanceVariable(controller_class, "_activeLockScreenPosterConfiguration");
++	home_ivar = class_getInstanceVariable(controller_class, "_activeHomeScreenPosterConfiguration");
++	remote_ivar = class_getInstanceVariable(controller_class, "_rootWallpaperViewController");
++	lock_config = lock_ivar != NULL ? object_getIvar(controller, lock_ivar) : nil;
++	home_config = home_ivar != NULL ? object_getIvar(controller, home_ivar) : nil;
++	remote = remote_ivar != NULL ? object_getIvar(controller, remote_ivar) : nil;
++	say("hakios: sbwp: vc: configs lock %s home %s remote %s\n",
++	    lock_config != nil ? class_getName(object_getClass(lock_config)) : "nil",
++	    home_config != nil ? class_getName(object_getClass(home_config)) : "nil",
++	    remote != nil ? class_getName(object_getClass(remote)) : "nil");
++	if (lock_config != nil &&
++	    class_respondsToSelector(object_getClass(lock_config), sel_registerName("assetDirectory"))) {
++		id directory = ((id (*)(id, SEL))objc_msgSend)(lock_config,
++		    sel_registerName("assetDirectory"));
++
++		say("hakios: sbwp: vc: lock assetDirectory %s\n", sb_probe_text(directory));
++	}
++	if (home_config != nil &&
++	    class_respondsToSelector(object_getClass(home_config), sel_registerName("assetDirectory"))) {
++		id directory = ((id (*)(id, SEL))objc_msgSend)(home_config,
++		    sel_registerName("assetDirectory"));
++
++		say("hakios: sbwp: vc: home assetDirectory %s\n", sb_probe_text(directory));
++	}
++	if (remote == nil) {
++		return;
++	}
++	sb_probe_poster_object("remote", remote);
++	remote_class = object_getClass(remote);
++	vc_ivar = class_getInstanceVariable(remote_class, "_viewController");
++	vc = vc_ivar != NULL ? object_getIvar(remote, vc_ivar) : nil;
++	say("hakios: sbwp: vc: remote._viewController %s\n",
++	    vc != nil ? class_getName(object_getClass(vc)) : "nil");
++	if (vc == nil) {
++		return;
++	}
++	sb_probe_poster_object("wallpaperVC", vc);
++	sb_dump_ivars("posterWallpaperVC", vc);
++	{
++		id children = ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("childViewControllers"));
++		unsigned long n = children != nil
++		    ? ((unsigned long (*)(id, SEL))objc_msgSend)(children, sel_registerName("count")) : 0;
++		unsigned long i;
++
++		say("hakios: sbwp: vc: childViewControllers %lu\n", n);
++		for (i = 0; i < n && i < 8; i++) {
++			id child = ((id (*)(id, SEL, unsigned long))objc_msgSend)(children,
++			    sel_registerName("objectAtIndex:"), i);
++			char label[32];
++
++			snprintf(label, sizeof(label), "child%lu", i);
++			sb_probe_poster_object(label, child);
++			sb_dump_ivars(label, child);
++			{
++				id grandchildren = ((id (*)(id, SEL))objc_msgSend)(child,
++				    sel_registerName("childViewControllers"));
++				unsigned long m = grandchildren != nil
++				    ? ((unsigned long (*)(id, SEL))objc_msgSend)(grandchildren,
++				        sel_registerName("count")) : 0;
++				unsigned long j;
++
++				say("hakios: sbwp: vc: %s children %lu\n", label, m);
++				for (j = 0; j < m && j < 6; j++) {
++					id grandchild = ((id (*)(id, SEL, unsigned long))objc_msgSend)(
++					    grandchildren, sel_registerName("objectAtIndex:"), j);
++					char glabel[40];
++
++					snprintf(glabel, sizeof(glabel), "child%lu.%lu", i, j);
++					sb_probe_poster_object(glabel, grandchild);
++				}
++			}
++		}
++	}
++	sb_dump_view(((id (*)(id, SEL))objc_msgSend)(remote, sel_registerName("view")), 0,
++	    &budget, "vc: remote view");
++}
++
++/* t142: the store route fails (ENOENT), so ask the wallpaper controller to snapshot the poster
++ * scene itself -- PaperBoardUI's own entry (the selector SBWallpaperController answers, bg
++ * 205502), which is the way around a store that has nothing to read. */
++static void
++sb_snapshot_scene(void *context)
++{
++	Class controller_class = objc_lookUpClass("SBWallpaperController");
++	SEL snapshot = sel_registerName("_snapshotScene:withOptions:traitCollection:completion:");
++	id controller = nil, remote = nil, scene = nil, traits = nil;
++
++	(void)context;
++	if (controller_class == Nil ||
++	    !class_respondsToSelector(object_getClass(controller_class), sel_registerName("sharedInstance"))) {
++		return;
++	}
++	controller = ((id (*)(Class, SEL))objc_msgSend)(controller_class, sel_registerName("sharedInstance"));
++	if (controller == nil ||
++	    !class_respondsToSelector(object_getClass(controller), snapshot)) {
++		say("hakios: sbwp: scene: controller cannot snapshot\n");
++		return;
++	}
++	{
++		Ivar remote_ivar = class_getInstanceVariable(controller_class, "_rootWallpaperViewController");
++
++		remote = remote_ivar != NULL ? object_getIvar(controller, remote_ivar) : nil;
++	}
++	if (remote != nil &&
++	    class_respondsToSelector(object_getClass(remote), sel_registerName("scenesForBacklightSession"))) {
++		id scenes = ((id (*)(id, SEL))objc_msgSend)(remote,
++		    sel_registerName("scenesForBacklightSession"));
++
++		if (scenes != nil &&
++		    ((unsigned long (*)(id, SEL))objc_msgSend)(scenes, sel_registerName("count")) > 0) {
++			scene = ((id (*)(id, SEL, unsigned long))objc_msgSend)(scenes,
++			    sel_registerName("objectAtIndex:"), 0);
++		}
++	}
++	if (scene == nil) {
++		say("hakios: sbwp: scene: no scene\n");
++		return;
++	}
++	if (class_respondsToSelector(object_getClass(scene), sel_registerName("traitCollection"))) {
++		traits = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("traitCollection"));
++	}
++	{
++		/* no argument: see the note on the performSnapshot block above */
++		void (^completion)(void) = ^{
++			say("hakios: sbwp: scene: snapshot completion\n");
+ 		};
+ 		void *raw = *(void **)&completion;
+ 
+-		say("hakios: sbwp: snap: refresh asked\n");
+-		((void (*)(id, SEL, id, void *))objc_msgSend)(service, refresh, lock_config, raw);
++		say("hakios: sbwp: scene: asking %s options nil traits %s\n",
++		    class_getName(object_getClass(scene)),
++		    traits != nil ? class_getName(object_getClass(traits)) : "nil");
++		((void (*)(id, SEL, id, id, id, void *))objc_msgSend)(controller, snapshot,
++		    scene, nil, traits, raw);
+ 	}
+ }
+ 
+@@ -4115,25 +4468,31 @@ hakios_springboard_init(void)
+ 	    dispatch_get_main_queue(), NULL, sb_prs_classes);
+ 	/* t141: the refresh window is 6450-6600 s and the serial after 6600 s is the refresh
+ 	 * conclusions only. The prewarm look that rode behind the handover (6700 s in t140) moves in
+-	 * front of it at 6200 s, so nothing but the four refreshes is queued past 6600 s. */
++	 * front of it at 6200 s; t142 adds only the two asks and the scene snapshot below, all of
++	 * them before 6600 s. */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6200 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_wpvc_force_load);
++	/* t142: ask the runtime about the poster classes and the two replica protocols before the
++	 * handover; the older dumps (5900/6000 s) only named a fixed list of classes, which is why
++	 * PBUIPosterHomeViewController and the replica protocols never showed up in a serial. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6250 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_probe_snapshot_classes);
+ 	/* t141: the handover is the last action before the refresh burst. It no longer dumps the
+ 	 * remote controller (t140 did that at 6600 s, right where the serial has to stay readable). */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6400 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_wp_handover);
+-	/* t141: four asks, fifty seconds apart, so the completion of one is on the serial before the
+-	 * next goes out; all four land inside 6450-6600 s and the window after them only carries the
+-	 * refresh conclusions and whatever hud line PosterBoard prints by itself. */
+-	{
+-		static const int at[] = { 6450, 6500, 6550, 6600 };
+-		size_t i;
+-
+-		for (i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+-			dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)at[i] * NSEC_PER_SEC),
+-			    dispatch_get_main_queue(), NULL, sb_snapshot_refresh);
+-		}
+-	}
++	/* t142: after the handover there is a home configuration in the ivar, so look below the
++	 * remote controller once (6435 s, after the 6420 s apply), ask the lock configuration as the
++	 * control (6450 s), ask the home one (6500 s), and try the scene snapshot that bypasses the
++	 * store (6550 s). All four are inside 6400-6600 s; nothing of this probe runs past 6600 s. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6435 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_poster_vc_dump);
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6450 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), (void *)(intptr_t)0, sb_snapshot_refresh);
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6500 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), (void *)(intptr_t)1, sb_snapshot_refresh);
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6550 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_snapshot_scene);
+ 	/* t127: aq's PosterBoard took ninety minutes to reach the poster, far past every look above.
+ 	 * t141: only the 6000 s look stays; its 6600/6660/6720/6750 s twin is exactly what made the
+ 	 * serial unreadable in the window the refresh burst now owns. */

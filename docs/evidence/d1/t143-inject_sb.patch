@@ -1,0 +1,89 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 2c185cf..789bf72 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -38,6 +38,7 @@
+ #include <CoreGraphics/CoreGraphics.h>
+ #include <dispatch/dispatch.h>
+ #include <dlfcn.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <mach/mach_time.h>
+ #include <notify.h>
+@@ -3356,6 +3357,64 @@ sb_probe_error(id error, const char *tag)
+ 	}
+ }
+ 
++/* t143: the offline examination of the t142 image (t14, d1d2bp-offline-store.md:§E4-1) found the
++ * store directories missing -- /var/mobile/Library/PosterBoard, PosterBoard/Extensions and
++ * Wallpaper were neither in the data volume's template (var.skel has no line for them) nor made
++ * at run time, so a snapshot had nowhere to go. The template now makes them (var.skel:122-124);
++ * this makes the same three when /private/var comes from somewhere else, before the poster
++ * service is asked for a configuration (6300 s) and before the refresh burst, and does nothing
++ * when they are already there. createDirectoryAtPath:withIntermediateDirectories: is idempotent
++ * and the attributes are the ones the template uses, 0755 and 501:501. */
++static void
++sb_mkstore(void *context)
++{
++	static const char *const paths[] = {
++		"/private/var/mobile/Library/PosterBoard",
++		"/private/var/mobile/Library/PosterBoard/Extensions",
++		"/private/var/mobile/Library/Wallpaper",
++	};
++	static const char *const key_names[] = { "NSFilePosixPermissions", "NSFileOwnerAccountID",
++		"NSFileGroupOwnerAccountID" };
++	Class manager_class = objc_lookUpClass("NSFileManager");
++	Class string_class = objc_lookUpClass("NSString");
++	Class dict_class = objc_lookUpClass("NSDictionary");
++	Class number_class = objc_lookUpClass("NSNumber");
++	SEL create = sel_registerName("createDirectoryAtPath:withIntermediateDirectories:attributes:error:");
++	id manager, attrs, keys[3], values[3];
++	size_t i;
++
++	(void)context;
++	if (manager_class == Nil || string_class == Nil || dict_class == Nil || number_class == Nil) {
++		say("hakios: sbwp: mkstore no NSFileManager\n");
++		return;
++	}
++	manager = ((id (*)(id, SEL))objc_msgSend)((id)manager_class, sel_registerName("defaultManager"));
++	values[0] = ((id (*)(id, SEL, unsigned int))objc_msgSend)((id)number_class,
++	    sel_registerName("numberWithUnsignedInt:"), 0755);
++	values[1] = ((id (*)(id, SEL, int))objc_msgSend)((id)number_class,
++	    sel_registerName("numberWithInt:"), 501);
++	values[2] = values[1];
++	for (i = 0; i < 3; i++) {
++		keys[i] = ((id (*)(id, SEL, const char *))objc_msgSend)((id)string_class,
++		    sel_registerName("stringWithUTF8String:"), key_names[i]);
++	}
++	attrs = ((id (*)(id, SEL, id *, id *, unsigned long))objc_msgSend)((id)dict_class,
++	    sel_registerName("dictionaryWithObjects:forKeys:count:"), values, keys, 3);
++	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
++		id path = ((id (*)(id, SEL, const char *))objc_msgSend)((id)string_class,
++		    sel_registerName("stringWithUTF8String:"), paths[i]);
++		BOOL ok = NO;
++		int saved = 0;
++
++		if (path != nil && attrs != nil) {
++			ok = ((BOOL (*)(id, SEL, id, BOOL, id, id *))objc_msgSend)(manager, create, path, YES,
++			    attrs, NULL);
++			saved = errno;
++		}
++		say("hakios: sbwp: mkstore %s %s %d\n", paths[i], ok ? "ok" : "err", ok ? 0 : saved);
++	}
++}
++
+ /* t142: two asks, each after the handover has put a home configuration in the ivar: the lock
+  * configuration at 6450 s as the control, the home one at 6500 s. The controller, the service and
+  * the configuration are re-read at every ask (the ivars change), and the completion now says what
+@@ -4466,6 +4525,11 @@ hakios_springboard_init(void)
+ 	 * the remote controller after it. */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)5900 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_prs_classes);
++	/* t143: before the store is asked for a configuration (6300 s), make the three directories a
++	 * snapshot lives in when the data volume's template did not (t14 §E4-1); it is the fallback
++	 * for var.skel:122-124, not a replacement. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6100 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_mkstore);
+ 	/* t141: the refresh window is 6450-6600 s and the serial after 6600 s is the refresh
+ 	 * conclusions only. The prewarm look that rode behind the handover (6700 s in t140) moves in
+ 	 * front of it at 6200 s; t142 adds only the two asks and the scene snapshot below, all of

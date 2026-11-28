@@ -1,0 +1,106 @@
+diff --git a/userland/src/inject_pb.c b/userland/src/inject_pb.c
+index a1b616f..6ebc212 100644
+--- a/userland/src/inject_pb.c
++++ b/userland/src/inject_pb.c
+@@ -811,6 +811,19 @@ wp_mgr_migrate(void *context)
+ 	if (manager == nil) {
+ 		return;
+ 	}
++	{
++		SEL migrate = sel_registerName("performMigrationWithFailureHandler:");
++		Class cls = object_getClass(manager);
++
++		/* t148: the second construction (2 built) left a dispatch queue in wp_mgr_instance, and
++		 * the unguarded send killed PosterBoard at 4578 s (bx serial 357918,
++		 * -[OS_dispatch_queue_serial performMigrationWithFailureHandler:]). Only send it to an
++		 * object whose class actually answers it; otherwise skip without a message. */
++		if (!class_respondsToSelector(cls, migrate)) {
++			say("hakios: pb: manager: migrate skip (class %s)\n", class_getName(cls));
++			return;
++		}
++	}
+ 	((void (*)(id, SEL, id))objc_msgSend)(manager,
+ 	    sel_registerName("performMigrationWithFailureHandler:"), (id) ^{
+ 		say("hakios: pb: manager: migration failed\n");
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 186bcfd..403e61f 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -4234,6 +4234,67 @@ sb_inject_wallpaper(void *context)
+ /* t142: the store route fails (ENOENT), so ask the wallpaper controller to snapshot the poster
+  * scene itself -- PaperBoardUI's own entry (the selector SBWallpaperController answers, bg
+  * 205502), which is the way around a store that has nothing to read. */
++/* t148: E6-1's PNG-as-cpbitmap was rejected by the CPBitmap reader (bx serial 218213-218224,
++ * CPBitmapErrorDomain code 6 "Invalid magic in trailer"), and the ImageIO fallback never ran. A
++ * real cpbitmap needs the writer that produced those files, so before any content attempt this
++ * probe says what the runtime offers -- the AppSupport writer symbol, the UIImage load of the test
++ * picture, and which classes answer the wallpaper-image setters -- and calls none of them. */
++static void
++sb_content_probe(void *context)
++{
++	Class image_class = objc_lookUpClass("UIImage");
++	Class string_class = objc_lookUpClass("NSString");
++	id path = nil, image = nil;
++
++	(void)context;
++	say("hakios: sbwp: content: probe in\n");
++	{
++		void *write = dlsym(RTLD_DEFAULT, "CPBitmapWriteImagesToPath");
++		void *write_u = dlsym(RTLD_DEFAULT, "_CPBitmapWriteImagesToPath");
++		void *create = dlsym(RTLD_DEFAULT, "CPBitmapCreateImagesFromData");
++
++		say("hakios: sbwp: content: sym write %p _write %p create %p\n", write, write_u, create);
++	}
++	if (string_class != Nil) {
++		path = ((id (*)(Class, SEL, const char *))objc_msgSend)(string_class,
++		    sel_registerName("stringWithUTF8String:"), "/redwood/var/d1test.png");
++	}
++	if (image_class != Nil && path != nil) {
++		image = ((id (*)(Class, SEL, id))objc_msgSend)(image_class,
++		    sel_registerName("imageWithContentsOfFile:"), path);
++	}
++	if (image != nil) {
++		CGSize size = ((CGSize (*)(id, SEL))objc_msgSend)(image, sel_registerName("size"));
++
++		say("hakios: sbwp: content: image %s %.0fx%.0f\n",
++		    class_getName(object_getClass(image)), size.width, size.height);
++	} else {
++		say("hakios: sbwp: content: image nil\n");
++	}
++	{
++		Class controller_class = objc_lookUpClass("SBWallpaperController");
++		Class config_class = objc_lookUpClass("PBUIWallpaperConfigurationManager");
++		Class cache_class = objc_lookUpClass("PBUIWallpaperCache");
++		static const char *const setters[] = {
++			"setWallpaperImage:forVariant:wallpaperMode:",
++			"setWallpaperImage:",
++			"setWallpaperOriginalImage:forVariant:wallpaperMode:",
++		};
++		unsigned i;
++
++		say("hakios: sbwp: content: classes controller %d cfg %d cache %d\n",
++		    controller_class != Nil, config_class != Nil, cache_class != Nil);
++		for (i = 0; i < sizeof(setters) / sizeof(setters[0]); i++) {
++			SEL sel = sel_registerName(setters[i]);
++
++			say("hakios: sbwp: content: -%s sb %d cfg %d\n", setters[i],
++			    controller_class != Nil && class_getInstanceMethod(controller_class, sel) != NULL,
++			    config_class != Nil && class_getInstanceMethod(config_class, sel) != NULL);
++		}
++	}
++	say("hakios: sbwp: content: probe done (no setter called)\n");
++}
++
+ static void
+ sb_snapshot_scene(void *context)
+ {
+@@ -5089,6 +5150,9 @@ hakios_springboard_init(void)
+ 	 * for var.skel:122-124, not a replacement. */
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6100 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_mkstore);
++	/* t148: what the runtime offers for a real cpbitmap (see sb_content_probe) */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)300 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_content_probe);
+ 	/* t146: the wallpaper cache files get their picture long before the migration (PosterBoard
+ 	 * starts it around 3400-3900 s, bp serial 280963-281284). The first write is at
+ 	 * 500 s, then again at 1500/2500/3000 s -- SpringBoard saves its empty 203 byte placeholder

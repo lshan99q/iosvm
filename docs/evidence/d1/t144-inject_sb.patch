@@ -1,0 +1,338 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 789bf72..d8d38e9 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -40,6 +40,7 @@
+ #include <dlfcn.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <mach/mach.h>
+ #include <mach/mach_time.h>
+ #include <notify.h>
+ #include <objc/message.h>
+@@ -54,6 +55,10 @@
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+ 
++/* t144: UIKit's PNG encoder, called for the scene snapshot without pulling in UIKit's headers
++ * (the class lookups below do the rest of the work at run time). */
++extern id UIImagePNGRepresentation(id image);
++
+ /* where what is said goes: the standard error, which is the console's for SpringBoard (an application's is nowhere) */
+ static int say_fd = 2;
+ 
+@@ -3357,6 +3362,59 @@ sb_probe_error(id error, const char *tag)
+ 	}
+ }
+ 
++/* t144: /redwood/var/d1test.png is the picture the secure window gets at 6600 s; the same bytes
++ * are put into the Wallpaper directory at 6100 s to show it writable. Plain read/write so a
++ * failure only costs its errno and never stops the boot. */
++static void
++sb_copy_test_png(void)
++{
++	static const char *const source = "/redwood/var/d1test.png";
++	static const char *const target = "/private/var/mobile/Library/Wallpaper/d1test.png";
++	char buffer[16384];
++	int in, out, failure = 0;
++	ssize_t got;
++	size_t total = 0;
++
++	in = open(source, O_RDONLY);
++	if (in < 0) {
++		say("hakios: sbwp: mkstore copy d1test.png err %d (open)\n", errno);
++		return;
++	}
++	out = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	if (out < 0) {
++		say("hakios: sbwp: mkstore copy d1test.png err %d (create)\n", errno);
++		close(in);
++		return;
++	}
++	while ((got = read(in, buffer, sizeof(buffer))) > 0) {
++		ssize_t done = 0;
++
++		while (done < got) {
++			ssize_t written = write(out, buffer + done, (size_t)(got - done));
++
++			if (written <= 0) {
++				failure = errno;
++				break;
++			}
++			done += written;
++		}
++		if (failure != 0) {
++			break;
++		}
++		total += (size_t)got;
++	}
++	if (failure == 0 && got < 0) {
++		failure = errno;
++	}
++	close(in);
++	close(out);
++	if (failure != 0) {
++		say("hakios: sbwp: mkstore copy d1test.png err %d\n", failure);
++	} else {
++		say("hakios: sbwp: mkstore copy d1test.png ok %lu\n", (unsigned long)total);
++	}
++}
++
+ /* t143: the offline examination of the t142 image (t14, d1d2bp-offline-store.md:§E4-1) found the
+  * store directories missing -- /var/mobile/Library/PosterBoard, PosterBoard/Extensions and
+  * Wallpaper were neither in the data volume's template (var.skel has no line for them) nor made
+@@ -3413,6 +3471,7 @@ sb_mkstore(void *context)
+ 		}
+ 		say("hakios: sbwp: mkstore %s %s %d\n", paths[i], ok ? "ok" : "err", ok ? 0 : saved);
+ 	}
++	sb_copy_test_png();
+ }
+ 
+ /* t142: two asks, each after the handover has put a home configuration in the ivar: the lock
+@@ -3709,6 +3768,205 @@ sb_poster_vc_dump(void *context)
+ 	    &budget, "vc: remote view");
+ }
+ 
++/* t144: a completion argument is only a pointer until its isa is known to be a class. Reading
++ * the word at that address is safe (it is a read of our own address space); comparing it with
++ * the runtime's class list says whether the word is an object at all. */
++static bool
++sb_is_object(void *pointer)
++{
++	vm_address_t address = (vm_address_t)pointer;
++	vm_address_t isa = 0;
++	vm_size_t got = 0;
++	Class *classes = NULL;
++	unsigned count = 0, i;
++
++	if (pointer == NULL) {
++		return false;
++	}
++	if (vm_read_overwrite(mach_task_self(), address, sizeof(isa), (vm_address_t)&isa,
++	    &got) != KERN_SUCCESS || got != sizeof(isa) || isa == 0) {
++		return false;
++	}
++	classes = objc_copyClassList(&count);
++	for (i = 0; classes != NULL && i < count; i++) {
++		if ((vm_address_t)classes[i] == isa) {
++			free(classes);
++			return true;
++		}
++	}
++	free(classes);
++	return false;
++}
++
++/* t144: the scene snapshot is the one route that does not go through the store, so its result
++ * is not left in the serial as a class name: 64x128 PNG, base64, in chunks a serial line can
++ * hold, so the picture can be rebuilt offline. */
++static void
++sb_scene_png(id image)
++{
++	Class renderer_class = objc_lookUpClass("UIGraphicsImageRenderer");
++	Class string_class = objc_lookUpClass("NSString");
++	id small = image;
++	id data = nil, text = nil;
++	const char *bytes = NULL;
++	size_t length, chunks, i;
++	CGSize size;
++
++	if (image == nil) {
++		say("hakios: sbwp: scene png none\n");
++		return;
++	}
++	size = ((CGSize (*)(id, SEL))objc_msgSend)(image, sel_registerName("size"));
++	if (renderer_class != Nil) {
++		id renderer = ((id (*)(id, SEL))objc_msgSend)((id)renderer_class,
++		    sel_registerName("alloc"));
++
++		renderer = ((id (*)(id, SEL, CGSize))objc_msgSend)(renderer,
++		    sel_registerName("initWithSize:"), CGSizeMake(64.0, 128.0));
++		if (renderer != nil) {
++			void (^actions)(id) = ^(id context) {
++				(void)context;
++				((void (*)(id, SEL, CGRect))objc_msgSend)(image,
++				    sel_registerName("drawInRect:"), CGRectMake(0.0, 0.0, 64.0, 128.0));
++			};
++			void *raw = *(void **)&actions;
++			id resized = ((id (*)(id, SEL, void *))objc_msgSend)(renderer,
++			    sel_registerName("imageWithActions:"), raw);
++
++			if (resized != nil) {
++				small = resized;
++			}
++		}
++	}
++	data = UIImagePNGRepresentation(small);
++	if (data == nil) {
++		say("hakios: sbwp: scene png encode failed\n");
++		return;
++	}
++	text = ((id (*)(id, SEL, unsigned long))objc_msgSend)(data,
++	    sel_registerName("base64EncodedStringWithOptions:"), 0UL);
++	bytes = text != nil ? ((const char *(*)(id, SEL))objc_msgSend)(text,
++	    sel_registerName("UTF8String")) : NULL;
++	if (bytes == NULL) {
++		say("hakios: sbwp: scene png base64 failed\n");
++		return;
++	}
++	length = strlen(bytes);
++	chunks = (length + 399) / 400;
++	say("hakios: sbwp: scene png image %.0fx%.0f small %.0fx%.0f png %lu b64 %lu chunks %lu\n",
++	    size.width, size.height,
++	    ((CGSize (*)(id, SEL))objc_msgSend)(small, sel_registerName("size")).width,
++	    ((CGSize (*)(id, SEL))objc_msgSend)(small, sel_registerName("size")).height,
++	    (unsigned long)length, (unsigned long)chunks);
++	for (i = 0; i < chunks; i++) {
++		size_t offset = i * 400;
++		size_t take = length - offset;
++
++		if (take > 400) {
++			take = 400;
++		}
++		say("hakios: sbwp: scene png %lu/%lu %.*s\n", (unsigned long)(i + 1),
++		    (unsigned long)chunks, (int)take, bytes + offset);
++	}
++	(void)string_class;
++}
++
++/* t144: the secure window's root view gets a picture with an obvious gradient and colour blocks.
++ * A frame captured after 6600 s that is still black then means the window has content that never
++ * reaches the screen; visible blocks mean the black is an empty view and the poster path is what
++ * to fix. */
++static void
++sb_inject_wallpaper(void *context)
++{
++	Class controller_class = objc_lookUpClass("SBWallpaperController");
++	Class image_class = objc_lookUpClass("UIImage");
++	Class view_class = objc_lookUpClass("UIImageView");
++	Class string_class = objc_lookUpClass("NSString");
++	id controller = nil, window = nil, root = nil, image = nil, view;
++	CGRect bounds;
++
++	(void)context;
++	if (controller_class != Nil &&
++	    class_respondsToSelector(object_getClass(controller_class),
++	        sel_registerName("sharedInstance"))) {
++		controller = ((id (*)(Class, SEL))objc_msgSend)(controller_class,
++		    sel_registerName("sharedInstance"));
++	}
++	if (controller != nil &&
++	    class_respondsToSelector(object_getClass(controller), sel_registerName("_wallpaperWindow"))) {
++		window = ((id (*)(id, SEL))objc_msgSend)(controller, sel_registerName("_wallpaperWindow"));
++	}
++	if (window == nil) {
++		Class app_class = objc_lookUpClass("UIApplication");
++
++		if (app_class != Nil &&
++		    class_respondsToSelector(object_getClass(app_class),
++		        sel_registerName("sharedApplication"))) {
++			id app = ((id (*)(Class, SEL))objc_msgSend)(app_class,
++			    sel_registerName("sharedApplication"));
++			id windows = app != nil ? ((id (*)(id, SEL))objc_msgSend)(app,
++			    sel_registerName("windows")) : nil;
++			unsigned long count = windows != nil ? ((unsigned long (*)(id, SEL))objc_msgSend)(
++			    windows, sel_registerName("count")) : 0;
++			unsigned long i;
++
++			for (i = 0; i < count; i++) {
++				id candidate = ((id (*)(id, SEL, unsigned long))objc_msgSend)(windows,
++				    sel_registerName("objectAtIndex:"), i);
++				const char *name = candidate != nil ?
++				    class_getName(object_getClass(candidate)) : "";
++
++				if (strstr(name, "WallpaperSecureWindow") != NULL) {
++					window = candidate;
++					break;
++				}
++			}
++		}
++	}
++	if (window == nil) {
++		say("hakios: sbwp: inject: no wallpaper window\n");
++		return;
++	}
++	if (class_respondsToSelector(object_getClass(window), sel_registerName("rootViewController"))) {
++		id controller_view = ((id (*)(id, SEL))objc_msgSend)(window,
++		    sel_registerName("rootViewController"));
++
++		if (controller_view != nil &&
++		    class_respondsToSelector(object_getClass(controller_view), sel_registerName("view"))) {
++			root = ((id (*)(id, SEL))objc_msgSend)(controller_view, sel_registerName("view"));
++		}
++	}
++	if (root == nil) {
++		root = window;
++	}
++	if (image_class != Nil && string_class != Nil) {
++		id path = ((id (*)(id, SEL, const char *))objc_msgSend)((id)string_class,
++		    sel_registerName("stringWithUTF8String:"), "/redwood/var/d1test.png");
++
++		if (path != nil && class_respondsToSelector(object_getClass((id)image_class),
++		        sel_registerName("imageWithContentsOfFile:"))) {
++			image = ((id (*)(Class, SEL, id))objc_msgSend)(image_class,
++			    sel_registerName("imageWithContentsOfFile:"), path);
++		}
++	}
++	if (image == nil) {
++		say("hakios: sbwp: inject: no image /redwood/var/d1test.png\n");
++		return;
++	}
++	if (view_class == Nil) {
++		say("hakios: sbwp: inject: UIImageView absent\n");
++		return;
++	}
++	view = ((id (*)(id, SEL))objc_msgSend)((id)view_class, sel_registerName("alloc"));
++	view = ((id (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("initWithImage:"), image);
++	bounds = ((CGRect (*)(id, SEL))objc_msgSend)(root, sel_registerName("bounds"));
++	((void (*)(id, SEL, CGRect))objc_msgSend)(view, sel_registerName("setFrame:"), bounds);
++	((void (*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), view);
++	say("hakios: sbwp: inject: added %.0fx%.0f root %s window %s\n",
++	    bounds.size.width, bounds.size.height, class_getName(object_getClass(root)),
++	    class_getName(object_getClass(window)));
++}
++
+ /* t142: the store route fails (ENOENT), so ask the wallpaper controller to snapshot the poster
+  * scene itself -- PaperBoardUI's own entry (the selector SBWallpaperController answers, bg
+  * 205502), which is the way around a store that has nothing to read. */
+@@ -3754,9 +4012,25 @@ sb_snapshot_scene(void *context)
+ 		traits = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("traitCollection"));
+ 	}
+ 	{
+-		/* no argument: see the note on the performSnapshot block above */
+-		void (^completion)(void) = ^{
+-			say("hakios: sbwp: scene: snapshot completion\n");
++		/* t144: the completion may hand over the scene's image; an argument that was never
++		 * passed stays a pointer until sb_is_object has seen a class at its isa (t142's
++		 * no-argument blocks above cannot say whether one was passed). */
++		void (^completion)(id) = ^(id snapshot) {
++			say("hakios: sbwp: scene: snapshot completion %p\n", snapshot);
++			if (snapshot != nil && sb_is_object(snapshot)) {
++				id kept = ((id (*)(id, SEL))objc_msgSend)(snapshot,
++				    sel_registerName("retain"));
++
++				say("hakios: sbwp: scene: snapshot %s\n",
++				    class_getName(object_getClass(kept)));
++				dispatch_async(dispatch_get_main_queue(), ^{
++					sb_scene_png(kept);
++					((void (*)(id, SEL))objc_msgSend)(kept,
++					    sel_registerName("release"));
++				});
++			} else if (snapshot != nil) {
++				say("hakios: sbwp: scene: snapshot argument is not an object\n");
++			}
+ 		};
+ 		void *raw = *(void **)&completion;
+ 
+@@ -4557,6 +4831,11 @@ hakios_springboard_init(void)
+ 	    dispatch_get_main_queue(), (void *)(intptr_t)1, sb_snapshot_refresh);
+ 	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6550 * NSEC_PER_SEC),
+ 	    dispatch_get_main_queue(), NULL, sb_snapshot_scene);
++	/* t144: after the refresh burst the secure window's root view gets a test picture (a gradient
++	 * with colour blocks). A frame captured after this that is still black says the window has
++	 * content that never reaches the screen; visible blocks say the black is an empty view. */
++	dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)6600 * NSEC_PER_SEC),
++	    dispatch_get_main_queue(), NULL, sb_inject_wallpaper);
+ 	/* t127: aq's PosterBoard took ninety minutes to reach the poster, far past every look above.
+ 	 * t141: only the 6000 s look stays; its 6600/6660/6720/6750 s twin is exactly what made the
+ 	 * serial unreadable in the window the refresh burst now owns. */

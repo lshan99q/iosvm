@@ -1,0 +1,254 @@
+diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
+index 020afe2..6a78d61 100644
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -4520,12 +4520,148 @@ sb_scene_png(id image)
+ 		if (take > 400) {
+ 			take = 400;
+ 		}
+-		say("hakios: sbwp: scene png %lu/%lu %.*s\n", (unsigned long)(i + 1),
++		say("hakios: sbwp: scene: png %lu/%lu %.*s\n", (unsigned long)(i + 1),
+ 		    (unsigned long)chunks, (int)take, bytes + offset);
+ 	}
+ 	(void)string_class;
+ }
+ 
++/* t157: cb serial 508961/508962 showed the scene snapshot does hand back an IOSurface
++ * ("texture 187: IOSurface 34 4997120 byte(s) ... row 3072", then "scene: snapshot image
++ * IOSurface"), but the t147 completion declared the argument an NSError and +[_FBSSnapshot
++ * domain] ended SpringBoard (508964/508968/515819). The object is kept here: its pixels are
++ * sampled (is the wallpaper black?), and at 6600 s the surface is painted straight onto the
++ * secure window's root view layer, so a still-black frame separates "no pixels" from "pixels
++ * that never reach the screen". */
++static IOSurfaceRef sb_scene_surface;
++
++static int
++sb_scene_is_surface(id object)
++{
++	if (object == nil || !sb_is_object(object)) {
++		return 0;
++	}
++	return CFGetTypeID((CFTypeRef)object) == IOSurfaceGetTypeID();
++}
++
++static void
++sb_scene_surface_stats(IOSurfaceRef surface)
++{
++	size_t width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface);
++	size_t bpr = IOSurfaceGetBytesPerRow(surface);
++	unsigned char *base;
++	unsigned long long sum = 0, dark = 0, count = 0, i, j;
++	unsigned min = 255, max = 0;
++
++	if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
++		say("hakios: sbwp: scene: ios lock failed\n");
++		return;
++	}
++	base = IOSurfaceGetBaseAddress(surface);
++	if (base == NULL) {
++		IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
++		say("hakios: sbwp: scene: ios no base %zux%zu bpr %zu\n", width, height, bpr);
++		return;
++	}
++	for (j = 0; j < height; j += 16) {
++		unsigned char *row = base + j * bpr;
++
++		for (i = 0; i < width; i += 16) {
++			unsigned r = row[i * 4], g = row[i * 4 + 1], b = row[i * 4 + 2];
++			unsigned l = (r + g + b) / 3;
++
++			sum += l;
++			count++;
++			if (l < 16) {
++				dark++;
++			}
++			if (l < min) {
++				min = l;
++			}
++			if (l > max) {
++				max = l;
++			}
++		}
++	}
++	IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
++	say("hakios: sbwp: scene: ios %zux%zu bpr %zu mean %llu dark %llu.%llu%% min %u max %u samples %llu\n",
++	    width, height, bpr,
++	    count > 0 ? sum / count : 0,
++	    count > 0 ? dark * 100 / count : 0,
++	    count > 0 ? (dark * 1000 / count) % 10 : 0,
++	    min, max, count);
++}
++
++static void
++sb_scene_surface_png(IOSurfaceRef surface)
++{
++	Class ci_image_class = objc_lookUpClass("CIImage");
++	Class ci_context_class = objc_lookUpClass("CIContext");
++	Class ui_image_class = objc_lookUpClass("UIImage");
++	id ci = nil, context = nil, ui = nil;
++	CGImageRef cg = NULL, small = NULL;
++	CGColorSpaceRef space;
++	CGContextRef context_ref;
++	unsigned char *buffer;
++	CGRect extent;
++
++	if (ci_image_class == Nil || ci_context_class == Nil || ui_image_class == Nil) {
++		say("hakios: sbwp: scene: png no CoreImage/UIKit\n");
++		return;
++	}
++	if (class_respondsToSelector(object_getClass(ci_image_class),
++	        sel_registerName("imageWithIOSurface:"))) {
++		ci = ((id (*)(Class, SEL, IOSurfaceRef))objc_msgSend)(ci_image_class,
++		    sel_registerName("imageWithIOSurface:"), surface);
++	}
++	if (ci == nil) {
++		say("hakios: sbwp: scene: png no CIImage\n");
++		return;
++	}
++	context = ((id (*)(Class, SEL))objc_msgSend)(ci_context_class, sel_registerName("context"));
++	if (context == nil) {
++		say("hakios: sbwp: scene: png no CIContext\n");
++		return;
++	}
++	extent = ((CGRect (*)(id, SEL))objc_msgSend)(ci, sel_registerName("extent"));
++	cg = ((CGImageRef (*)(id, SEL, id, CGRect))objc_msgSend)(context,
++	    sel_registerName("createCGImage:fromRect:"), ci, extent);
++	if (cg == NULL) {
++		say("hakios: sbwp: scene: png no CGImage\n");
++		return;
++	}
++	buffer = calloc(64 * 128 * 4, 1);
++	space = CGColorSpaceCreateDeviceRGB();
++	context_ref = buffer != NULL ? CGBitmapContextCreate(buffer, 64, 128, 8, 64 * 4, space,
++	    kCGImageAlphaPremultipliedLast) : NULL;
++	if (context_ref != NULL) {
++		CGContextDrawImage(context_ref, CGRectMake(0.0, 0.0, 64.0, 128.0), cg);
++		small = CGBitmapContextCreateImage(context_ref);
++	}
++	if (small != NULL) {
++		ui = ((id (*)(id, SEL, CGImageRef))objc_msgSend)((id)ui_image_class,
++		    sel_registerName("imageWithCGImage:"), small);
++	}
++	if (ui != nil) {
++		say("hakios: sbwp: scene: png from ios %zux%zu\n", IOSurfaceGetWidth(surface),
++		    IOSurfaceGetHeight(surface));
++		sb_scene_png(ui);
++	} else {
++		say("hakios: sbwp: scene: png thumb failed\n");
++	}
++	if (small != NULL) {
++		CGImageRelease(small);
++	}
++	if (context_ref != NULL) {
++		CGContextRelease(context_ref);
++	}
++	if (space != NULL) {
++		CGColorSpaceRelease(space);
++	}
++	CGImageRelease(cg);
++	free(buffer);
++}
++
+ /* t144: the secure window's root view gets a picture with an obvious gradient and colour blocks.
+  * A frame captured after 6600 s that is still black then means the window has content that never
+  * reaches the screen; visible blocks mean the black is an empty view and the poster path is what
+@@ -4594,6 +4730,46 @@ sb_inject_wallpaper(void *context)
+ 	if (root == nil) {
+ 		root = window;
+ 	}
++	/* t157: the scene's own surface, painted as the secure window's layer contents. */
++	if (sb_scene_surface != NULL) {
++		Class ci_image_class = objc_lookUpClass("CIImage");
++		Class ci_context_class = objc_lookUpClass("CIContext");
++		id ci = nil, ci_context = nil, layer = nil, gravity = nil;
++		CGImageRef cg = NULL;
++
++		if (ci_image_class != Nil && ci_context_class != Nil &&
++		    class_respondsToSelector(object_getClass(ci_image_class),
++		        sel_registerName("imageWithIOSurface:"))) {
++			ci = ((id (*)(Class, SEL, IOSurfaceRef))objc_msgSend)(ci_image_class,
++			    sel_registerName("imageWithIOSurface:"), sb_scene_surface);
++			ci_context = ci != nil ? ((id (*)(Class, SEL))objc_msgSend)(ci_context_class,
++			    sel_registerName("context")) : nil;
++		}
++		if (ci_context != nil) {
++			cg = ((CGImageRef (*)(id, SEL, id, CGRect))objc_msgSend)(ci_context,
++			    sel_registerName("createCGImage:fromRect:"), ci,
++			    ((CGRect (*)(id, SEL))objc_msgSend)(ci, sel_registerName("extent")));
++		}
++		if (cg != NULL) {
++			layer = ((id (*)(id, SEL))objc_msgSend)(root, sel_registerName("layer"));
++			gravity = string_class != Nil ?
++			    ((id (*)(Class, SEL, const char *))objc_msgSend)((id)string_class,
++			        sel_registerName("stringWithUTF8String:"), "resize") : nil;
++			if (layer != nil) {
++				((void (*)(id, SEL, id))objc_msgSend)(layer,
++				    sel_registerName("setContents:"), (id)cg);
++				if (gravity != nil) {
++					((void (*)(id, SEL, id))objc_msgSend)(layer,
++					    sel_registerName("setContentsGravity:"), gravity);
++				}
++				say("hakios: sbwp: inject: scene layer set %zux%zu\n",
++				    IOSurfaceGetWidth(sb_scene_surface),
++				    IOSurfaceGetHeight(sb_scene_surface));
++				return;
++			}
++		}
++		say("hakios: sbwp: inject: scene layer no cg, fallback png\n");
++	}
+ 	if (image_class != Nil && string_class != Nil) {
+ 		id path = ((id (*)(id, SEL, const char *))objc_msgSend)((id)string_class,
+ 		    sel_registerName("stringWithUTF8String:"), "/redwood/var/d1test.png");
+@@ -4859,16 +5035,33 @@ sb_snapshot_scene(void *context)
+ 		 * "argument is not an object"). Declare (image, error): the image is what a scene
+ 		 * snapshot callbacks pass, the error follows it. */
+ 		void (^completion)(id, id) = ^(id image, id err) {
++			Class cls = (image != nil && sb_is_object(image)) ?
++			    object_getClass(image) : Nil;
++
++			/* t157: cb serial 508962 handed over an IOSurface, and the t147 block asked
++			 * it for -domain: +[_FBSSnapshot domain] ended SpringBoard (508964/508968/
++			 * 515819). Say what the class is, and only then use the NSError accessors. */
+ 			say("hakios: sbwp: scene: snapshot image %s\n",
+-			    image != nil ? class_getName(object_getClass(image)) : "nil");
+-			if (err != nil) {
+-				sb_probe_error(err, "scene");
+-			}
+-			if (image != nil && sb_is_object(image)) {
+-				BOOL has_cg = class_respondsToSelector(object_getClass(image),
++			    cls != Nil ? class_getName(cls) : "nil");
++			say("hakios: sbwp: scene: cb arg class %s\n",
++			    cls != Nil ? class_getName(cls) : "nil");
++			if (cls != Nil && class_respondsToSelector(cls, sel_registerName("domain"))) {
++				sb_probe_error(image, "scene");
++			} else if (cls != Nil && sb_scene_is_surface(image)) {
++				IOSurfaceRef surface = (IOSurfaceRef)image;
++
++				CFRetain(surface);
++				if (sb_scene_surface != NULL) {
++					CFRelease(sb_scene_surface);
++				}
++				sb_scene_surface = surface;
++				say("hakios: sbwp: scene: ios kept %p\n", (void *)surface);
++				sb_scene_surface_stats(surface);
++				sb_scene_surface_png(surface);
++			} else if (cls != Nil &&
++			    class_respondsToSelector(cls, sel_registerName("CGImage"))) {
++				id cg = ((id (*)(id, SEL))objc_msgSend)(image,
+ 				    sel_registerName("CGImage"));
+-				id cg = has_cg ? ((id (*)(id, SEL))objc_msgSend)(image,
+-				    sel_registerName("CGImage")) : nil;
+ 
+ 				if (cg != nil) {
+ 					id kept = ((id (*)(id, SEL))objc_msgSend)(image,
+@@ -4881,6 +5074,10 @@ sb_snapshot_scene(void *context)
+ 					});
+ 				}
+ 			}
++			if (err != nil && sb_is_object(err) &&
++			    class_respondsToSelector(object_getClass(err), sel_registerName("domain"))) {
++				sb_probe_error(err, "scene");
++			}
+ 		};
+ 		void *raw = *(void **)&completion;
+ 

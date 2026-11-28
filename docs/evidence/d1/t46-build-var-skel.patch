@@ -1,0 +1,15 @@
+diff --git a/userland/build.sh b/userland/build.sh
+index a3be697..00c9e22 100755
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -343,6 +343,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+ 	# the prefix with the root on the flash, downloads every package and index there, and without it each
+ 	# download ended in "No such file or directory"
+ 	printf 'd\t700\t501\t501\t/private/var/mobile/tmp\n' >> root/etc/var.skel
++	# E4 (t16/t46): the poster store directories, in the data volume's template ...
++	printf 'd\t755\t501\t501\t/private/var/mobile/Library/PosterBoard\n' >> root/etc/var.skel
++	printf 'd\t755\t501\t501\t/private/var/mobile/Library/PosterBoard/Extensions\n' >> root/etc/var.skel
++	printf 'd\t755\t501\t501\t/private/var/mobile/Library/Wallpaper\n' >> root/etc/var.skel
+ 	# A key of ours for root, when there is one: ssh/authorized_keys, never in the repository (like
+ 	# fw-*). dropbear from the package manager's prefix reads it and lets us in over the phone's
+ 	# Wi-Fi, which saves rebuilding an image for every question one wants to ask a running Darwin. It
