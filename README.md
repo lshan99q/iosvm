@@ -396,6 +396,7 @@ is [`docs/research/linux-kernel-build.md`](docs/research/linux-kernel-build.md).
 | [`docs/adr/ADR-013-metal-translation.md`](docs/adr/ADR-013-metal-translation.md) | the decision: device plug-in, commit-level translation, by-reference transport, host Vulkan |
 | [`docs/architecture.md`](docs/architecture.md) | how the pieces fit |
 | [`docs/phases.md`](docs/phases.md) | milestones, one acceptance command each |
+| [`docs/xlt-translator.md`](docs/xlt-translator.md) | xlt, our own AArch64→x86-64 translator: M1 measured against TCG, and the road to `-accel xlt` |
 | [`docs/adr/`](docs/adr) | the decisions, with their evidence |
 | [`docs/zh/`](docs/zh) | Chinese translations |
 
@@ -705,6 +706,7 @@ tools/metalwire/run-guest.sh translate 300         # 启动（实例 3，端口 
 | [`docs/adr/ADR-013-metal-translation.md`](docs/adr/ADR-013-metal-translation.md) | 决策：设备插件、commit 级翻译、按引用传输、宿主 Vulkan |
 | [`docs/architecture.md`](docs/architecture.md) | 各部件如何配合 |
 | [`docs/phases.md`](docs/phases.md) | 里程碑，每个都有一条验收命令 |
+| [`docs/xlt-translator.md`](docs/xlt-translator.md) | xlt：本项目自己的 AArch64→x86-64 翻译器：M1 相对 TCG 的实测，以及接入 QEMU 的路线 |
 | [`docs/adr/`](docs/adr) | 决策及其依据 |
 | [`docs/zh/`](docs/zh) | 中文译文 |
 

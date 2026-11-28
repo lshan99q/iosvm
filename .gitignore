@@ -60,3 +60,8 @@ tools/host-glquad/rammap
 
 # metalwire host translator build product
 host/metalwire/metalwire_host
+
+# xlt translator build products and guest test images
+xlt/build/
+xlt/tests/build/
+*.elf
