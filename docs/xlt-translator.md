@@ -2,8 +2,10 @@
 
 > Status: **M1 complete and independently verified** (2026-11-28, `feat/xlt-translator`); the
 > numbers in [Benchmark results](#benchmark-results) are from
-> [`reports/xlt-m1-report.md`](../reports/xlt-m1-report.md) (verdict PASS). M2 — the QEMU
-> accelerator — is designed in [`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md), not built.
+> [`reports/xlt-m1-report.md`](../reports/xlt-m1-report.md) (verdict PASS). **M2/P1 is delivered**:
+> `-accel xlt` and the `-M xlt` machine run bare-metal images with byte-identical TCG parity,
+> verified in [`reports/xlt-m2-p1-report.md`](../reports/xlt-m2-p1-report.md). The rest of M2 is
+> staged in [`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md).
 
 XLT — `xlt` on the command line and in the tree — is our own dynamic translator. It executes
 AArch64 guest code on an x86-64 host by translating it a region at a time, then caching the host
@@ -194,7 +196,7 @@ if every checksum matches.
 
 Median of three runs per engine, the same image (`bench.a64.elf`, 69,224 bytes, sha256
 `d28c71ecd46ccd5ed9b0a24ddccdf407044900dc45d1618f52afd5e3fd643113`), TCG at
-`-accel tcg,tb-size=1536`, on the shared 32-thread build host (load average 3.6–6.5 across the
+`-accel tcg,tb-size=1536`, on the shared 32-thread build host (1-minute load average 3.63–5.93 across the
 runs):
 
 | test | TCG ticks | TCG ms | XLT ticks | XLT ms | speedup | checksums |
@@ -225,8 +227,9 @@ run-to-run spread, with identical checksums. An earlier three-run TCG baseline i
 
 ## What M1 does not do
 
-- **No QEMU integration.** There is no `-accel xlt` yet; the engine runs ELF images as a host
-  process. That is M2 ([accelerator design](../xlt/qemu/INTEGRATION.md)).
+- **No QEMU integration in M1 itself.** The engine runs ELF images as a host process; the
+  accelerator that puts it behind QEMU is a separate milestone and is delivered as M2/P1 (next
+  section).
 - **No MMU, exceptions, interrupts, system registers or MMIO.** A guest that touches any of them
   stops at the unsupported path. This is why the benchmark is a freestanding image and not
   firmware.
@@ -236,6 +239,55 @@ run-to-run spread, with identical checksums. An earlier three-run TCG baseline i
 - **No self-modifying-code detection**, no multi-threaded execution, no AArch32.
 - **Static images only** (`ELF64`, `ET_EXEC`; no shared objects, no loader), AArch64 little-endian
   only, x86-64 host only.
+
+## M2/P1: the accelerator skeleton
+
+The first QEMU milestone is delivered: `-accel xlt` is a real QEMU accelerator and `-M xlt` is a
+CPU-less machine that runs the engine. It is deliberately a skeleton — P1 in
+[`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md), independently verified in
+[`reports/xlt-m2-p1-report.md`](../reports/xlt-m2-p1-report.md) (PASS, including a second
+verification of the final patch bytes).
+
+**What runs now.** Two freestanding AArch64 fixtures and the earlier `qemu-smoke` image execute
+under `-M xlt -accel xlt -cpu cortex-a76`, print over the PL011, and shut down through PSCI
+`hvc #0`. Serial output is byte-identical to the TCG baseline
+(`-M virt -accel tcg -cpu cortex-a76`) and identical across repeated runs. The accelerator owns
+guest startup (`AccelClass::setup_post` starts the dispatcher thread); `-M xlt` without `-accel xlt`
+fails with `-M xlt requires -accel xlt`.
+
+**Exact commands.** Host dependencies are the same as M1 plus QEMU's build tools (ninja, GNU patch,
+rsync) and a writable `/home/lshan/xlt` (override with `QEMU_WORK_DIR`):
+
+```sh
+xlt/qemu/build-qemu.sh        # pristine QEMU 8.2.2 tree + smoke baseline
+xlt/qemu/build-xlt.sh         # apply xlt/qemu/patches/*.patch, build libxlt.a and QEMU
+xlt/tests/fixtures/p1/build.sh
+QEMU=${QEMU_WORK_DIR:-/home/lshan/xlt}/qemu-8.2.2-xlt-build/qemu-system-aarch64
+$QEMU -M xlt -cpu cortex-a76 -smp 1 -m 256M -accel xlt \
+      -kernel xlt/build/fixtures/p1/fixture1.elf \
+      -display none -serial stdio -monitor none -no-reboot      # prints xlt-p1-fixture1
+xlt/qemu/p1/run.sh            # parity + determinism + failure paths; prints run.sh: PASS
+```
+
+The second fixture prints
+`xlt-p1-fixture2 fr=0x0000000000000090 ram=0x1122334455667788 el=0x0000000000000004`. The full
+walk-through is the "Quick start (P1)" section of [`xlt/qemu/README.md`](../xlt/qemu/README.md);
+the P1 limits (one vCPU, no MMU/interrupts/GIC/flash, four host-emulated system registers) are in
+[`xlt/qemu/p1/NOTES.md`](../xlt/qemu/p1/NOTES.md).
+
+**Measured.** On the 32-thread build host: patched QEMU build 92 s (1,971/1,971 targets, 0
+warnings), parity suite ≈1 s, accelerator fixture run 0.05–0.09 s against TCG's 0.05 s — the
+micro-fixtures pay JIT startup, so throughput only shows on the benchmark. M1 is unaffected:
+`make -C xlt` 25 s, 481 decode checks, 5/5 benchmark checksums, overall 9.68–10.02× in the two P1
+verification runs (load 5.9–8.5), consistent with the 10.08× table above (load 3.63–5.93).
+
+**What is missing.** No MMU/page tables or exceptions, no interrupts/GIC/timers, no pflash or
+virtio-blk, no FDT, no FP/SIMD/atomics/LSE, no DMA or self-modifying-code invalidation, one guest
+vCPU, and only four host-emulated system registers. The plan that closes these gaps is
+[`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md): it grows the custom machine (path A) rather than
+trying to make `-M virt -accel xlt` execute — the t15 spike showed that bounded patches can make
+QEMU accept that combination but nothing runs, because the accelerator's only execution hook is
+`create_vcpu_thread` and QEMU's ARM CPU state is not bridged.
 
 ## Limitations
 
@@ -257,6 +309,12 @@ run-to-run spread, with identical checksums. An earlier three-run TCG baseline i
 M1 is the design document's P0 delivered in-tree: ELF loading, region translation, lazy flags,
 flat addressing, semihosting, LLJIT, and the benchmark comparison. The remaining phases, with the
 design document's acceptance targets:
+
+Note the two naming axes: the design document's P0–P5 are **engine generations**, while
+[`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md) names its own QEMU-side phases P1–P3 (P1 =
+the delivered accelerator skeleton, which is not the design document's "kernel boot" phase). The
+table below uses the design-document axis, and the QEMU work that makes it possible is staged in
+[`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md).
 
 | phase | work | acceptance |
 |---|---|---|
@@ -283,9 +341,15 @@ risks — is [`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md).
 | `xlt/src/lift.h`, `xlt/src/jit.h` | the lifter and JIT interfaces |
 | [`xlt/bench/README.md`](../xlt/bench/README.md) | the benchmark image: workloads, checksums, harness |
 | [`xlt/bench/RESULTS.md`](../xlt/bench/RESULTS.md) | the recorded TCG baseline runs |
-| [`xlt/qemu/README.md`](../xlt/qemu/README.md) | the accelerator's design: threading, exits, memory, cache |
-| [`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md) | phases, QEMU hooks, acceptance metrics, risks |
+| [`xlt/qemu/README.md`](../xlt/qemu/README.md) | the accelerator's design: threading, exits, memory, cache, plus the P1 quick start |
+| [`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md) | phases, QEMU hooks, acceptance metrics, risks, P1 status |
+| [`xlt/qemu/p1/NOTES.md`](../xlt/qemu/p1/NOTES.md) | the P1 machine and accelerator: limits, registers, evidence |
+| [`xlt/qemu/p1/run.sh`](../xlt/qemu/p1/run.sh) | the P1 parity and failure-path suite |
+| [`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md) | the M2/P2 plan (path A: grow the custom machine) |
+| [`xlt/qemu/build-qemu.sh`](../xlt/qemu/build-qemu.sh), [`xlt/qemu/build-xlt.sh`](../xlt/qemu/build-xlt.sh), [`xlt/qemu/patches/`](../xlt/qemu/patches/) | pristine-tree build, patched-tree build, the two patches |
+| `xlt/src/libxlt.h`, `xlt/src/libxlt_c.h` | the host-neutral engine facade and the C ABI QEMU links against |
 | [`reports/xlt-m1-report.md`](../reports/xlt-m1-report.md) | the independent M1 verification report |
+| [`reports/xlt-m2-p1-report.md`](../reports/xlt-m2-p1-report.md) | the independent M2/P1 verification report |
 | [`docs/phases.md`](phases.md) | the milestone list and its acceptance commands |
 | [`docs/adr/ADR-001-qemu-fork.md`](adr/ADR-001-qemu-fork.md) | the QEMU fork decision, and the "core changes at zero" rule M2 has to negotiate |
 

@@ -3,8 +3,115 @@
 `xlt/README.md` describes the M1 engine: a standalone program that loads an AArch64 ELF and runs
 it on this x86-64 host. This directory describes the next step, M2: putting the same engine behind
 a QEMU accelerator so `-accel xlt` replaces TCG's translator while QEMU keeps its machine model,
-devices and CPU state. Nothing here is built yet — no QEMU tree is vendored before M2 (see
+devices and CPU state. P1 is implemented as a small text patch series in
+[`patches/`](patches/); no modified QEMU tree is vendored (see
 [ADR-001](../../docs/adr/ADR-001-qemu-fork.md)).
+
+## Building the unpatched tree
+
+[`build-qemu.sh`](build-qemu.sh) fetches QEMU 8.2.2, verifies the tarball sha256, and builds
+`qemu-system-aarch64` out of tree under `/home/lshan/xlt` (override with `QEMU_WORK_DIR`); nothing
+is written inside the repository. The P1 baseline image that proves the unpatched tree works is the
+[`qemu-smoke` fixture](../tests/fixtures/qemu-smoke/README.md): it must print `xlt-p1-ok` over the
+PL011 UART and exit through PSCI before any accelerator work starts.
+
+## Quick start (P1)
+
+P1 is the first executable milestone: an `xlt` accelerator and a CPU-less `-M xlt` machine that run
+bare-metal AArch64 images with byte-for-byte TCG parity on the P1 fixtures. These commands are the
+whole path from a clean checkout to `run.sh: PASS`; the expected output follows the commands. Host
+dependencies: QEMU's usual build tools (gcc/g++, ninja, GNU patch, rsync), `llvm-config-18`,
+capstone 4, and about 2 GB free under `/home/lshan/xlt` (override with `QEMU_WORK_DIR`).
+
+```sh
+# 1. Pristine QEMU 8.2.2 tree and the unpatched baseline image (also run automatically
+#    by build-xlt.sh when the tree is missing). Verifies the tarball sha256.
+xlt/qemu/build-qemu.sh
+
+# 2. Patched tree: copies the pristine source, applies xlt/qemu/patches/*.patch in order,
+#    builds the PIC libxlt.a, configures and builds qemu-system-aarch64 only.
+#    On the 32-thread build host this takes about 92 s (1,971/1,971 targets, 0 warnings).
+xlt/qemu/build-xlt.sh
+
+# 3. The binary and the two registration checks
+QEMU=${QEMU_WORK_DIR:-/home/lshan/xlt}/qemu-8.2.2-xlt-build/qemu-system-aarch64
+$QEMU -M help | grep xlt          # xlt   xlt AArch64-to-x86-64 translator (P1)
+$QEMU -accel help                 # xlt
+
+# 4. Build the fixtures and run one under the accelerator, plus its TCG reference
+xlt/tests/fixtures/p1/build.sh
+$QEMU -M xlt -cpu cortex-a76 -smp 1 -m 256M -accel xlt \
+      -kernel xlt/build/fixtures/p1/fixture1.elf \
+      -display none -serial stdio -monitor none -no-reboot
+$QEMU -M virt -cpu cortex-a76 -smp 1 -m 256M -accel tcg \
+      -kernel xlt/build/fixtures/p1/fixture1.elf \
+      -display none -serial stdio -monitor none -no-reboot
+
+# 5. Reproducible parity suite: rebuilds the fixtures, runs each image twice per side,
+#    compares both within-side runs and TCG vs xlt byte-for-byte, checks the failure
+#    paths, prints "run.sh: PASS". Override the binary with QEMU=/path/to/qemu-system-aarch64.
+xlt/qemu/p1/run.sh
+```
+
+Expected serial output (exit status 0 in both cases, through PSCI `SYSTEM_OFF`):
+
+```text
+xlt-p1-fixture1
+xlt-p1-fixture2 fr=0x0000000000000090 ram=0x1122334455667788 el=0x0000000000000004
+```
+
+The `qemu-smoke` image from t9 prints `xlt-p1-ok` with the same flags. The failure paths are part of
+the contract and are checked by `run.sh`:
+
+```text
+$QEMU -M xlt … -kernel fixture1.elf            # -M xlt requires -accel xlt            (exit 1)
+$QEMU -M xlt -accel xlt …                      # xlt: -kernel <elf> is required        (exit 1)
+$QEMU -M xlt -accel nope …                     # invalid accelerator nope              (exit 1)
+$QEMU -M virt -accel xlt …                     # -accel xlt is only supported by -M xlt  (exit 1)
+```
+
+Measured on this host: parity suite ≈1 s, accelerator fixture run 0.05–0.09 s (TCG 0.05 s — the
+micro-fixtures pay JIT startup), `make -C xlt` 25 s. The two patches are plain text files applied
+with `patch -p1` (also `git apply`-able), so they can be checked against the untouched upstream tree;
+no modified QEMU tree is vendored (see [ADR-001](../../docs/adr/ADR-001-qemu-fork.md)).
+
+Under the hood, step 2 is exactly this (from the repository root; the upstream tree is never
+modified — the patched copy lives beside it):
+
+```sh
+root=$PWD
+QEMU_WORK_DIR=${QEMU_WORK_DIR:-/home/lshan/xlt}
+src=$QEMU_WORK_DIR/qemu-8.2.2 patched=$QEMU_WORK_DIR/qemu-8.2.2-xlt
+build=$QEMU_WORK_DIR/qemu-8.2.2-xlt-build lib=$root/xlt/build/qemu
+
+rm -rf "$patched" && mkdir -p "$patched" && rsync -a "$src/" "$patched/"
+for p in xlt/qemu/patches/*.patch; do
+  patch -p1 -d "$patched" --batch --forward -i "$root/$p"
+done
+
+# PIC archive that QEMU links against
+mkdir -p "$lib/obj"
+for f in decode jit libxlt libxlt_c lift; do
+  g++ -O2 -g -std=c++17 -fPIC -I"$root/xlt/src" $(llvm-config-18 --cxxflags) \
+      -c "$root/xlt/src/$f.cpp" -o "$lib/obj/$f.o"
+done
+ar rcs "$lib/libxlt.a" "$lib"/obj/*.o
+
+mkdir -p "$build" && cd "$build"
+"$patched/configure" --target-list=aarch64-softmmu --disable-docs --disable-werror \
+  --disable-gtk --disable-sdl --disable-vnc --disable-opengl --disable-spice \
+  --disable-libssh --disable-guest-agent \
+  --extra-cflags="-I$root/xlt/src -I/usr/lib/llvm-18/include" \
+  --extra-ldflags="-L$lib -lxlt -lLLVM-18 -lcapstone -lpthread -ldl -lz -ltinfo -lstdc++ -lm \
+  -Wl,-rpath,/usr/lib/llvm-18/lib"
+ninja -j16 qemu-system-aarch64
+```
+
+P1 is deliberately small: no `CPUState`, no ARM CPU/MMU model, no interrupts or GIC, no pflash, no
+semihosting beyond the no-op hook; `hvc #0` is the PSCI conduit and only `SYSTEM_OFF`/`SYSTEM_RESET`
+are implemented. The exact limits, the host-emulated system registers and the evidence table are in
+[`p1/NOTES.md`](p1/NOTES.md); the plan for the next machine generation is
+[`p2/PLAN.md`](p2/PLAN.md).
 
 Every statement below was checked against the QEMU v8.2.2 sources
 (commit `11aa0b1ff115b86160c4d37e7c37e6a6b13b77ea`), the release this plan targets and the one
@@ -352,11 +459,12 @@ Self-modifying code invalidates both levels (memory and disk) per page.
   phase plan, acceptance metrics and the exact QEMU hooks are in [INTEGRATION.md](INTEGRATION.md),
   and the milestone landing plan — what ships in M1, what waits for M2 — lives in
   `docs/xlt-translator.md`.
-- No QEMU tree is vendored and no patch is included here yet: the M2 patch series is described by
-  the hook table in [INTEGRATION.md](INTEGRATION.md), not by a diff against upstream. Of the
-  sixteen hooks there, nine are public APIs used as is, four are small exports of existing code
-  (H7, H8, H10, H11), H1 is new accelerator files under `accel/xlt/`, H16 needs no change at all,
-  and only H5 — device-write invalidation — is a genuine edit to shared code (`system/physmem.c`).
-  [ADR-001](../../docs/adr/ADR-001-qemu-fork.md) asks for core QEMU changes to stay at zero, so
-  that one edit needs an explicit exception recorded in the ADR (or has to live as a tracked patch
-  in the fork); pretending otherwise would make the plan look cleaner than it is.
+- No QEMU tree is vendored. P1 ships patches 0001 (accelerator) and 0002 (machine) in
+  [`patches/`](patches/), built by `build-xlt.sh` from a pristine 8.2.2 tarball. The hook inventory
+  above was written for path B (the accelerator inside `-M virt`); under the chosen path A (see
+  [`p2/PLAN.md`](p2/PLAN.md)) most of it becomes unnecessary — the machine owns the GIC and timers,
+  the engine owns exceptions, and no shared QEMU file is modified unless the DMA-invalidation risk
+  (R5) forces the H5 hook in `system/physmem.c`. [ADR-001](../../docs/adr/ADR-001-qemu-fork.md) asks
+  for core QEMU changes to stay at zero, so if R5 fires that edit needs an explicit exception
+  recorded in the ADR (or has to live as a tracked patch in the fork); pretending otherwise would
+  make the plan look cleaner than it is.

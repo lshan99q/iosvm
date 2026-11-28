@@ -104,6 +104,11 @@ bool Jit::init(std::string *error)
     add_symbol("xlt_unsupported", &xlt_unsupported);
     add_symbol("xlt_semihost", &xlt_semihost);
     add_symbol("xlt_cntvct", &xlt_cntvct);
+    add_symbol("xlt_host_read", &xlt_host_read);
+    add_symbol("xlt_host_write", &xlt_host_write);
+    add_symbol("xlt_sysreg_read", &xlt_sysreg_read);
+    add_symbol("xlt_sysreg_write", &xlt_sysreg_write);
+    add_symbol("xlt_hvc", &xlt_hvc);
     if (auto err = impl_->jit->getMainJITDylib().define(absoluteSymbols(std::move(symbols)))) {
         if (error)
             *error = "define host symbols: " + toString(std::move(err));
@@ -112,10 +117,12 @@ bool Jit::init(std::string *error)
     return true;
 }
 
-BlockFn Jit::get(uint64_t pc, uint8_t *ram, uint64_t *instruction_count, std::string *error)
+BlockFn Jit::get(uint64_t pc, uint8_t *ram, uint64_t ram_base, uint64_t ram_size,
+                 uint64_t *instruction_count, std::string *error)
 {
     uint64_t t0 = nowNs();
-    auto module = translate_region(*impl_->tsctx->getContext(), pc, ram, instruction_count, error);
+    auto module = translate_region(*impl_->tsctx->getContext(), pc, ram, ram_base, ram_size,
+                                   instruction_count, error);
     uint64_t t1 = nowNs();
     if (!module)
         return nullptr;

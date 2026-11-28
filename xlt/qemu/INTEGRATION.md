@@ -4,8 +4,46 @@ This is the execution plan behind [README.md](README.md). It answers three quest
 accelerator has to achieve in each phase, which QEMU internals it has to hook, and how each phase
 is judged. Everything about QEMU 8.2.2 was verified against the upstream sources of the target
 release (commit `11aa0b1ff115b86160c4d37e7c37e6a6b13b77ea`), as were the repository baselines used
-for acceptance; statements that were not checked are labelled *(unverified)*. Nothing here is
-implemented yet: M1 is the standalone engine (`xlt/README.md`), M2 is this accelerator.
+for acceptance; statements that were not checked are labelled *(unverified)*. M1 is the standalone
+engine (`xlt/README.md`); M2 is this accelerator. P1 — the accelerator skeleton — is implemented
+and verified; the status section below records what that means, and
+[`p2/PLAN.md`](p2/PLAN.md) carries the plan for the next stage.
+
+## Status: P1 delivered and verified
+
+P1 is **implemented and independently verified** at the working-tree state on top of `9267e0f`
+(`feat(xlt): add in-tree AArch64-to-x86_64 translator`); the commit that lands it is a separate
+step. The verification report is [`../../reports/xlt-m2-p1-report.md`](../../reports/xlt-m2-p1-report.md)
+(PASS, including the t16 re-verification; the committed patch files were then whitespace-normalized with unchanged code, see the report addendum).
+
+| artifact | what |
+| --- | --- |
+| [`patches/0001-accel-add-xlt-accelerator.patch`](patches/) | 5,197 B, sha256 `bdfeb19f…`: `xlt-accel` / `xlt-accel-ops`, `CONFIG_XLT` wiring, accelerator ownership of guest startup through `AccelClass::setup_post` |
+| [`patches/0002-hw-arm-add-xlt-machine.patch`](patches/) | 6,927 B, sha256 `5efbec75…`: `hw/arm/xltm.c`, the CPU-less `-M xlt` machine |
+| [`build-qemu.sh`](build-qemu.sh), [`build-xlt.sh`](build-xlt.sh) | pristine QEMU 8.2.2 tree; patched tree with `libxlt.a` and `qemu-system-aarch64` (92 s, 1,971/1,971 targets, 0 warnings on the 32-thread host) |
+| [`p1/run.sh`](p1/run.sh) | parity, determinism and failure-path suite (`run.sh: PASS`, ≈1 s) |
+| `xlt/tests/fixtures/p1/`, `xlt/tests/fixtures/qemu-smoke/` | fixtures and the unpatched-tree baseline image |
+| [`p1/NOTES.md`](p1/NOTES.md) | P1 limits, host-emulated registers, evidence |
+
+Verified behaviour: both fixtures and the qemu-smoke image produce byte-identical serial output
+between `-M virt -accel tcg -cpu cortex-a76` and `-M xlt -accel xlt -cpu cortex-a76` (exit 0 through
+PSCI), twice per side (deterministic); `-M xlt` without `-accel xlt` exits 1 with
+`-M xlt requires -accel xlt`; the M1 engine is unchanged (481 decode checks, 5/5 benchmark
+checksums, overall 9.68–10.02× across the two verification runs).
+
+Deviations accepted for P1: a custom `-M xlt` machine instead of reusing `-M virt`; no ARM
+CPU/`CPUState`, therefore no MMU/page tables/exceptions/interrupts/GIC/SMMU and one guest vCPU;
+only four host-emulated system registers (`CurrentEL`, `CNTFRQ_EL0`, `CNTVCT_EL0`, `MPIDR_EL1`)
+with writes ignored; `hvc #0` as the PSCI conduit with `SYSTEM_OFF`/`SYSTEM_RESET` only; PL011 as
+the only device with synchronous MMIO through `address_space_rw()` under the BQL; no pflash, DMA or
+self-modifying-code invalidation; the semihosting hook is a no-op. These are scope choices, not
+verification failures; the report lists them in its §7.
+
+The P2 phase text below was written before the t15 spike. The spike's verdict (path A, recorded
+with its evidence in [`p2/PLAN.md`](p2/PLAN.md) §0) fixed the direction: grow the custom `-M xlt`
+machine instead of making `-M virt -accel xlt` execute. Where the text below assumes a `virt`
+machine or a `CPUState`, read it as the historical design input; the P2 rows and the threading
+section are annotated accordingly.
 
 ## What boots today, and what xlt has to run
 
@@ -29,9 +67,13 @@ So there are two guest programs, not one:
    RAM window), then jumps into the XNU image that `mkpayload.py` assembled. Everything from that
    point on is the OS the project already measures.
 
-`-accel xlt` replaces only the translation of these instructions. Boot essentials — pflash, the
-virtio transport, the GIC, the UART, RAM, the loader device — stay exactly as they are under TCG,
-which is the property that makes parity measurable. Note two consequences: code executes from
+`-accel xlt` replaces only the translation of these instructions. On the rejected path B, boot
+essentials — pflash, the virtio transport, the GIC, the UART, RAM, the loader device — would have
+stayed exactly as under TCG, which is what makes parity measurable. Path A keeps the same
+guest-visible map (RAM at `0x40000000`, PL011 at `0x09000000`, GICv3 dist/redist at
+`0x08000000`/`0x080A0000`, pflash at `0x0`/`0x04000000`, virtio-mmio at `0x0a000000`), but those
+devices are modelled by the machine, so parity means same payload, RAM size, devices and guest
+behaviour rather than the same QEMU machine code. Note two consequences: code executes from
 read-only flash as well as from RAM (P2 must fetch instruction bytes from non-RAM regions), and the
 delivery configuration is one vCPU (`QEMU_SMP=1`), because multi-core XNU panics in the scheduler
 lock (`docs/stage25-multicore.md`, section 12) — so P2 acceptance is measured on one vCPU.
@@ -41,13 +83,14 @@ lock (`docs/stage25-multicore.md`, section 12) — so P2 acceptance is measured 
 | Phase | Scope | Exit criterion | How it is judged |
 | --- | --- | --- | --- |
 | P0 (M1 scope) | Standalone engine: ELF loader, decoder, lifter, JIT, block cache, CLI | `xlt run <elf>` executes a test ELF and exits with the guest's exit code | `xlt/tests/run_tests.sh` |
-| P1 | `-accel xlt` skeleton: QOM types, vCPU thread, dispatcher, RAM fast path, MMIO exit, sysreg read, semihosting, PSCI shutdown | A bare-metal payload prints over the PL011 UART and powers the machine off through PSCI; no translation of firmware yet | Joins `xlt/tests/run_tests.sh` as an integration test that launches `qemu-system-aarch64 -accel xlt` and diffs the serial log |
-| P2 | Page tables and exceptions (software TLB, data/prefetch aborts), flash instruction fetch, device-write invalidation, cache/TLB maintenance, interrupts | Same command line as TCG (only `-accel` differs) reaches the five boot markers in `tools/qemu-open.sh:166-174` and gets a SpringBoard frame, with the same image checksums | Boot wall time and serial markers vs TCG; `md5` of the built images; screenshot sha256 parity |
+| P1 | `-accel xlt` skeleton: QOM types, vCPU thread, dispatcher, RAM fast path, MMIO exit, sysreg read, semihosting, PSCI shutdown | **Done.** A bare-metal payload prints over the PL011 UART and powers the machine off through PSCI; no translation of firmware yet | [`p1/run.sh`](p1/run.sh), plus the M1 tests |
+| P2 | Grow the custom `-M xlt` machine (path A, [`p2/PLAN.md`](p2/PLAN.md)): EL1-only MMU and faults, exceptions/ELs, machine-owned GICv3 and generic timer, pflash/virtio-blk/FDT, flash instruction fetch, device-write invalidation, ISA coverage | Payload brought up by the TCG boot line reaches the five boot markers and a SpringBoard frame under `-M xlt -accel xlt`, with the same image checksums and screenshot; parity is defined as same payload/RAM/devices/behaviour, since the machine name differs | Boot wall time and serial markers vs TCG; `md5` of the built images; screenshot sha256 parity; `p2/PLAN.md` §5 |
 | P3 | Performance and parity hardening: cache warm path, hot-block chaining, N host threads (gated), profiling | Guest CPU time per frame below TCG's; no behavioural divergence in the gate scripts | `glwire` fps at matched load, CPU/frame, `tools/` gate scripts |
 
-P1 is deliberately "until the first MMIO" plus semihosting: it proves the ABI, the dispatcher and
-the register bridge in days, without needing page tables, exceptions or the firmware. P2 is the
-first phase whose success number is meaningful, because it is the first full boot.
+P1 was deliberately "until the first MMIO" plus semihosting: it proved the ABI, the dispatcher and
+the register bridge without needing page tables, exceptions or the firmware. It is delivered; P2 is
+the first phase whose success number is meaningful, because it is the first full boot, and its work
+is staged in [`p2/PLAN.md`](p2/PLAN.md).
 
 ## Required hooks
 
@@ -74,6 +117,22 @@ requires core changes to stay at zero; the M2 patch series must justify each one
 | H14 | Semihosting | `include/semihosting/common-semi.h` (`do_common_semihosting`), trigger decoded by xlt (`HLT #0xf000`, `target/arm/tcg/translate-a64.c:2401`) | Existing API; do not go through `arm_cpu_do_interrupt` |
 | H15 | MMIO and non-RAM accesses | `include/exec/memory.h:2642` (`address_space_rw`), `system/physmem.c:2869` | Existing API |
 | H16 | Machine memory region for the identity window and for flash decode cache | `hw/arm/virt.c` has no accel-specific code; xlt reads `ms->ram` in `init_machine` | No change to `hw/arm/virt.c` |
+
+### What P1 actually used
+
+| hook | P1 state |
+| --- | --- |
+| H1 | Implemented: the `xlt-accel` / `xlt-accel-ops` pair, `init_machine` requires the `xlt` machine, `create_vcpu_thread` is a no-op |
+| H2 | Partial: one detached RCU/BQL thread instead of TCG's rr loop — there is no `CPUState`, so no `cpu_thread_signal_created`, `can_do_io` or kick path |
+| H3 | Not used: no `CPUState` to bracket. P2 (path A) stays CPU-less, so this is not on the P2 path either |
+| H4 | Not used yet: the P1 machine creates its own 256 MiB region; growing it to `-m`-driven RAM is a P2 item (`p2/PLAN.md` §2.4) |
+| H5 | Not needed in P1: fixtures never enable code-dirty logging; P2 adds the hook only if device DMA writes code |
+| H6, H7 | Not used: `MRS`/`MSR` go through the machine's four-register host callback table |
+| H8–H12 | Not used: no exceptions, no interrupts, no permission model |
+| H13 | Partial: `hvc #0` is handled by the machine callback (`SYSTEM_OFF`/`SYSTEM_RESET`), not `arm_handle_psci_call()` |
+| H14 | Not used: the semihosting callback is a no-op |
+| H15 | Implemented: `address_space_rw()` under the BQL |
+| H16 | Implemented in the P1 form: the machine owns its RAM region (no `hw/arm/virt.c` change) |
 
 Three files a TCG-shaped design would expect to change are deliberately untouched:
 
@@ -127,8 +186,16 @@ changes when one is plainly needed, and hiding it would only move the surprise t
 
 ## Threading and the dispatcher
 
-P1/P2 use one host thread for all vCPUs, as TCG's rr mode does. The thread function from H2 does
-the RCU/thread registration and the BQL discipline, and calls, per CPU slice:
+P1 runs one detached host thread that owns guest execution: it registers with RCU, takes the BQL,
+and loops over the guest one slice at a time, dropping the BQL only around translated code. The
+accelerator starts it from `AccelClass::setup_post`; the machine never starts a guest. Because the
+custom machine has no `CPUState`, none of TCG's per-CPU plumbing applies — no
+`cpu_thread_signal_created`, no kick, no `can_do_io`. P2 keeps that model (path A in
+[`p2/PLAN.md`](p2/PLAN.md)): interrupts come from the machine's own GICv3 model and are polled at
+slice boundaries, not injected through `cpu_interrupt()`.
+
+The snippet below is the TCG-shaped loop this design would use if it ever owned a real `CPUState`
+(and the reason path B was rejected is that making that state work is the larger integration):
 
 ```
 qemu_mutex_unlock_iothread();
@@ -143,14 +210,13 @@ xlt_handle_exit(vcpu, exit);         /* MMIO, sysreg, exception, IRQ, ... */
 `cpu_exit()` and that an exclusive section has to wait (`include/hw/core/cpu.h:1000-1030`), and
 `cpu_exec_end()` is what makes `qemu_cpu_kick()` effective. TCG calls the pair around
 `tcg_cpus_exec()` (`accel/tcg/tcg-accel-ops.c:75-77`); KVM does the same around `ioctl(KVM_RUN)`
-(`accel/kvm/kvm-all.c:2832,2991`). Skipping them compiles and even boots, but stop/reset/monitor
-commands would race with translated code.
+(`accel/kvm/kvm-all.c:2832,2991`). Skipping them is safe only while no `CPUState` exists, which is
+P1/P2's situation.
 
 N host threads remain a P3 option (`-accel xlt,thread=multi`): the block table, the software TLB
 and the persistent cache would all need explicit locking, and the guest that would benefit is the
 multi-core XNU configuration the project has already judged unsafe (`docs/stage25-multicore.md`).
-The design keeps the hook (`cpu_thread_is_idle`, `kick_vcpu_thread`) so this is an added backend,
-not a rewrite.
+The design keeps the hook so this is an added backend, not a rewrite.
 
 ## Acceptance metrics
 
@@ -185,7 +251,7 @@ so the process exits 0.
 | R3 | PSCI and semihosting are gated on TCG or `#ifdef CONFIG_TCG` | `arm_cpu_do_interrupt()` calls `arm_handle_psci_call()` only when `tcg_enabled()` (`target/arm/helper.c:11351`); `arm_is_psci_call`/`arm_handle_psci_call` are stubs outside TCG builds (`target/arm/internals.h:319-327`); semihosting (`helper.c:11362`) is under `#ifdef CONFIG_TCG` | xlt calls `arm_handle_psci_call()` itself in its `SMC`/`HVC` handler and `do_common_semihosting()` itself, so the accel does not depend on either gate; a `--disable-tcg` build needs a local PSCI handler (P3, unverified effort) |
 | R4 | Instruction fetch from pflash/ROM | The identity-window fast path covers RAM only; firmware executes from flash at `0x0` | Fetch bytes via `address_space_read()` into a per-page decode cache for non-RAM regions; those blocks are immutable and never invalidated. Cost is boot-only *(unverified: measured flash byte volume)* |
 | R5 | MMIO trap rate | Every UART byte, virtio descriptor and GIC access leaves translated code; a block can contain many | Exit at the access (no speculative pre-execution), so correctness is trivial; P3 may add per-page MMIO fast paths for the GIC distributor *(unverified benefit)* |
-| R6 | GICv3 CPU-interface registers | `ICC_*` are system registers owned by the GIC model, not the CPU | Verified: `hw/intc/arm_gicv3_cpuif.c:2240` defines `gicv3_cpuif_reginfo[]` and registers it into `cpu->cp_regs` at `:2829`, so H6/H7 reach them; IRQ lines come through `arm_cpu_set_irq()` (`target/arm/cpu.c:916`) unchanged |
+| R6 | GICv3 CPU-interface registers | `ICC_*` are system registers owned by the GIC model, not the CPU | Path A: the engine traps `ICC_*` and calls the machine's GICv3 model, so there are no cpregs to reach. On the rejected path B this would have needed `gicv3_cpuif_reginfo[]` (`hw/intc/arm_gicv3_cpuif.c:2240`, registered into `cpu->cp_regs` at `:2829`) and `arm_cpu_set_irq()` (`target/arm/cpu.c:916`) |
 | R7 | SMP memory ordering / multi-core XNU | The guest already panics in the scheduler lock with more than one CPU | Delivery is one vCPU; multi-thread accel is P3 and gated on the guest bug, not on xlt |
 | R8 | Self-modifying code and TLBI | XNU and SpringBoard patch code and flush caches; stale blocks corrupt execution | Guest-store detection, cache-op exits and TLBI-driven TLB flush in P1/P2; device writes need H5 |
 | R9 | Unaligned and exclusive/atomic accesses | AArch64 allows unaligned normal-memory accesses; `LDXR/STXR` need monitor semantics | Alignment-safe loads/stores plus split at page and device boundaries; at first, exclusive sequences exit to QEMU (slow, correct) *(unverified: how often XNU uses exclusives in hot paths)* |
@@ -199,38 +265,44 @@ so the process exits 0.
 | Level | Test | Runs where |
 | --- | --- | --- |
 | Unit | Decoder/lifter/JIT tests as they land in `xlt/tests/run_tests.sh` | host, `make -C xlt test` |
-| P1 integration | `qemu-system-aarch64 -accel xlt` + bare-metal payload (UART, HLT, CNTPCT, fault, PSCI off) | host, added to `xlt/tests/run_tests.sh` once a qemu tree with the patch exists |
-| P1 negative | Payload with an unassigned MMIO access must produce a data abort, not a hang | host |
-| P2 boot | Same command as `tools/qemu-open.sh` with `-accel xlt`; five markers + screenshot | host, manual until the guest work lands |
+| P1 integration | `qemu-system-aarch64 -M xlt -accel xlt` + bare-metal images (PL011, RAM, CurrentEL, PSCI off), TCG vs xlt byte comparison, determinism and four failure paths | host, [`p1/run.sh`](p1/run.sh) (opt-in; needs a QEMU tree with the patches) |
+| P1 negative | Missing `-kernel`, unknown accelerator, `-M xlt` without `-accel xlt`, `-accel xlt` on `-M virt`: each must fail with a diagnostic, exit 1, no hang | host, [`p1/run.sh`](p1/run.sh) |
+| P2 boot | The TCG boot line's payload/devices under `-M xlt -accel xlt`; five markers + screenshot + image md5 | host, manual until the machine work lands ([`p2/PLAN.md`](p2/PLAN.md) §5) |
 | P3 parity | `md5` of images, screenshot sha256, fps at matched load, CPU/frame | host, `tools/` gate scripts |
 
-The M2 tests cannot run in CI until a QEMU tree with the xlt patch exists; the plan keeps
+The M2 tests cannot run in CI until a QEMU tree with the xlt patches exists; the plan keeps
 `make test-open` independent of building QEMU (ADR-001), so the P1/QEMU tests are opt-in and skip
-with a clear message when `QEMU_XLT` is not set.
+with a clear message when no patched binary is available (`QEMU=` overrides the default path).
 
 ## Patch series order
 
-Each step is independently reviewable and keeps the TCG path byte-for-byte unchanged:
+The P1 series landed as steps 1–4 in a CPU-less form (no `CPUState`, no exception delivery); the
+plan below keeps the original order so a reader can map hooks to commits. Steps 5–7 are P2/P3 work
+restated in [`p2/PLAN.md`](p2/PLAN.md). Each step is independently reviewable and keeps the TCG path
+byte-for-byte unchanged:
 
-1. `accel/xlt/` skeleton: QOM types, Kconfig/meson entries, dispatcher thread that stops with
-   "not implemented"; `-accel xlt` selects it and `-accel tcg` is untouched. (H1, H2)
-2. Dispatcher + register bridge + exit ABI; a slice runs an empty payload (no blocks) and PSCI
-   `SYSTEM_OFF` works. (H3, H9, H13)
-3. RAM identity window, MMIO through `address_space_rw()`, sysreg reads. (H4, H6, H15)
-4. Semihosting and the sysreg write export. (H7, H14)
-5. Page tables, faults and ESR encoding. (H8, H10, H11, H12)
-6. Device-write invalidation and cache maintenance. (H5, R8)
-7. Performance work and the optional multi-thread backend: no ABI changes. (P3)
+1. `accel/xlt/` skeleton: QOM types, Kconfig/meson entries, dispatcher thread. `-accel xlt`
+   selects it and `-accel tcg` is untouched. **Landed (P1).** (H1, H2)
+2. Dispatcher + register bridge + exit ABI; PSCI `SYSTEM_OFF`/`SYSTEM_RESET` through the machine
+   callback. **Landed (P1).** (H13)
+3. Machine RAM region, MMIO through `address_space_rw()`, host-emulated sysreg reads.
+   **Landed (P1).** (H15, H16)
+4. Semihosting hook and the ELF loader. **Landed as a no-op hook (P1).** (H14)
+5. Page tables, faults and ESR encoding. **P2** (H8, H10, H11, H12)
+6. Device-write invalidation and cache maintenance. **P2** (H5, R8)
+7. Interrupts/GIC and timers, then performance work and the optional multi-thread backend.
+   **P2/P3** (no ABI changes)
 
 ## Unverified items
 
-- `MemTxAttrs` fields an accelerator is expected to pass for guest accesses, and whether secure
+- `MemTxAttrs` fields a machine is expected to pass for guest accesses, and whether secure
   versus non-secure EL2/EL3 state needs more than `MEMTXATTRS_UNSPECIFIED` (P2 dependency).
-- Whether EDK2 on `virt` executes from pflash in place, and how many flash bytes it executes
-  (affects R4's cost only).
+- Whether EDK2 on the TCG boot executes from pflash in place, and how many flash bytes it executes
+  (affects the fetch-cache cost in `p2/PLAN.md` §2.4/§4 only).
 - The P1/P2 performance projections (boot ≤4 min, MMIO fast-path benefit); only TCG baselines are
   measured.
-- The small patches (H5, H7, H8, H10, H11) are described, not written; no QEMU tree is vendored,
-  so none of them has been compiled.
+- P1's hook coverage is the "What P1 actually used" table above: H1, H2 (partial), H13 (partial),
+  H15 and H16 are implemented and tested; the remaining hooks are P2 design. H5, H7, H8, H10 and
+  H11 remain design-only, and no QEMU tree is vendored.
 - Exclusive/atomic instruction frequency and the cost of exiting on every exclusive sequence.
-- Behaviour of `-accel xlt` with `-M virt` variants other than `gic-version=3` and `cortex-a76`.
+- Behaviour of the P2 machine's GICv3 model against devices other than PL011 and virtio-blk.

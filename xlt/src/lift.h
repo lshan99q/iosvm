@@ -33,8 +33,8 @@ constexpr uint64_t kRamSize = 256ULL * 1024 * 1024;
  * function "g<entry_pc>" and writes the number of guest instructions that were translated to
  * *instruction_count. On failure returns nullptr and fills *error. */
 std::unique_ptr<llvm::Module> translate_region(llvm::LLVMContext &context, uint64_t entry_pc,
-                                               uint8_t *ram, uint64_t *instruction_count,
-                                               std::string *error);
+                                               uint8_t *ram, uint64_t ram_base, uint64_t ram_size,
+                                               uint64_t *instruction_count, std::string *error);
 
 /* Host helpers called from generated code. The JIT registers these addresses as absolute
  * symbols; they are declared here so lift.cpp can emit calls with the right prototypes. */
@@ -43,6 +43,11 @@ void xlt_bad_mem(uint64_t addr, uint64_t size);
 void xlt_unsupported(uint64_t pc, uint64_t insn);
 void xlt_semihost(CpuRegs *regs);
 uint64_t xlt_cntvct();
+uint64_t xlt_host_read(uint64_t addr, uint64_t size);
+void xlt_host_write(uint64_t addr, uint64_t value, uint64_t size);
+uint64_t xlt_sysreg_read(uint32_t reg);
+void xlt_sysreg_write(uint32_t reg, uint64_t value);
+void xlt_hvc(CpuRegs *regs, uint64_t imm);
 }
 
 } // namespace xlt

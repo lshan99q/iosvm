@@ -442,6 +442,8 @@ Opcode map_opcode(unsigned int id)
         return Opcode::kBrk;
     case ARM64_INS_SVC:
         return Opcode::kSvc;
+    case ARM64_INS_HVC:
+        return Opcode::kHvc;
     case ARM64_INS_WFE:
         return Opcode::kWfe;
     case ARM64_INS_WFI:
@@ -730,7 +732,8 @@ Insn decode(uint64_t pc, uint32_t word)
         ++out.operand_count;
     }
 
-    if (out.opcode == Opcode::kHlt || out.opcode == Opcode::kBrk || out.opcode == Opcode::kSvc) {
+    if (out.opcode == Opcode::kHlt || out.opcode == Opcode::kBrk || out.opcode == Opcode::kSvc ||
+        out.opcode == Opcode::kHvc) {
         out.trap = true;
     }
 
@@ -924,6 +927,8 @@ const char *opcode_name(Opcode opcode)
         return "brk";
     case Opcode::kSvc:
         return "svc";
+    case Opcode::kHvc:
+        return "hvc";
     case Opcode::kWfe:
         return "wfe";
     case Opcode::kWfi:

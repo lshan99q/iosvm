@@ -57,6 +57,8 @@ struct Region {
     IRBuilder<> B;
     Function *F;
     uint8_t *ram = nullptr;
+    uint64_t ram_base_addr = kRamBase;
+    uint64_t ram_size_addr = kRamSize;
     Value *cpu_arg = nullptr;
     Value *ram_base = nullptr;
 
@@ -503,35 +505,46 @@ Function *declFn(Region &r, const char *name, Type *ret, std::vector<Type *> par
 
 Value *emitLoad(Region &r, Value *addr, unsigned size)
 {
-    Value *off = r.B.CreateSub(addr, c64(r, kRamBase));
-    Value *ok = r.B.CreateICmpULE(off, c64(r, kRamSize - size));
+    Value *off = r.B.CreateSub(addr, c64(r, r.ram_base_addr));
+    Value *ok = r.B.CreateICmpULE(off, c64(r, r.ram_size_addr - size));
     BasicBlock *okbb = BasicBlock::Create(r.C, "m.ok", r.F);
-    BasicBlock *badbb = BasicBlock::Create(r.C, "m.bad", r.F);
-    r.B.CreateCondBr(ok, okbb, badbb);
-    r.B.SetInsertPoint(badbb);
-    Function *bad = declFn(r, "xlt_bad_mem", r.B.getVoidTy(), {i64T(r), i64T(r)}, true);
-    r.B.CreateCall(bad, {addr, c64(r, size)});
-    r.B.CreateUnreachable();
+    BasicBlock *mmiobb = BasicBlock::Create(r.C, "m.mmio", r.F);
+    BasicBlock *mergebb = BasicBlock::Create(r.C, "m.merge", r.F);
+    r.B.CreateCondBr(ok, okbb, mmiobb);
     r.B.SetInsertPoint(okbb);
     Value *p = r.B.CreateGEP(i8T(r), r.ram_base, off);
-    return r.B.CreateAlignedLoad(intT(r, size * 8), p, Align(1));
+    Value *direct = r.B.CreateAlignedLoad(intT(r, size * 8), p, Align(1));
+    r.B.CreateBr(mergebb);
+    r.B.SetInsertPoint(mmiobb);
+    Function *host = declFn(r, "xlt_host_read", i64T(r), {i64T(r), i64T(r)});
+    Value *mmio = r.B.CreateCall(host, {addr, c64(r, size)});
+    mmio = r.B.CreateTrunc(mmio, intT(r, size * 8));
+    r.B.CreateBr(mergebb);
+    r.B.SetInsertPoint(mergebb);
+    PHINode *phi = r.B.CreatePHI(intT(r, size * 8), 2);
+    phi->addIncoming(direct, okbb);
+    phi->addIncoming(mmio, mmiobb);
+    return phi;
 }
 
 void emitStore(Region &r, Value *addr, Value *val, unsigned size)
 {
-    Value *off = r.B.CreateSub(addr, c64(r, kRamBase));
-    Value *ok = r.B.CreateICmpULE(off, c64(r, kRamSize - size));
+    Value *off = r.B.CreateSub(addr, c64(r, r.ram_base_addr));
+    Value *ok = r.B.CreateICmpULE(off, c64(r, r.ram_size_addr - size));
     BasicBlock *okbb = BasicBlock::Create(r.C, "m.ok", r.F);
-    BasicBlock *badbb = BasicBlock::Create(r.C, "m.bad", r.F);
-    r.B.CreateCondBr(ok, okbb, badbb);
-    r.B.SetInsertPoint(badbb);
-    Function *bad = declFn(r, "xlt_bad_mem", r.B.getVoidTy(), {i64T(r), i64T(r)}, true);
-    r.B.CreateCall(bad, {addr, c64(r, size)});
-    r.B.CreateUnreachable();
+    BasicBlock *mmiobb = BasicBlock::Create(r.C, "m.mmio", r.F);
+    BasicBlock *donebb = BasicBlock::Create(r.C, "m.done", r.F);
+    r.B.CreateCondBr(ok, okbb, mmiobb);
     r.B.SetInsertPoint(okbb);
     Value *p = r.B.CreateGEP(i8T(r), r.ram_base, off);
     Value *v = size == 8 ? val : r.B.CreateTrunc(val, intT(r, size * 8));
     r.B.CreateAlignedStore(v, p, Align(1));
+    r.B.CreateBr(donebb);
+    r.B.SetInsertPoint(mmiobb);
+    Function *host = declFn(r, "xlt_host_write", r.B.getVoidTy(), {i64T(r), i64T(r), i64T(r)});
+    r.B.CreateCall(host, {addr, val, c64(r, size)});
+    r.B.CreateBr(donebb);
+    r.B.SetInsertPoint(donebb);
 }
 
 // blocks / exits -------------------------------------------------------------
@@ -579,7 +592,6 @@ bool lift(Region &r, const Insn &insn, uint64_t pc)
     case Opcode::kIsb:
     case Opcode::kDsb:
     case Opcode::kDmb:
-    case Opcode::kMsr:
         return false;
 
     // --- branches -----------------------------------------------------------
@@ -661,19 +673,7 @@ bool lift(Region &r, const Insn &insn, uint64_t pc)
     case Opcode::kMrs: {
         uint64_t sr = op(1).sysreg;
         Value *v;
-        switch (sr) {
-        case 0xDF02: {
-            Function *f = declFn(r, "xlt_cntvct", i64T(r), {});
-            v = b.CreateCall(f, {});
-            break;
-        }
-        case 0xDF00:
-            v = c64(r, 62500000ull);
-            break;
-        case 0xC005:
-            v = c64(r, 0);
-            break;
-        case 0xDA10: {
+        if (sr == 0xDA10) {
             ensureFlags(r);
             Value *p =
                 b.CreateOr(b.CreateOr(b.CreateShl(b.CreateZExt(r.fl.n, i32T(r)), c32(r, 31)),
@@ -681,14 +681,36 @@ bool lift(Region &r, const Insn &insn, uint64_t pc)
                            b.CreateOr(b.CreateShl(b.CreateZExt(r.fl.c, i32T(r)), c32(r, 29)),
                                       b.CreateShl(b.CreateZExt(r.fl.v, i32T(r)), c32(r, 28))));
             v = b.CreateZExt(p, i64T(r));
-            break;
-        }
-        default:
-            v = c64(r, 0);
-            break;
+        } else {
+            Function *f = declFn(r, "xlt_sysreg_read", i64T(r), {i32T(r)});
+            v = b.CreateCall(f, {c32(r, (uint32_t)sr)});
         }
         write(0, v);
         return false;
+    }
+    case Opcode::kMsr: {
+        uint64_t sr = op(0).sysreg;
+        Value *v = is_reg(1) ? read(1) : c64(r, 0);
+        Function *f = declFn(r, "xlt_sysreg_write", b.getVoidTy(), {i32T(r), i64T(r)});
+        b.CreateCall(f, {c32(r, (uint32_t)sr), v});
+        return false;
+    }
+    case Opcode::kHvc: {
+        for (int i = 0; i < 31; i++) {
+            b.CreateAlignedStore(getReg(r, i), cpuField(r, (unsigned)offsetof(CpuRegs, x) + i * 8),
+                                 Align(8));
+        }
+        b.CreateAlignedStore(getSPV(r), cpuField(r, (unsigned)offsetof(CpuRegs, sp)), Align(8));
+        Function *f = declFn(r, "xlt_hvc", b.getVoidTy(), {ptrT(r), i64T(r)});
+        b.CreateCall(f, {r.cpu_arg, c64(r, is_imm(0) ? op(0).imm : 0)});
+        Value *v0 =
+            b.CreateAlignedLoad(i64T(r), cpuField(r, (unsigned)offsetof(CpuRegs, x)), Align(8));
+        storeX(r, 0, v0);
+        r.rv[0] = v0;
+        r.rvalid[0] = true;
+        r.written.insert(0);
+        emitExit(r, c64(r, pc + 4));
+        return true;
     }
 
     // --- moves --------------------------------------------------------------
@@ -1358,8 +1380,8 @@ void buildEntry(Region &r, uint64_t entry_pc)
 } // namespace
 
 std::unique_ptr<llvm::Module> translate_region(LLVMContext &context, uint64_t entry_pc,
-                                               uint8_t *ram, uint64_t *instruction_count,
-                                               std::string *error)
+                                               uint8_t *ram, uint64_t ram_base, uint64_t ram_size,
+                                               uint64_t *instruction_count, std::string *error)
 {
     auto module = std::make_unique<Module>("r" + std::to_string(entry_pc), context);
     FunctionType *ft =
@@ -1370,6 +1392,8 @@ std::unique_ptr<llvm::Module> translate_region(LLVMContext &context, uint64_t en
 
     Region r(context, module.get(), fn);
     r.ram = ram;
+    r.ram_base_addr = ram_base;
+    r.ram_size_addr = ram_size;
     r.cpu_arg = fn->getArg(0);
     uint64_t count = 0;
     r.instruction_count = &count;
@@ -1395,7 +1419,7 @@ std::unique_ptr<llvm::Module> translate_region(LLVMContext &context, uint64_t en
                 r.B.CreateBr(r.bbs[p]);
                 break;
             }
-            if (p < kRamBase || p + 4 > kRamBase + kRamSize) {
+            if (p < r.ram_base_addr || p + 4 > r.ram_base_addr + r.ram_size_addr) {
                 Function *f =
                     declFn(r, "xlt_unsupported", r.B.getVoidTy(), {i64T(r), i64T(r)}, true);
                 r.B.CreateCall(f, {c64(r, p), c64(r, 0)});
@@ -1403,7 +1427,7 @@ std::unique_ptr<llvm::Module> translate_region(LLVMContext &context, uint64_t en
                 break;
             }
             uint32_t word = 0;
-            std::memcpy(&word, ram + (p - kRamBase), 4);
+            std::memcpy(&word, ram + (p - r.ram_base_addr), 4);
             Insn insn = decode(p, word);
             ++count;
             ended = lift(r, insn, p);

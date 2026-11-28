@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: MIT
 /*
- * engine.cpp — ELF loading, the block dispatcher and the host runtime helpers.
- *
- * Guest memory is one flat 256 MiB window mapped at kRamBase. The ELF's PT_LOAD segments are
- * copied into it, BSS is already zero, and generated code accesses it through a host pointer
- * embedded at translation time. A small direct-mapped cache turns the guest PC into a translated
- * function; a miss translates the region at that PC and installs it.
+ * engine.cpp — the `xlt run` front end: ELF loading, stack setup, CLI host callbacks and the
+ * summary line. Translation and dispatch live in libxlt.cpp so QEMU can embed the same engine.
  */
 #include "xlt.h"
-#include "jit.h"
+#include "libxlt.h"
 #include "lift.h"
 
 #include <algorithm>
 #include <cerrno>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,15 +26,6 @@ namespace xlt
 namespace
 {
 
-uint8_t *g_ram = nullptr;
-
-uint64_t now_ns()
-{
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                     std::chrono::steady_clock::now().time_since_epoch())
-                                     .count());
-}
-
 void set_error(std::string *error, const std::string &message)
 {
     if (error != nullptr) {
@@ -54,26 +40,97 @@ std::string hex(uint64_t value)
     return std::string(buffer);
 }
 
+[[noreturn]] void cli_fatal(void *, const char *message, int exit_code)
+{
+    std::fprintf(stderr, "%s\n", message);
+    std::fflush(stderr);
+    std::_Exit(exit_code);
+}
+
+uint64_t cli_cntvct(void *)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(ts.tv_sec) * 62500000ull +
+           static_cast<uint64_t>(ts.tv_nsec) / 16ull;
+}
+
+uint64_t cli_read_mem(void *, uint64_t addr, unsigned)
+{
+    cli_fatal(nullptr, ("xlt: bad guest memory access at " + hex(addr)).c_str(), 70);
+}
+
+void cli_write_mem(void *, uint64_t addr, uint64_t, unsigned)
+{
+    cli_fatal(nullptr, ("xlt: bad guest memory access at " + hex(addr)).c_str(), 70);
+}
+
+uint64_t cli_read_sysreg(void *, uint32_t reg)
+{
+    switch (reg) {
+    case 0xDF02: /* CNTVCT_EL0 */
+        return cli_cntvct(nullptr);
+    case 0xDF00: /* CNTFRQ_EL0 */
+        return 62500000ull;
+    case 0xC005: /* MPIDR_EL1 */
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+void cli_write_sysreg(void *, uint32_t, uint64_t)
+{
+    /* The CLI has no EL model; DAIF/TPIDR writes are accepted and ignored. */
+}
+
+void cli_hvc(void *, CpuRegs *regs, uint32_t)
+{
+    cli_fatal(nullptr, ("xlt: unsupported HVC/SMC at pc " + hex(regs->pc)).c_str(), 71);
+}
+
 } // namespace
 
 struct Engine::Impl {
     std::unique_ptr<uint8_t[]> ram;
-    std::unique_ptr<Jit> jit;
+    std::unique_ptr<LibXlt> lib;
+    HostOps host;
     uint64_t entry = 0;
     uint64_t image_end = kRamBase;
     bool loaded = false;
-    uint64_t translated_ns = 0;
-    uint64_t opt_jit_ns = 0;
+
+    static void semihost(void *opaque, CpuRegs *regs)
+    {
+        Engine::Impl *impl = static_cast<Engine::Impl *>(opaque);
+        const uint64_t op = regs->x[0];
+        const uint64_t arg = regs->x[1];
+        switch (op) {
+        case 0x04: { /* SYS_WRITE0 */
+            if (impl->ram == nullptr || arg < kRamBase || arg - kRamBase >= kRamSize) {
+                break;
+            }
+            const char *text = reinterpret_cast<const char *>(impl->ram.get() + (arg - kRamBase));
+            std::fputs(text, stdout);
+            std::fflush(stdout);
+            break;
+        }
+        case 0x18: /* SYS_EXIT */
+            regs->halted = 1;
+            regs->exit_code = arg;
+            break;
+        default:
+            regs->halted = 1;
+            regs->exit_code = 1;
+            break;
+        }
+    }
 };
 
 Engine::Engine() : impl_(std::make_unique<Impl>()) {}
 
-Engine::~Engine()
-{
-    if (impl_ != nullptr && g_ram == impl_->ram.get()) {
-        g_ram = nullptr;
-    }
-}
+Engine::~Engine() = default;
 
 Engine::Engine(Engine &&) noexcept = default;
 Engine &Engine::operator=(Engine &&) noexcept = default;
@@ -164,13 +221,25 @@ bool Engine::load(const std::string &elf_path, std::string *error)
         return false;
     }
 
+    impl_->lib.reset();
     impl_->ram = std::move(ram);
     impl_->entry = eh.e_entry;
     impl_->image_end = image_end;
     impl_->loaded = true;
-    impl_->translated_ns = 0;
-    impl_->opt_jit_ns = 0;
-    g_ram = impl_->ram.get();
+
+    impl_->host = HostOps{};
+    impl_->host.opaque = impl_.get();
+    impl_->host.ram = impl_->ram.get();
+    impl_->host.ram_base = kRamBase;
+    impl_->host.ram_size = kRamSize;
+    impl_->host.read_mem = cli_read_mem;
+    impl_->host.write_mem = cli_write_mem;
+    impl_->host.read_sysreg = cli_read_sysreg;
+    impl_->host.write_sysreg = cli_write_sysreg;
+    impl_->host.semihost = Impl::semihost;
+    impl_->host.hvc = cli_hvc;
+    impl_->host.cntvct = cli_cntvct;
+    impl_->host.fatal = cli_fatal;
 
     regs_ = CpuRegs{};
     regs_.pc = impl_->entry;
@@ -182,12 +251,6 @@ int Engine::run(const RunOptions &options, std::string *error)
 {
     if (!impl_->loaded) {
         set_error(error, "no ELF image loaded");
-        return -1;
-    }
-    if (impl_->jit == nullptr) {
-        impl_->jit = std::make_unique<Jit>();
-    }
-    if (!impl_->jit->init(error)) {
         return -1;
     }
 
@@ -220,97 +283,26 @@ int Engine::run(const RunOptions &options, std::string *error)
     regs_.exit_code = 0;
     regs_.pc = start;
     stats_ = Stats{};
-    impl_->translated_ns = 0;
-    impl_->opt_jit_ns = 0;
 
-    struct DCacheEntry {
-        uint64_t pc;
-        BlockFn fn;
-        uint64_t insns;
-    };
-    static DCacheEntry dc[1u << 13];
-    for (auto &entry : dc) {
-        entry.pc = std::numeric_limits<uint64_t>::max();
-        entry.fn = nullptr;
-        entry.insns = 0;
+    impl_->host.ram = impl_->ram.get();
+    impl_->lib = std::make_unique<LibXlt>(impl_->host);
+    if (!impl_->lib->init(error)) {
+        return -1;
+    }
+    const int rc = impl_->lib->run(&regs_, options.max_instructions, options.trace, &stats_, error);
+    if (rc != 0) {
+        return -1;
     }
 
-    uint64_t pc = start;
-    uint64_t translate_ns = 0;
-    uint64_t opt_jit_ns = 0;
-    uint64_t dispatches = 0;
-    const uint64_t begin = now_ns();
-
-    while (regs_.halted == 0) {
-        DCacheEntry &slot = dc[(pc ^ (pc >> 12)) & 0x1fffu];
-        if (slot.pc != pc || slot.fn == nullptr) {
-            uint64_t insns = 0;
-            const uint64_t t0 = now_ns();
-            const BlockFn fn = impl_->jit->get(pc, impl_->ram.get(), &insns, error);
-            const uint64_t t1 = now_ns();
-            translate_ns += impl_->jit->timing().translate_ns;
-            opt_jit_ns += impl_->jit->timing().opt_jit_ns;
-            if (fn == nullptr) {
-                if (error != nullptr && error->empty()) {
-                    *error = "cannot translate pc " + hex(pc);
-                }
-                return -1;
-            }
-            if (insns == 0) {
-                set_error(error, "empty region at " + hex(pc));
-                return -1;
-            }
-            slot.pc = pc;
-            slot.fn = fn;
-            slot.insns = insns;
-            stats_.blocks_translated++;
-            stats_.instructions_translated += insns;
-            if (options.trace) {
-                std::fprintf(stderr, "xlt: translate 0x%llx (%llu insns) took %llu ns\n",
-                             static_cast<unsigned long long>(pc),
-                             static_cast<unsigned long long>(insns),
-                             static_cast<unsigned long long>(t1 - t0));
-            }
-        }
-
-        const BlockFn fn = slot.fn;
-        const uint64_t insns = slot.insns;
-        if (options.trace) {
-            std::fprintf(stderr, "xlt: run 0x%llx\n", static_cast<unsigned long long>(pc));
-        }
-        const uint64_t next = fn(&regs_);
-        stats_.blocks_executed++;
-        stats_.instructions_executed += insns;
-
-        if (options.max_instructions != 0 &&
-            stats_.instructions_executed > options.max_instructions) {
-            set_error(error, "instruction limit exceeded at " + hex(pc));
-            return -1;
-        }
-        if (regs_.halted != 0) {
-            break;
-        }
-        if (next == 0) {
-            set_error(error, "block at " + hex(pc) + " returned no successor");
-            return -1;
-        }
-        dispatches++;
-        pc = next;
-        regs_.pc = pc;
-    }
-
-    const uint64_t wall_ns = now_ns() - begin;
-    impl_->translated_ns += translate_ns;
-    impl_->opt_jit_ns += opt_jit_ns;
     std::fprintf(stderr,
                  "xlt: wall=%llu ns translate=%llu ns opt+jit=%llu ns regions=%llu insns=%llu "
                  "dispatches=%llu exit=%llu\n",
-                 static_cast<unsigned long long>(wall_ns),
-                 static_cast<unsigned long long>(translate_ns),
-                 static_cast<unsigned long long>(opt_jit_ns),
+                 static_cast<unsigned long long>(impl_->lib->wall_ns()),
+                 static_cast<unsigned long long>(impl_->lib->translate_ns()),
+                 static_cast<unsigned long long>(impl_->lib->opt_jit_ns()),
                  static_cast<unsigned long long>(stats_.blocks_translated),
                  static_cast<unsigned long long>(stats_.instructions_executed),
-                 static_cast<unsigned long long>(dispatches),
+                 static_cast<unsigned long long>(impl_->lib->dispatches()),
                  static_cast<unsigned long long>(regs_.exit_code));
     std::fflush(stderr);
 
@@ -321,54 +313,3 @@ int Engine::run(const RunOptions &options, std::string *error)
 }
 
 } // namespace xlt
-
-extern "C" void xlt_bad_mem(uint64_t addr, uint64_t size)
-{
-    std::fprintf(stderr, "xlt: bad guest memory access addr=0x%llx size=0x%llx\n",
-                 static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size));
-    std::fflush(stderr);
-    std::_Exit(70);
-}
-
-extern "C" void xlt_unsupported(uint64_t pc, uint64_t insn)
-{
-    std::fprintf(stderr, "xlt: unsupported instruction 0x%08llx at 0x%llx\n",
-                 static_cast<unsigned long long>(insn), static_cast<unsigned long long>(pc));
-    std::fflush(stderr);
-    std::_Exit(71);
-}
-
-extern "C" uint64_t xlt_cntvct()
-{
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return 0;
-    }
-    return static_cast<uint64_t>(ts.tv_sec) * 62500000ull +
-           static_cast<uint64_t>(ts.tv_nsec) / 16ull;
-}
-
-extern "C" void xlt_semihost(xlt::CpuRegs *regs)
-{
-    const uint64_t op = regs->x[0];
-    const uint64_t arg = regs->x[1];
-    switch (op) {
-    case 0x04: { /* SYS_WRITE0: write the NUL-terminated string at x1. */
-        if (xlt::g_ram == nullptr || arg < xlt::kRamBase || arg - xlt::kRamBase >= xlt::kRamSize) {
-            break;
-        }
-        const char *text = reinterpret_cast<const char *>(xlt::g_ram + (arg - xlt::kRamBase));
-        std::fputs(text, stdout);
-        std::fflush(stdout);
-        break;
-    }
-    case 0x18: /* SYS_EXIT */
-        regs->halted = 1;
-        regs->exit_code = arg;
-        break;
-    default:
-        regs->halted = 1;
-        regs->exit_code = 1;
-        break;
-    }
-}

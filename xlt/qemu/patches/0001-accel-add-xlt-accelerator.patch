@@ -1,0 +1,196 @@
+diff --git a/accel/xlt/meson.build b/accel/xlt/meson.build
+new file mode 100644
+--- /dev/null
++++ b/accel/xlt/meson.build
+@@ -0,0 +1,3 @@
++xlt_ss = ss.source_set()
++xlt_ss.add(when: 'CONFIG_XLT', if_true: files('xlt-accel.c', 'xlt-accel-ops.c'))
++specific_ss.add_all(xlt_ss)
+diff --git a/accel/xlt/xlt-accel.c b/accel/xlt/xlt-accel.c
+new file mode 100644
+--- /dev/null
++++ b/accel/xlt/xlt-accel.c
+@@ -0,0 +1,57 @@
++/*
++ * xlt accelerator class.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/accel.h"
++#include "qemu/error-report.h"
++#include "qemu/module.h"
++#include "hw/boards.h"
++#include "sysemu/xlt-accel.h"
++
++#define TYPE_XLT_ACCEL "xlt-accel"
++
++typedef struct XltAccelClass {
++    AccelClass parent;
++} XltAccelClass;
++
++static bool xlt_allowed;
++
++static int xlt_init_machine(MachineState *ms)
++{
++    if (g_strcmp0(MACHINE_GET_CLASS(ms)->name, "xlt") != 0) {
++        error_report("-accel xlt is only supported by -M xlt");
++        return -1;
++    }
++    return 0;
++}
++
++static void xlt_setup_post(MachineState *ms, AccelState *accel)
++{
++    (void)accel;
++    xlt_machine_start_guest(ms);
++}
++
++static void xlt_accel_class_init(ObjectClass *oc, void *data)
++{
++    AccelClass *ac = ACCEL_CLASS(oc);
++
++    ac->name = "xlt";
++    ac->init_machine = xlt_init_machine;
++    ac->setup_post = xlt_setup_post;
++    ac->allowed = &xlt_allowed;
++}
++
++static const TypeInfo xlt_accel_type_info = {
++    .name = TYPE_XLT_ACCEL,
++    .parent = TYPE_ACCEL,
++    .class_init = xlt_accel_class_init,
++};
++
++static void xlt_accel_register_types(void)
++{
++    type_register_static(&xlt_accel_type_info);
++}
++
++type_init(xlt_accel_register_types)
+diff --git a/accel/xlt/xlt-accel-ops.c b/accel/xlt/xlt-accel-ops.c
+new file mode 100644
+--- /dev/null
++++ b/accel/xlt/xlt-accel-ops.c
+@@ -0,0 +1,69 @@
++/*
++ * xlt accelerator operations: one detached guest thread, no QEMU CPU.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/accel.h"
++#include "qemu/main-loop.h"
++#include "qemu/module.h"
++#include "qemu/rcu.h"
++#include "qemu/thread.h"
++#include "sysemu/accel-ops.h"
++#include "sysemu/xlt-accel.h"
++
++#define TYPE_XLT_ACCEL_OPS "xlt-accel-ops"
++
++typedef struct XltGuestStart {
++    void (*run)(void *opaque);
++    void *opaque;
++} XltGuestStart;
++
++static void *xlt_guest_thread(void *arg)
++{
++    XltGuestStart *start = arg;
++
++    rcu_register_thread();
++    qemu_mutex_lock_iothread();
++    start->run(start->opaque);
++    qemu_mutex_unlock_iothread();
++    rcu_unregister_thread();
++    g_free(start);
++    return NULL;
++}
++
++void xlt_start_guest_thread(void (*run)(void *opaque), void *opaque)
++{
++    XltGuestStart *start = g_new(XltGuestStart, 1);
++    QemuThread thread;
++
++    start->run = run;
++    start->opaque = opaque;
++    qemu_thread_create(&thread, "xlt-guest", xlt_guest_thread, start,
++                       QEMU_THREAD_DETACHED);
++}
++
++static void xlt_create_vcpu_thread(CPUState *cpu)
++{
++    /* xlt has no QEMU CPU; the guest runs on its own thread. */
++}
++
++static void xlt_accel_ops_class_init(ObjectClass *oc, void *data)
++{
++    AccelOpsClass *ops = ACCEL_OPS_CLASS(oc);
++
++    ops->create_vcpu_thread = xlt_create_vcpu_thread;
++}
++
++static const TypeInfo xlt_accel_ops_type_info = {
++    .name = TYPE_XLT_ACCEL_OPS,
++    .parent = TYPE_ACCEL_OPS,
++    .class_init = xlt_accel_ops_class_init,
++};
++
++static void xlt_accel_ops_register_types(void)
++{
++    type_register_static(&xlt_accel_ops_type_info);
++}
++
++type_init(xlt_accel_ops_register_types)
+diff --git a/include/sysemu/xlt-accel.h b/include/sysemu/xlt-accel.h
+new file mode 100644
+--- /dev/null
++++ b/include/sysemu/xlt-accel.h
+@@ -0,0 +1,17 @@
++/*
++ * xlt accelerator: start the host translator on a QEMU guest thread.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef SYSEMU_XLT_ACCEL_H
++#define SYSEMU_XLT_ACCEL_H
++
++typedef struct MachineState MachineState;
++
++/* Run @run(@opaque) on a detached QEMU thread that owns the BQL. */
++void xlt_start_guest_thread(void (*run)(void *opaque), void *opaque);
++
++/* Start the xlt machine's guest after machine init has completed. */
++void xlt_machine_start_guest(MachineState *machine);
++
++#endif /* SYSEMU_XLT_ACCEL_H */
+diff --git a/accel/meson.build b/accel/meson.build
+--- a/accel/meson.build
++++ b/accel/meson.build
+@@ -5,5 +5,6 @@
+ subdir('tcg')
+ if have_system
++  subdir('xlt')
+   subdir('hvf')
+   subdir('qtest')
+   subdir('kvm')
+diff --git a/configs/targets/aarch64-softmmu.mak b/configs/targets/aarch64-softmmu.mak
+--- a/configs/targets/aarch64-softmmu.mak
++++ b/configs/targets/aarch64-softmmu.mak
+@@ -3,3 +3,4 @@
+ TARGET_SUPPORTS_MTTCG=y
+ TARGET_XML_FILES= gdb-xml/aarch64-core.xml gdb-xml/aarch64-fpu.xml gdb-xml/arm-core.xml gdb-xml/arm-vfp.xml gdb-xml/arm-vfp3.xml gdb-xml/arm-vfp-sysregs.xml gdb-xml/arm-neon.xml gdb-xml/arm-m-profile.xml gdb-xml/arm-m-profile-mve.xml gdb-xml/aarch64-pauth.xml
+ TARGET_NEED_FDT=y
++CONFIG_XLT=y
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -1,3 +1,8 @@
++config XLT
++    bool
++    depends on ARM
++    select PL011
++
+ config ARM_VIRT
+     bool
+     imply PCI_DEVICES

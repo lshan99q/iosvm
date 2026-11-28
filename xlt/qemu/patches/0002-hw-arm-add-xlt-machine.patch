@@ -1,0 +1,245 @@
+diff --git a/hw/arm/xltm.c b/hw/arm/xltm.c
+new file mode 100644
+--- /dev/null
++++ b/hw/arm/xltm.c
+@@ -0,0 +1,234 @@
++/*
++ * xlt machine: map guest RAM/PL011, load an AArch64 ELF and run it through libxlt.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/accel.h"
++#include "qemu/error-report.h"
++#include "qemu/main-loop.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "qemu/units.h"
++#include "qapi/error.h"
++#include "elf.h"
++#include "hw/boards.h"
++#include "hw/char/pl011.h"
++#include "hw/irq.h"
++#include "hw/loader.h"
++#include "hw/qdev-properties.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/xlt-accel.h"
++#include "target/arm/cpu.h"
++#include "exec/address-spaces.h"
++#include "exec/memory.h"
++#include "libxlt_c.h"
++
++#define TYPE_XLT_MACHINE MACHINE_TYPE_NAME("xlt")
++OBJECT_DECLARE_SIMPLE_TYPE(XltMachineState, XLT_MACHINE)
++
++#define XLT_RAM_BASE 0x40000000ULL
++#define XLT_RAM_SIZE (256ULL * MiB)
++#define XLT_UART_BASE 0x09000000ULL
++#define XLT_STACK_SIZE (8ULL * MiB)
++
++struct XltMachineState {
++    MachineState parent;
++
++    MemoryRegion ram;
++    uint8_t *ram_ptr;
++    xlt_host_ops ops;
++    xlt_engine *engine;
++    xlt_cpu_regs regs;
++    uint64_t entry;
++};
++
++static void xltm_fatal(void *opaque, const char *message, int exit_code)
++{
++    fprintf(stderr, "xlt: %s\n", message);
++    fflush(NULL);
++    exit(exit_code);
++}
++
++static uint64_t xltm_read_mem(void *opaque, uint64_t addr, unsigned size)
++{
++    uint64_t value = 0;
++    MemTxResult result;
++
++    result = address_space_rw(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
++                              &value, size, false);
++    if (result != MEMTX_OK) {
++        xltm_fatal(opaque, "guest MMIO read failed", 70);
++    }
++    return value;
++}
++
++static void xltm_write_mem(void *opaque, uint64_t addr, uint64_t value, unsigned size)
++{
++    MemTxResult result;
++
++    result = address_space_rw(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
++                              &value, size, true);
++    if (result != MEMTX_OK) {
++        xltm_fatal(opaque, "guest MMIO write failed", 70);
++    }
++}
++
++static uint64_t xltm_read_sysreg(void *opaque, uint32_t reg)
++{
++    switch (reg) {
++    case 0xc212: /* CurrentEL */
++        return 4;
++    case 0xdf00: /* CNTFRQ_EL0 */
++        return 62500000;
++    case 0xdf02: /* CNTVCT_EL0 */
++        return (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 16;
++    case 0xc005: /* MPIDR_EL1 */
++        return 0;
++    default:
++        return 0;
++    }
++}
++
++static void xltm_write_sysreg(void *opaque, uint32_t reg, uint64_t value)
++{
++    /* P1 ignores guest system-register writes. */
++}
++
++static void xltm_semihost(void *opaque, xlt_cpu_regs *regs)
++{
++    /* HLT #0xf000 is a no-op in P1: fixtures use PSCI SYSTEM_OFF via HVC. */
++}
++
++static void xltm_hvc(void *opaque, xlt_cpu_regs *regs, uint32_t imm)
++{
++    if (regs->x[0] == 0x84000008) { /* PSCI SYSTEM_OFF */
++        fflush(NULL);
++        exit(0);
++    }
++    if (regs->x[0] == 0x84000009) { /* PSCI SYSTEM_RESET */
++        fflush(NULL);
++        exit(0);
++    }
++    xltm_fatal(opaque, "unsupported HVC", 71);
++}
++
++static uint64_t xltm_cntvct(void *opaque)
++{
++    return (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 16;
++}
++
++static void xltm_guest_run(void *opaque)
++{
++    XltMachineState *s = opaque;
++    char error[512] = { 0 };
++
++    if (xlt_engine_run(s->engine, &s->regs, 0, error, sizeof(error)) != 0) {
++        xltm_fatal(s, error[0] ? error : "engine run failed", 70);
++    }
++    fflush(NULL);
++    exit((int)s->regs.exit_code);
++}
++
++static void xltm_irq_handler(void *opaque, int n, int level)
++{
++}
++
++static void xltm_init(MachineState *machine)
++{
++    XltMachineState *s = XLT_MACHINE(machine);
++    uint64_t entry = 0, low = 0, high = 0;
++    uint32_t flags = 0;
++    char error[512] = { 0 };
++    qemu_irq irq;
++
++    if (g_strcmp0(current_accel_name(), "xlt") != 0) {
++        error_setg(&error_fatal, "-M xlt requires -accel xlt");
++        return;
++    }
++    if (machine->kernel_filename == NULL) {
++        error_report("xlt: -kernel <elf> is required");
++        exit(1);
++    }
++
++    memory_region_init_ram(&s->ram, NULL, "xlt.ram", XLT_RAM_SIZE,
++                           &error_fatal);
++    memory_region_add_subregion(get_system_memory(), XLT_RAM_BASE, &s->ram);
++    s->ram_ptr = memory_region_get_ram_ptr(&s->ram);
++
++    if (load_elf(machine->kernel_filename, NULL, NULL, NULL, &entry, &low, &high,
++                 &flags, 0, EM_AARCH64, 0, 0) < 0) {
++        error_report("xlt: cannot load %s", machine->kernel_filename);
++        exit(1);
++    }
++    if (entry < XLT_RAM_BASE || entry >= XLT_RAM_BASE + XLT_RAM_SIZE ||
++        high > XLT_RAM_BASE + XLT_RAM_SIZE) {
++        error_report("xlt: kernel does not fit in guest RAM");
++        exit(1);
++    }
++    s->entry = entry;
++
++    irq = qemu_allocate_irq(xltm_irq_handler, s, 0);
++    pl011_create(XLT_UART_BASE, irq, serial_hd(0));
++
++    s->ops = (xlt_host_ops){
++        .opaque = s,
++        .ram = s->ram_ptr,
++        .ram_base = XLT_RAM_BASE,
++        .ram_size = XLT_RAM_SIZE,
++        .read_mem = xltm_read_mem,
++        .write_mem = xltm_write_mem,
++        .read_sysreg = xltm_read_sysreg,
++        .write_sysreg = xltm_write_sysreg,
++        .semihost = xltm_semihost,
++        .hvc = xltm_hvc,
++        .cntvct = xltm_cntvct,
++        .fatal = xltm_fatal,
++    };
++    s->engine = xlt_engine_create(&s->ops);
++    if (s->engine == NULL || xlt_engine_init(s->engine, error, sizeof(error)) != 0) {
++        error_report("xlt: %s", error[0] ? error : "engine init failed");
++        exit(1);
++    }
++
++    memset(&s->regs, 0, sizeof(s->regs));
++    s->regs.pc = entry;
++    s->regs.sp = XLT_RAM_BASE + XLT_RAM_SIZE - XLT_STACK_SIZE;
++    s->regs.sp &= ~0xFULL;
++}
++
++void xlt_machine_start_guest(MachineState *machine)
++{
++    XltMachineState *s = XLT_MACHINE(machine);
++
++    xlt_start_guest_thread(xltm_guest_run, s);
++}
++
++static void xltm_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->desc = "xlt AArch64-to-x86-64 translator (P1)";
++    mc->init = xltm_init;
++    mc->max_cpus = 1;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a57");
++    mc->no_parallel = 1;
++    mc->no_floppy = 1;
++    mc->no_cdrom = 1;
++    mc->no_sdcard = 1;
++    mc->default_ram_size = XLT_RAM_SIZE;
++}
++
++static const TypeInfo xltm_type_info = {
++    .name = TYPE_XLT_MACHINE,
++    .parent = TYPE_MACHINE,
++    .instance_size = sizeof(XltMachineState),
++    .class_init = xltm_class_init,
++};
++
++static void xltm_register_types(void)
++{
++    type_register_static(&xltm_type_info);
++}
++
++type_init(xltm_register_types)
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -73,0 +74,2 @@
++arm_ss.add(when: 'CONFIG_XLT', if_true: files('xltm.c'))
++

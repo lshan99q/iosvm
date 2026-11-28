@@ -270,6 +270,7 @@ enum class Opcode : uint16_t {
     kHlt,
     kBrk,
     kSvc,
+    kHvc,
     kWfe,
     kWfi,
     kSev,

@@ -30,7 +30,8 @@ class Jit
     bool init(std::string *error);
 
     /* Translate, optimise and JIT the region at pc. Returns nullptr on failure. */
-    BlockFn get(uint64_t pc, uint8_t *ram, uint64_t *instruction_count, std::string *error);
+    BlockFn get(uint64_t pc, uint8_t *ram, uint64_t ram_base, uint64_t ram_size,
+                uint64_t *instruction_count, std::string *error);
 
     /* Timings of the most recent get(), in nanoseconds. */
     struct Timing {
