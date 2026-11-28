@@ -4,8 +4,10 @@
 > numbers in [Benchmark results](#benchmark-results) are from
 > [`reports/xlt-m1-report.md`](../reports/xlt-m1-report.md) (verdict PASS). **M2/P1 is delivered**:
 > `-accel xlt` and the `-M xlt` machine run bare-metal images with byte-identical TCG parity,
-> verified in [`reports/xlt-m2-p1-report.md`](../reports/xlt-m2-p1-report.md). The rest of M2 is
-> staged in [`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md).
+> verified in [`reports/xlt-m2-p1-report.md`](../reports/xlt-m2-p1-report.md). **M2/P2.1 (stage-1
+> MMU) and P2.2 (exceptions)** are also in the branch (`601930d`, `01523b6`), with their own oracle
+> parity; see [M2/P2: stage-1 MMU and exceptions](#m2p2-stage-1-mmu-and-exceptions). The rest of M2
+> is staged in [`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md).
 
 XLT — `xlt` on the command line and in the tree — is our own dynamic translator. It executes
 AArch64 guest code on an x86-64 host by translating it a region at a time, then caching the host
@@ -304,8 +306,65 @@ stdout and exit 0. P2.2's oracle covers `svc #0x42` (`esr=0x56000042`), a lower-
 abort (`esr=0x9200000f`), DAIF round-trip and an illegal-ERET trap (`esr=0x3a000000`, IL=1).
 Fixtures and hashes are in [`xlt/qemu/p2/NOTES.md`](../xlt/qemu/p2/NOTES.md).
 
+### M2/P2.2: exceptions and privilege
+
+The second P2 step (`01523b6`) turns the engine from "EL1 code with a fault handler" into a
+two-privilege-level machine. The register-level detail — vector offsets, PSTATE/SPSR bit layouts,
+ESR/ISS encodings, DFSC codes — is in
+[`xlt/qemu/p2/ARM-DETAILS.md`](../xlt/qemu/p2/ARM-DETAILS.md); this section is the contract the
+engine implements.
+
+**Execution state.** PSTATE carries M[3:0] (EL0t/EL1t/EL1h), DAIF, NZCV, SPSel and IL; SP_EL0 and
+SP_EL1 are separate registers and the active one is selected by `SPSel`. `msr spsel`,
+`msr daifset`, `msr daifclr` and `mrs daif` work, and `eret` restores PC, NZCV, DAIF, SPSel and the
+SP bank from ELR_EL1/SPSR_EL1. EL0 entry is done by `eret` with a user SPSR — the fixtures use
+`SPSR=0x3c0` (EL0t, DAIF masked).
+
+**Synchronous entry.** An exception from EL0 vectors through `VBAR_EL1 + 0x400` (lower AArch64,
+synchronous); an exception taken in EL1 with `SPSel=1` uses `VBAR_EL1 + 0x200` (current EL with SPx).
+Entry writes ELR_EL1 (the trapping instruction or the next one, per trap), SPSR_EL1 (the old PSTATE),
+ESR_EL1 (syndrome), FAR_EL1 (for aborts), selects EL1h, masks DAIF and makes SP_EL1 active; `eret`
+validates the target EL/`nRW`/M fields, and an invalid SPSR sets PSTATE.IL instead of branching.
+
+**Traps the P2.2 oracle exercises.**
+
+| Trap | Encoding | Notes |
+|---|---|---|
+| `svc #0x42` from EL0 | EC `0x15`, ISS = the 16-bit immediate → `ESR=0x56000042` | `ELR_EL1` points *past* the SVC; taken even with DAIF masked (SVC is synchronous, not maskable) |
+| Lower-EL data abort | EC `0x24`, WnR/FSC in ISS → `ESR=0x9200000f` | permission fault, level 3 (FSC `0xf`), `FAR=0x40203000`; the handler repairs the L3 entry, does `tlbi`/`dsb`/`isb` and retries the load (`recovered=0xfeedfacecafebeef`) |
+| Illegal-ERET state | PSTATE.IL=1 → next fetch raises EC `0x0e` → `ESR=0x3a000000` | the fixture's `eret` targets `SPSR=0x3c9` (M=EL2h, unimplemented); entry records `SPSR=0x1003c5` with IL=1 |
+| DAIF round-trip | `msr daifclr #0xf` / `msr daifset #0xf` | observed `0x3c0 → 0x0 → 0x3c0`; DAIF masked suppresses IRQ (P2.3) but not SVC/aborts |
+
+**The AP/XN contract.** Permission bits are `AP[0]` (bit 6, EL0 access) and `AP[1]` (bit 7,
+read-only at EL1). In the EL1&0 two-range regime QEMU computes EL1 execute permission as
+
+```text
+xn = pxn || (user_rw & PAGE_WRITE)
+```
+
+(`target/arm/ptw.c`, `get_S1prot()`), i.e. **any user-writable mapping is execute-never at EL1**.
+The P2.2 fixture therefore places EL0 code on a user read-only 4 KiB page (descriptor `0x7C3`),
+EL0 stack/data on user-RW pages (`0x743`), EL1 code on EL1-only 2 MiB blocks (`0x701`) and the
+probe page on an EL1-only page (`0x703`). The engine implements the same rule, which is what makes
+the EL0 `ldr` from `0x40203000` a permission fault rather than a silent EL1 write.
+
+**Oracle and commands.** The fixture is
+[`xlt/tests/fixtures/p2/exc/`](../xlt/tests/fixtures/p2/exc); its 419-byte serial output has sha256
+`b9eef31443d4fb3e2ef5e9b9cd0ac422ae72bcf369b7687f2124650bf42b6e62`, ends with the marker
+`xlt-p2.2-ok`, and is reproducible from the fixture ELF (sha256
+`c9b4c53d1ca74104df2695fc405cecaa86c235fbb9e044fe7f52e2a4a6f723ae`). `xlt/qemu/p2/run.sh` diffs
+TCG against xlt for all three P2 images (259 / 19 / 419 bytes) and prints `run.sh: PASS`.
+
+**Not yet.** Interrupt delivery, the GIC, the virtual timer, PL011 RX and the failure-mode wiring
+(P2.3); pflash/virtio/FDT and the first real payload boot (P2.4); boot parity to SpringBoard
+(P2.5, checklist in [`xlt/qemu/p2/ACCEPTANCE.md`](../xlt/qemu/p2/ACCEPTANCE.md)). The machine
+target for those steps is specified in
+[`xlt/qemu/p2/MACHINE-SPEC.md`](../xlt/qemu/p2/MACHINE-SPEC.md), and the firmware/FDT contract in
+[`xlt/qemu/p2/FDT-NOTES.md`](../xlt/qemu/p2/FDT-NOTES.md).
+
 **Still missing.** Interrupt delivery, GICD/GICR/ICC, virtual timer, PL011 RX, EL2/EL3, FP/SIMD,
-atomics, SMP, pflash/virtio/FDT; these belong to P2.3 and later.
+atomics, SMP, pflash/virtio/FDT; these belong to P2.3 and later. The P2.5 acceptance checklist for
+the real payload boot is [`xlt/qemu/p2/ACCEPTANCE.md`](../xlt/qemu/p2/ACCEPTANCE.md).
 
 ## Limitations
 
@@ -364,6 +423,11 @@ risks — is [`xlt/qemu/INTEGRATION.md`](../xlt/qemu/INTEGRATION.md).
 | [`xlt/qemu/p1/NOTES.md`](../xlt/qemu/p1/NOTES.md) | the P1 machine and accelerator: limits, registers, evidence |
 | [`xlt/qemu/p1/run.sh`](../xlt/qemu/p1/run.sh) | the P1 parity and failure-path suite |
 | [`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md) | the M2/P2 plan (path A: grow the custom machine) |
+| [`xlt/qemu/p2/NOTES.md`](../xlt/qemu/p2/NOTES.md) | P2.1/P2.2 fixtures, oracles and implementation notes |
+| [`xlt/qemu/p2/ARM-DETAILS.md`](../xlt/qemu/p2/ARM-DETAILS.md) | vectors, PSTATE/SPSR, ESR/DFSC, PSCI, generic timer and GICv3 register reference |
+| [`xlt/qemu/p2/MACHINE-SPEC.md`](../xlt/qemu/p2/MACHINE-SPEC.md) | the P2.4 machine contract: address map, devices, pflash, DTB, PSCI answers |
+| [`xlt/qemu/p2/FDT-NOTES.md`](../xlt/qemu/p2/FDT-NOTES.md) | what EDK2 reads from the device tree and the minimal FDT for `-M xlt` |
+| [`xlt/qemu/p2/ACCEPTANCE.md`](../xlt/qemu/p2/ACCEPTANCE.md) | the P2.5 boot-parity checklist: markers, timing, screenshot, triage |
 | [`xlt/qemu/build-qemu.sh`](../xlt/qemu/build-qemu.sh), [`xlt/qemu/build-xlt.sh`](../xlt/qemu/build-xlt.sh), [`xlt/qemu/patches/`](../xlt/qemu/patches/) | pristine-tree build, patched-tree build, the two patches |
 | `xlt/src/libxlt.h`, `xlt/src/libxlt_c.h` | the host-neutral engine facade and the C ABI QEMU links against |
 | [`reports/xlt-m1-report.md`](../reports/xlt-m1-report.md) | the independent M1 verification report |
