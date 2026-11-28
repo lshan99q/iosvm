@@ -107,11 +107,22 @@ mkdir -p "$build" && cd "$build"
 ninja -j16 qemu-system-aarch64
 ```
 
-P1 is deliberately small: no `CPUState`, no ARM CPU/MMU model, no interrupts or GIC, no pflash, no
-semihosting beyond the no-op hook; `hvc #0` is the PSCI conduit and only `SYSTEM_OFF`/`SYSTEM_RESET`
-are implemented. The exact limits, the host-emulated system registers and the evidence table are in
-[`p1/NOTES.md`](p1/NOTES.md); the plan for the next machine generation is
-[`p2/PLAN.md`](p2/PLAN.md).
+P1 is deliberately small: no `CPUState`, no ARM CPU/MMU model, no interrupts or GIC, no pflash.
+P2.1 adds stage-1 EL1 translation, synchronous aborts, `eret`, and real HLT semihosting while
+keeping the same CPU-less machine. Build the P2 fixtures and compare them with TCG:
+
+```sh
+xlt/qemu/p2/run.sh
+# ok: p2-mmu: TCG/xlt identical (259 bytes)
+# ok: p2-semihost: TCG/xlt identical (19 bytes)
+# run.sh: PASS (P2.1 MMU/fault/ERET and semihosting parity)
+```
+
+The same MMU image runs through the standalone engine with `./xlt/build/xlt run
+xlt/build/fixtures/p2/mmu.elf`. P1/P2.1 still have no interrupts, GIC or timer virtualisation;
+`p2/PLAN.md` and [`p2/NOTES.md`](p2/NOTES.md) describe the next stage. The exact P1 limits,
+host-emulated system registers and evidence table are in [`p1/NOTES.md`](p1/NOTES.md); the plan
+for the next machine generation is [`p2/PLAN.md`](p2/PLAN.md).
 
 Every statement below was checked against the QEMU v8.2.2 sources
 (commit `11aa0b1ff115b86160c4d37e7c37e6a6b13b77ea`), the release this plan targets and the one

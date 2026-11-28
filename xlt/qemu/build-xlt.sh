@@ -50,7 +50,7 @@ mkdir -p "$lib_dir/obj"
 llvm_flags=()
 read -r -a llvm_flags <<<"$(llvm-config-18 --cxxflags)"
 cxxflags=(-O2 -g -std=c++17 -fPIC -I"$root/xlt/src" "${llvm_flags[@]}")
-for srcfile in decode.cpp jit.cpp libxlt.cpp libxlt_c.cpp lift.cpp; do
+for srcfile in decode.cpp jit.cpp libxlt.cpp libxlt_c.cpp lift.cpp p2.cpp; do
 	echo "   $srcfile" >&2
 	g++ "${cxxflags[@]}" -c "$root/xlt/src/$srcfile" -o "$lib_dir/obj/${srcfile%.cpp}.o"
 done

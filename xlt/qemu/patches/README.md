@@ -13,7 +13,8 @@ done
   its mandatory `xlt-accel-ops` object, `CONFIG_XLT` wiring and the PL011
   dependency.
 - `0002-hw-arm-add-xlt-machine.patch`: the `xlt-machine` board, PL011, ELF
-  loader and host callbacks.
+  loader, host callbacks, and the P2.1 `ArmSysRegs`/MMIO/BQL/semihosting
+  handshake used by the MMU and semihosting fixtures.
 
 `xlt/qemu/build-xlt.sh` performs this sequence on a disposable copy in
 `$QEMU_WORK_DIR/qemu-8.2.2-xlt`, so the pristine tree stays untouched. On a

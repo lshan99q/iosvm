@@ -57,13 +57,31 @@ uint64_t cli_cntvct(void *)
            static_cast<uint64_t>(ts.tv_nsec) / 16ull;
 }
 
+constexpr uint64_t kPl011Base = 0x09000000;
+constexpr uint64_t kPl011Size = 0x1000;
+constexpr uint64_t kPl011Dr = 0x00;
+constexpr uint64_t kPl011Fr = 0x18;
+
 uint64_t cli_read_mem(void *, uint64_t addr, unsigned)
 {
+    if (addr >= kPl011Base && addr < kPl011Base + kPl011Size) {
+        if (addr - kPl011Base == kPl011Fr) {
+            return 0x90; /* TXFE | RXFE, same value the PL011 reports to the P2.1 fixture */
+        }
+        return 0;
+    }
     cli_fatal(nullptr, ("xlt: bad guest memory access at " + hex(addr)).c_str(), 70);
 }
 
-void cli_write_mem(void *, uint64_t addr, uint64_t, unsigned)
+void cli_write_mem(void *, uint64_t addr, uint64_t value, unsigned)
 {
+    if (addr >= kPl011Base && addr < kPl011Base + kPl011Size) {
+        if (addr - kPl011Base == kPl011Dr) {
+            std::fputc(static_cast<int>(value & 0xff), stdout);
+            std::fflush(stdout);
+        }
+        return;
+    }
     cli_fatal(nullptr, ("xlt: bad guest memory access at " + hex(addr)).c_str(), 70);
 }
 
@@ -86,8 +104,15 @@ void cli_write_sysreg(void *, uint32_t, uint64_t)
     /* The CLI has no EL model; DAIF/TPIDR writes are accepted and ignored. */
 }
 
-void cli_hvc(void *, CpuRegs *regs, uint32_t)
+void cli_hvc(void *, CpuRegs *regs, uint32_t imm)
 {
+    const uint64_t function = regs->x[0];
+    if (imm == 0 && (function == 0x84000008ull || function == 0x84000009ull)) {
+        /* PSCI SYSTEM_OFF / SYSTEM_RESET: exit successfully, like the QEMU machine. */
+        regs->halted = 1;
+        regs->exit_code = 0;
+        return;
+    }
     cli_fatal(nullptr, ("xlt: unsupported HVC/SMC at pc " + hex(regs->pc)).c_str(), 71);
 }
 

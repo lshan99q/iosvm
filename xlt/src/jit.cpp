@@ -9,6 +9,7 @@
  */
 #include "jit.h"
 
+#include "libxlt.h"
 #include "lift.h"
 
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
@@ -108,6 +109,7 @@ bool Jit::init(std::string *error)
     add_symbol("xlt_host_write", &xlt_host_write);
     add_symbol("xlt_sysreg_read", &xlt_sysreg_read);
     add_symbol("xlt_sysreg_write", &xlt_sysreg_write);
+    add_symbol("xlt_pstate_write", &xlt_pstate_write);
     add_symbol("xlt_hvc", &xlt_hvc);
     if (auto err = impl_->jit->getMainJITDylib().define(absoluteSymbols(std::move(symbols)))) {
         if (error)

@@ -444,6 +444,16 @@ Opcode map_opcode(unsigned int id)
         return Opcode::kSvc;
     case ARM64_INS_HVC:
         return Opcode::kHvc;
+    case ARM64_INS_SMC:
+        return Opcode::kSmc;
+    case ARM64_INS_ERET:
+        return Opcode::kEret;
+    case ARM64_INS_TLBI:
+        return Opcode::kTlbi;
+    case ARM64_INS_DC:
+        return Opcode::kDc;
+    case ARM64_INS_IC:
+        return Opcode::kIc;
     case ARM64_INS_WFE:
         return Opcode::kWfe;
     case ARM64_INS_WFI:
@@ -689,8 +699,30 @@ Insn decode(uint64_t pc, uint32_t word)
             dst.kind = OperandKind::kSysReg;
             dst.sysreg = static_cast<uint16_t>(src.sys);
             break;
+        case ARM64_OP_PSTATE:
+            dst.kind = OperandKind::kPstate;
+            dst.pstate = static_cast<uint16_t>(src.pstate);
+            break;
+        case ARM64_OP_SYS:
+            if (out.opcode != Opcode::kTlbi && out.opcode != Opcode::kDc &&
+                out.opcode != Opcode::kIc) {
+                out.unsupported = true;
+                return out;
+            }
+            dst.kind = OperandKind::kImm;
+            dst.imm = src.sys;
+            break;
+        case ARM64_OP_BARRIER:
+            if (out.opcode != Opcode::kIsb && out.opcode != Opcode::kDsb &&
+                out.opcode != Opcode::kDmb) {
+                out.unsupported = true;
+                return out;
+            }
+            dst.kind = OperandKind::kImm;
+            dst.imm = src.barrier;
+            break;
         default:
-            /* PSTATE, SYS and FP/SIMD operands are outside M1. */
+            /* FP/SIMD and remaining operand classes are outside the P2 subset. */
             out.unsupported = true;
             return out;
         }
@@ -929,6 +961,16 @@ const char *opcode_name(Opcode opcode)
         return "svc";
     case Opcode::kHvc:
         return "hvc";
+    case Opcode::kSmc:
+        return "smc";
+    case Opcode::kEret:
+        return "eret";
+    case Opcode::kTlbi:
+        return "tlbi";
+    case Opcode::kDc:
+        return "dc";
+    case Opcode::kIc:
+        return "ic";
     case Opcode::kWfe:
         return "wfe";
     case Opcode::kWfi:

@@ -592,6 +592,9 @@ bool lift(Region &r, const Insn &insn, uint64_t pc)
     case Opcode::kIsb:
     case Opcode::kDsb:
     case Opcode::kDmb:
+    case Opcode::kTlbi:
+    case Opcode::kDc:
+    case Opcode::kIc:
         return false;
 
     // --- branches -----------------------------------------------------------
@@ -689,13 +692,30 @@ bool lift(Region &r, const Insn &insn, uint64_t pc)
         return false;
     }
     case Opcode::kMsr: {
+        if (op(0).kind == OperandKind::kPstate) {
+            Function *pf = declFn(r, "xlt_pstate_write", b.getVoidTy(), {i32T(r), i64T(r)});
+            b.CreateCall(pf, {c32(r, op(0).pstate), is_imm(1) ? c64(r, op(1).imm) : c64(r, 0)});
+            emitExit(r, c64(r, pc + 4));
+            return true;
+        }
+        if (op(0).kind != OperandKind::kSysReg) {
+            return false;
+        }
         uint64_t sr = op(0).sysreg;
         Value *v = is_reg(1) ? read(1) : c64(r, 0);
         Function *f = declFn(r, "xlt_sysreg_write", b.getVoidTy(), {i32T(r), i64T(r)});
         b.CreateCall(f, {c32(r, (uint32_t)sr), v});
+        /* A translation-control write changes how the next fetch is interpreted. End the flat
+         * block so the dispatcher can re-enter the MMU-aware interpreter at the next instruction.
+         */
+        if (sr == 0xc080 || sr == 0xc100 || sr == 0xc101 || sr == 0xc102 || sr == 0xc600) {
+            emitExit(r, c64(r, pc + 4));
+            return true;
+        }
         return false;
     }
-    case Opcode::kHvc: {
+    case Opcode::kHvc:
+    case Opcode::kSmc: {
         for (int i = 0; i < 31; i++) {
             b.CreateAlignedStore(getReg(r, i), cpuField(r, (unsigned)offsetof(CpuRegs, x) + i * 8),
                                  Align(8));

@@ -9,6 +9,7 @@
 #include "libxlt.h"
 
 #include "jit.h"
+#include "p2.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -87,6 +88,10 @@ extern "C" void xlt_host_write(uint64_t addr, uint64_t value, uint64_t size)
 
 extern "C" uint64_t xlt_sysreg_read(uint32_t reg)
 {
+    uint64_t value = 0;
+    if (xlt::p2_sysreg_read(reg, &value)) {
+        return value;
+    }
     const xlt::HostOps *ops = xlt::host_ops();
     if (ops == nullptr || ops->read_sysreg == nullptr) {
         return 0;
@@ -96,10 +101,18 @@ extern "C" uint64_t xlt_sysreg_read(uint32_t reg)
 
 extern "C" void xlt_sysreg_write(uint32_t reg, uint64_t value)
 {
+    if (xlt::p2_sysreg_write(reg, value)) {
+        return;
+    }
     const xlt::HostOps *ops = xlt::host_ops();
     if (ops != nullptr && ops->write_sysreg != nullptr) {
         ops->write_sysreg(ops->opaque, reg, value);
     }
+}
+
+extern "C" void xlt_pstate_write(uint32_t pstate, uint64_t immediate)
+{
+    (void)xlt::p2_pstate_write(pstate, immediate);
 }
 
 extern "C" void xlt_hvc(xlt::CpuRegs *regs, uint64_t imm)
@@ -146,6 +159,7 @@ namespace xlt
 struct LibXlt::Impl {
     HostOps host;
     std::unique_ptr<Jit> jit;
+    std::unique_ptr<P2Engine> p2;
     Stats stats;
     uint64_t wall_ns_value = 0;
     uint64_t translate_ns_value = 0;
@@ -206,9 +220,23 @@ int LibXlt::run(CpuRegs *regs, uint64_t max_instructions, bool trace, Stats *sta
         entry.insns = 0;
     }
 
+    impl_->p2 = std::make_unique<P2Engine>(&impl_->host, regs);
+
     uint64_t pc = regs->pc;
     const uint64_t begin = now_ns();
     while (regs->halted == 0) {
+        if (impl_->p2->enabled()) {
+            uint64_t executed = 0;
+            if (impl_->p2->run(max_instructions, &executed, error) != 0) {
+                return -1;
+            }
+            impl_->stats.instructions_executed += executed;
+            if (regs->halted != 0) {
+                break;
+            }
+            pc = regs->pc;
+            continue;
+        }
         DCacheEntry &slot = dc[(pc ^ (pc >> 12)) & 0x1fffu];
         if (slot.pc != pc || slot.fn == nullptr) {
             uint64_t insns = 0;

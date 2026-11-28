@@ -18,10 +18,11 @@ step. The verification report is [`../../reports/xlt-m2-p1-report.md`](../../rep
 
 | artifact | what |
 | --- | --- |
-| [`patches/0001-accel-add-xlt-accelerator.patch`](patches/) | 5,197 B, sha256 `bdfeb19f…`: `xlt-accel` / `xlt-accel-ops`, `CONFIG_XLT` wiring, accelerator ownership of guest startup through `AccelClass::setup_post` |
-| [`patches/0002-hw-arm-add-xlt-machine.patch`](patches/) | 6,927 B, sha256 `5efbec75…`: `hw/arm/xltm.c`, the CPU-less `-M xlt` machine |
+| [`patches/0001-accel-add-xlt-accelerator.patch`](patches/) | 4,771 B, sha256 `90d44917…`: `xlt-accel` / `xlt-accel-ops`, `CONFIG_XLT` wiring, accelerator ownership of guest startup through `AccelClass::setup_post` |
+| [`patches/0002-hw-arm-add-xlt-machine.patch`](patches/) | 9,908 B, sha256 `82a28726…`: `hw/arm/xltm.c`, the CPU-less `-M xlt` machine, P2.1 `ArmSysRegs`, MMIO/BQL and semihosting hooks |
 | [`build-qemu.sh`](build-qemu.sh), [`build-xlt.sh`](build-xlt.sh) | pristine QEMU 8.2.2 tree; patched tree with `libxlt.a` and `qemu-system-aarch64` (92 s, 1,971/1,971 targets, 0 warnings on the 32-thread host) |
-| [`p1/run.sh`](p1/run.sh) | parity, determinism and failure-path suite (`run.sh: PASS`, ≈1 s) |
+| [`p1/run.sh`](p1/run.sh) | P1 parity, determinism and failure-path suite (`run.sh: PASS`, ≈1 s) |
+| [`p2/run.sh`](p2/run.sh) | P2.1 MMU/fault/ERET and semihosting parity (`run.sh: PASS`) |
 | `xlt/tests/fixtures/p1/`, `xlt/tests/fixtures/qemu-smoke/` | fixtures and the unpatched-tree baseline image |
 | [`p1/NOTES.md`](p1/NOTES.md) | P1 limits, host-emulated registers, evidence |
 

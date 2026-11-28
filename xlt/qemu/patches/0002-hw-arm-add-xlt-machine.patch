@@ -2,7 +2,7 @@ diff --git a/hw/arm/xltm.c b/hw/arm/xltm.c
 new file mode 100644
 --- /dev/null
 +++ b/hw/arm/xltm.c
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,332 @@
 +/*
 + * xlt machine: map guest RAM/PL011, load an AArch64 ELF and run it through libxlt.
 + *
@@ -37,6 +37,24 @@ new file mode 100644
 +#define XLT_UART_BASE 0x09000000ULL
 +#define XLT_STACK_SIZE (8ULL * MiB)
 +
++typedef struct ArmSysRegs {
++    uint64_t sctlr;
++    uint64_t ttbr0;
++    uint64_t ttbr1;
++    uint64_t tcr;
++    uint64_t mair;
++    uint64_t vbar;
++    uint64_t esr;
++    uint64_t far;
++    uint64_t elr;
++    uint64_t spsr;
++    uint64_t sp_el0;
++    uint64_t sp_el1;
++    uint64_t mdscr;
++    uint64_t daif;
++    uint64_t current_el;
++} ArmSysRegs;
++
 +struct XltMachineState {
 +    MachineState parent;
 +
@@ -46,6 +64,9 @@ new file mode 100644
 +    xlt_engine *engine;
 +    xlt_cpu_regs regs;
 +    uint64_t entry;
++    ArmSysRegs sysregs;
++    Chardev *serial;
++    bool guest_started;
 +};
 +
 +static void xltm_fatal(void *opaque, const char *message, int exit_code)
@@ -60,8 +81,10 @@ new file mode 100644
 +    uint64_t value = 0;
 +    MemTxResult result;
 +
++    qemu_mutex_lock_iothread();
 +    result = address_space_rw(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
 +                              &value, size, false);
++    qemu_mutex_unlock_iothread();
 +    if (result != MEMTX_OK) {
 +        xltm_fatal(opaque, "guest MMIO read failed", 70);
 +    }
@@ -72,8 +95,10 @@ new file mode 100644
 +{
 +    MemTxResult result;
 +
++    qemu_mutex_lock_iothread();
 +    result = address_space_rw(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
 +                              &value, size, true);
++    qemu_mutex_unlock_iothread();
 +    if (result != MEMTX_OK) {
 +        xltm_fatal(opaque, "guest MMIO write failed", 70);
 +    }
@@ -81,28 +106,95 @@ new file mode 100644
 +
 +static uint64_t xltm_read_sysreg(void *opaque, uint32_t reg)
 +{
++    XltMachineState *s = opaque;
++    const ArmSysRegs *r = &s->sysregs;
++
 +    switch (reg) {
-+    case 0xc212: /* CurrentEL */
-+        return 4;
-+    case 0xdf00: /* CNTFRQ_EL0 */
-+        return 62500000;
-+    case 0xdf02: /* CNTVCT_EL0 */
-+        return (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 16;
-+    case 0xc005: /* MPIDR_EL1 */
-+        return 0;
-+    default:
-+        return 0;
++    case 0xc080: return r->sctlr;
++    case 0xc100: return r->ttbr0;
++    case 0xc101: return r->ttbr1;
++    case 0xc102: return r->tcr;
++    case 0xc510: return r->mair;
++    case 0xc600: return r->vbar;
++    case 0xc290: return r->esr;
++    case 0xc300: return r->far;
++    case 0xc201: return r->elr;
++    case 0xc200: return r->spsr;
++    case 0xc208: return r->sp_el0;
++    case 0xe208: return r->sp_el1;
++    case 0xc212: return r->current_el;
++    case 0xda11: return r->daif;
++    case 0x8012: return r->mdscr;
++    case 0xc038:
++    case 0xc039: return 0;
++    case 0xdf00: return 62500000;
++    case 0xdf02: return (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 16;
++    case 0xc005: return 0;
++    default: return 0;
 +    }
 +}
 +
 +static void xltm_write_sysreg(void *opaque, uint32_t reg, uint64_t value)
 +{
-+    /* P1 ignores guest system-register writes. */
++    XltMachineState *s = opaque;
++    ArmSysRegs *r = &s->sysregs;
++
++    switch (reg) {
++    case 0xc080: r->sctlr = value; break;
++    case 0xc100: r->ttbr0 = value; break;
++    case 0xc101: r->ttbr1 = value; break;
++    case 0xc102: r->tcr = value; break;
++    case 0xc510: r->mair = value; break;
++    case 0xc600: r->vbar = value; break;
++    case 0xc290: r->esr = value; break;
++    case 0xc300: r->far = value; break;
++    case 0xc201: r->elr = value; break;
++    case 0xc200: r->spsr = value; break;
++    case 0xc208: r->sp_el0 = value; break;
++    case 0xe208: r->sp_el1 = value; break;
++    case 0xda11: r->daif = value & 0x3c0; break;
++    case 0x8012: r->mdscr = value; break;
++    default: break;
++    }
 +}
 +
 +static void xltm_semihost(void *opaque, xlt_cpu_regs *regs)
 +{
-+    /* HLT #0xf000 is a no-op in P1: fixtures use PSCI SYSTEM_OFF via HVC. */
++    XltMachineState *s = opaque;
++    const uint64_t op = regs->x[0];
++    const uint64_t arg = regs->x[1];
++
++    if (op == 0x04) { /* SYS_WRITE0 */
++        uint8_t buf[256];
++        unsigned len = 0;
++        for (; len < sizeof(buf) - 1; len++) {
++            const uint64_t addr = arg + len;
++            uint8_t ch = 0;
++            if (addr >= XLT_RAM_BASE && addr < XLT_RAM_BASE + XLT_RAM_SIZE) {
++                ch = s->ram_ptr[addr - XLT_RAM_BASE];
++            } else {
++                if (address_space_rw(&address_space_memory, addr,
++                                     MEMTXATTRS_UNSPECIFIED, &ch, 1, false) != MEMTX_OK) {
++                    break;
++                }
++            }
++            if (ch == 0) {
++                break;
++            }
++            buf[len] = ch;
++        }
++        if (s->serial != NULL && len != 0) {
++            qemu_mutex_lock_iothread();
++            qemu_chr_write_all(s->serial, buf, len);
++            qemu_mutex_unlock_iothread();
++        }
++        return;
++    }
++    if (op == 0x18) { /* SYS_EXIT */
++        fflush(NULL);
++        exit((int)arg);
++    }
++    xltm_fatal(s, "unsupported semihosting operation", 71);
 +}
 +
 +static void xltm_hvc(void *opaque, xlt_cpu_regs *regs, uint32_t imm)
@@ -174,7 +266,9 @@ new file mode 100644
 +    s->entry = entry;
 +
 +    irq = qemu_allocate_irq(xltm_irq_handler, s, 0);
-+    pl011_create(XLT_UART_BASE, irq, serial_hd(0));
++    s->serial = serial_hd(0);
++    pl011_create(XLT_UART_BASE, irq, s->serial);
++    s->sysregs.current_el = 4;
 +
 +    s->ops = (xlt_host_ops){
 +        .opaque = s,
@@ -206,6 +300,10 @@ new file mode 100644
 +{
 +    XltMachineState *s = XLT_MACHINE(machine);
 +
++    if (s->guest_started) {
++        return;
++    }
++    s->guest_started = true;
 +    xlt_start_guest_thread(xltm_guest_run, s);
 +}
 +

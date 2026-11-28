@@ -57,6 +57,7 @@ uint64_t xlt_host_read(uint64_t addr, uint64_t size);
 void xlt_host_write(uint64_t addr, uint64_t value, uint64_t size);
 uint64_t xlt_sysreg_read(uint32_t reg);
 void xlt_sysreg_write(uint32_t reg, uint64_t value);
+void xlt_pstate_write(uint32_t pstate, uint64_t immediate);
 void xlt_hvc(CpuRegs *regs, uint64_t imm);
 void xlt_semihost(CpuRegs *regs);
 uint64_t xlt_cntvct();

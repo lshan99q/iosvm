@@ -280,6 +280,12 @@ context lines so `git diff --cached --check` is clean). Their code content is un
 apply to pristine QEMU 8.2.2 with `patch -p1 --dry-run` (exit 0, no rejects) and the resulting
 tree is the one exercised by TCG/xlt parity above.
 
+P2.1 update (post-P1): the patches were regenerated from the P2.1 tree and now include the
+`ArmSysRegs`/MMIO/BQL/semihosting changes. The final P2.1 bytes are 4,771/`90d44917…` for 0001 and
+9,908/`82a28726…` for 0002; both apply with `patch -p1`/`git apply --check` and reproduce the
+`/home/lshan/xlt/qemu-8.2.2-xlt` tree used by `xlt/qemu/p2/run.sh`. The P1 table above records the
+pre-P2.1 artifact and is intentionally retained as verification history.
+
 ## A2. Fresh tree, apply checks, build
 
 A new tree was used (not the t11 verify tree and not the working copy):

@@ -135,6 +135,7 @@ enum class OperandKind : uint8_t {
     kMem,
     kSysReg,
     kCond,
+    kPstate,
 };
 
 /* One operand. Only the members selected by `kind` are meaningful:
@@ -143,6 +144,7 @@ enum class OperandKind : uint8_t {
  *   kMem     -> base, index (may be !valid), disp, shift/shift_amount or extend/extend_amount
  *   kSysReg  -> sysreg (the raw MRS/MSR encoding, e.g. NZCV == 0xda10)
  *   kCond    -> cond
+ *   kPstate  -> pstate (raw capstone PSTATE field, e.g. SPSel/DAIFSet/DAIFClr)
  * Shift and extend are mutually exclusive; the decoder clears `shift` when it sets `extend`. */
 struct Operand {
     OperandKind kind = OperandKind::kNone;
@@ -156,6 +158,7 @@ struct Operand {
     ExtendType extend = ExtendType::kNone;
     uint8_t extend_amount = 0;
     uint16_t sysreg = 0;
+    uint16_t pstate = 0;
     Cond cond = Cond::kAl;
 };
 
@@ -271,6 +274,11 @@ enum class Opcode : uint16_t {
     kBrk,
     kSvc,
     kHvc,
+    kSmc,
+    kEret,
+    kTlbi,
+    kDc,
+    kIc,
     kWfe,
     kWfi,
     kSev,
