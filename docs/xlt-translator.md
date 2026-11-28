@@ -281,13 +281,31 @@ micro-fixtures pay JIT startup, so throughput only shows on the benchmark. M1 is
 `make -C xlt` 25 s, 481 decode checks, 5/5 benchmark checksums, overall 9.68–10.02× in the two P1
 verification runs (load 5.9–8.5), consistent with the 10.08× table above (load 3.63–5.93).
 
-**What is missing.** No MMU/page tables or exceptions, no interrupts/GIC/timers, no pflash or
+**What P1 is missing.** No MMU/page tables or exceptions, no interrupts/GIC/timers, no pflash or
 virtio-blk, no FDT, no FP/SIMD/atomics/LSE, no DMA or self-modifying-code invalidation, one guest
 vCPU, and only four host-emulated system registers. The plan that closes these gaps is
 [`xlt/qemu/p2/PLAN.md`](../xlt/qemu/p2/PLAN.md): it grows the custom machine (path A) rather than
 trying to make `-M virt -accel xlt` execute — the t15 spike showed that bounded patches can make
 QEMU accept that combination but nothing runs, because the accelerator's only execution hook is
 `create_vcpu_thread` and QEMU's ARM CPU state is not bridged.
+
+## M2/P2: stage-1 MMU and exceptions
+
+P2.1 and P2.2 keep the CPU-less `-M xlt` machine and grow the engine's architectural state:
+SCTLR/TTBR/TCR/MAIR/VBAR/ESR/FAR/ELR/SPSR/DAIF/SP_EL0/SP_EL1, 4 KiB-granule EL1 translation with
+2 MiB/1 GiB blocks, a 512-entry software TLB, EL0/EL1 PSTATE and SP banks, both synchronous vector
+classes (`VBAR+0x200`/`+0x400`), SVC, lower-EL data aborts, ERET validation and PSTATE.IL, and real
+HLT semihosting. The QEMU machine mirrors the sysreg block and takes the BQL only around MMIO; the
+guest thread runs without it.
+
+`xlt/qemu/p2/run.sh` compares TCG and xlt byte-for-byte: P2.1 MMU (259 B), semihosting (19 B) and
+P2.2 exceptions (419 B) are identical, and the same images run through `xlt run` with the same
+stdout and exit 0. P2.2's oracle covers `svc #0x42` (`esr=0x56000042`), a lower-EL permission data
+abort (`esr=0x9200000f`), DAIF round-trip and an illegal-ERET trap (`esr=0x3a000000`, IL=1).
+Fixtures and hashes are in [`xlt/qemu/p2/NOTES.md`](../xlt/qemu/p2/NOTES.md).
+
+**Still missing.** Interrupt delivery, GICD/GICR/ICC, virtual timer, PL011 RX, EL2/EL3, FP/SIMD,
+atomics, SMP, pflash/virtio/FDT; these belong to P2.3 and later.
 
 ## Limitations
 

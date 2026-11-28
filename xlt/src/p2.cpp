@@ -94,8 +94,9 @@ struct P2Engine::Impl {
     uint64_t sp_el0 = 0;
     uint64_t sp_el1 = 0;
     uint64_t mdscr = 0;
-    uint32_t daif = 0x3c0;
-    bool spsel = true;
+    /* PSTATE subset: M[3:0] (EL/handler), DAIF[9:6], IL[20]. NZCV stays in CpuRegs. */
+    uint32_t pstate = 0x3c5;
+    static constexpr uint32_t kPstateMask = 0x001003cf;
     bool last_fault_write = false;
     uint32_t last_fault_fsc = 0;
 
@@ -103,9 +104,11 @@ struct P2Engine::Impl {
     struct TlbEntry {
         uint64_t va_page = 0;
         uint64_t pa_page = 0;
-        bool read = false;
-        bool write = false;
-        bool execute = false;
+        bool af = false;
+        bool ap_readonly = false;
+        bool ap_user = false;
+        bool uxn = false;
+        bool pxn = false;
         uint32_t generation = 0;
         bool valid = false;
     };
@@ -266,29 +269,52 @@ struct P2Engine::Impl {
         return addr;
     }
 
+    unsigned current_el() const
+    {
+        return (pstate >> 2) & 3u;
+    }
+
+    bool uses_sp_elx() const
+    {
+        return (pstate & 1u) != 0;
+    }
+
+    uint32_t daif_bits() const
+    {
+        return pstate & 0x3c0u;
+    }
+
     bool tlb_lookup(uint64_t va, bool write, bool execute, uint64_t *pa) const
     {
         const TlbEntry &entry = tlb[(va >> 12) & 511];
         if (!entry.valid || entry.generation != generation || entry.va_page != (va & ~0xfffULL))
             return false;
-        if (write && !entry.write)
+        const bool el0 = current_el() == 0;
+        const bool read_ok = entry.af && (!el0 || entry.ap_user);
+        const bool write_ok = entry.af && !entry.ap_readonly && (!el0 || entry.ap_user);
+        const bool xn = el0 ? entry.uxn : (entry.pxn || (entry.ap_user && !entry.ap_readonly));
+        const bool exec_ok = entry.af && !xn;
+        if (write && !write_ok)
             return false;
-        if (execute && !entry.execute)
+        if (execute && !exec_ok)
             return false;
-        if (!write && !execute && !entry.read)
+        if (!write && !execute && !read_ok)
             return false;
         *pa = entry.pa_page | (va & kPageMask);
         return true;
     }
 
-    void tlb_store(uint64_t va, uint64_t pa, bool read, bool write, bool execute)
+    void tlb_store(uint64_t va, uint64_t pa, bool af, bool ap_readonly, bool ap_user, bool uxn,
+                   bool pxn)
     {
         TlbEntry &entry = tlb[(va >> 12) & 511];
         entry.va_page = va & ~0xfffULL;
         entry.pa_page = pa & ~0xfffULL;
-        entry.read = read;
-        entry.write = write;
-        entry.execute = execute;
+        entry.af = af;
+        entry.ap_readonly = ap_readonly;
+        entry.ap_user = ap_user;
+        entry.uxn = uxn;
+        entry.pxn = pxn;
         entry.generation = generation;
         entry.valid = true;
     }
@@ -372,13 +398,16 @@ struct P2Engine::Impl {
                 const bool af = (desc & (1ULL << 10)) != 0;
                 const bool ap_readonly = (desc & (1ULL << 7)) != 0;
                 const bool ap_user = (desc & (1ULL << 6)) != 0;
-                /* In the EL1&0 regime AP=01 is user-RW and, like QEMU's get_S1prot(), is
-                 * execute-never at EL1 (PXN || user_rw). User-RO pages (AP=10/11) stay
-                 * executable at EL1 subject to PXN; EL0/UXN handling is P2.2. */
+                const bool uxn = (desc & (1ULL << 54)) != 0;
+                const bool pxn = (desc & (1ULL << 53)) != 0;
+                const bool el0 = current_el() == 0;
                 const bool user_rw = ap_user && !ap_readonly;
-                const bool xn = (desc & (1ULL << 54)) != 0 || user_rw;
-                read_ok = af;
-                write_ok = af && !ap_readonly;
+                /* AP[1] gates all EL0 accesses; AP[2] removes EL0 write permission.
+                 * In the EL1&0 regime a user-RW mapping is execute-never at EL1;
+                 * EL1 execution also honours PXN and EL0 execution honours UXN. */
+                read_ok = af && (!el0 || ap_user);
+                write_ok = af && !ap_readonly && (!el0 || ap_user);
+                const bool xn = el0 ? uxn : (pxn || user_rw);
                 exec_ok = af && !xn;
                 if (execute && !exec_ok) {
                     fault = 0x0c + static_cast<uint32_t>(level);
@@ -390,6 +419,8 @@ struct P2Engine::Impl {
                     fault = 0x0c + static_cast<uint32_t>(level);
                     valid = false;
                 }
+                if (valid)
+                    tlb_store(va, result, af, ap_readonly, ap_user, uxn, pxn);
                 break;
             }
             table = desc & 0x0000fffffffff000ULL;
@@ -401,18 +432,17 @@ struct P2Engine::Impl {
         }
         *pa = result;
         *fsc = 0;
-        tlb_store(va, result, read_ok, write_ok, exec_ok);
         return true;
     }
 
     uint32_t pack_spsr() const
     {
-        return (regs->nzcv & 0xf0000000u) | (daif & 0x3c0u) | 0x5u;
+        return (regs->nzcv & 0xf0000000u) | (pstate & kPstateMask);
     }
 
     void save_active_sp()
     {
-        if (spsel)
+        if (uses_sp_elx())
             sp_el1 = regs->sp;
         else
             sp_el0 = regs->sp;
@@ -420,24 +450,41 @@ struct P2Engine::Impl {
 
     void load_active_sp()
     {
-        regs->sp = spsel ? sp_el1 : sp_el0;
+        regs->sp = uses_sp_elx() ? sp_el1 : sp_el0;
+    }
+
+    /* Common architectural exception entry: save ELR/SPSR, mask DAIF, switch to EL1h and
+     * take the synchronous vector for the source EL. */
+    void take_exception(uint32_t ec, uint32_t iss, uint64_t trap_pc, uint64_t fault_addr,
+                        bool set_far)
+    {
+        const unsigned from_el = current_el();
+        const bool from_spx = uses_sp_elx();
+        save_active_sp();
+        elr = trap_pc;
+        spsr = pack_spsr();
+        esr = (static_cast<uint64_t>(ec) << 26) | (1ULL << 25) |
+              (static_cast<uint64_t>(iss) & 0x1ffffffu);
+        if (set_far)
+            far = fault_addr;
+        const uint64_t offset = from_el == 0 ? 0x400 : (from_spx ? 0x200 : 0x000);
+        pstate = 0x3c0u | 0x5u; /* EL1h, DAIF masked, IL clear */
+        load_active_sp();
+        regs->pc = (vbar & ~0x7ffULL) + offset;
+        has_exception = true;
     }
 
     void deliver_fault(bool instruction, uint64_t fault_pc, uint64_t address, bool write,
                        uint32_t fsc)
     {
-        save_active_sp();
-        const uint32_t ec = instruction ? 0x21 : 0x25;
-        esr =
-            (static_cast<uint64_t>(ec) << 26) | (1ULL << 25) | (write ? 0x40u : 0u) | (fsc & 0x3f);
-        far = address;
-        elr = fault_pc;
-        spsr = pack_spsr();
-        daif |= 0x3c0;
-        spsel = true;
-        regs->sp = sp_el1;
-        regs->pc = (vbar & ~0x7ffULL) + 0x200;
-        has_exception = true;
+        const bool from_el0 = current_el() == 0;
+        const uint32_t ec = instruction ? (from_el0 ? 0x20 : 0x21) : (from_el0 ? 0x24 : 0x25);
+        take_exception(ec, (write ? 0x40u : 0u) | (fsc & 0x3f), fault_pc, address, true);
+    }
+
+    void deliver_illegal_state(uint64_t pc)
+    {
+        take_exception(0x0e, 0, pc, 0, false);
     }
 
     bool read_data(uint64_t address, unsigned size, uint64_t *value)
@@ -633,10 +680,21 @@ struct P2Engine::Impl {
     void eret()
     {
         const uint32_t saved = static_cast<uint32_t>(spsr);
+        const unsigned cur_el = current_el();
+        const unsigned target_el = (saved >> 2) & 3u;
+        const bool illegal = target_el > cur_el || (saved & 0x10u) != 0 || (saved & 0x2u) != 0 ||
+                             (saved & 0xfu) == 1u;
+        if (illegal) {
+            /* Illegal return: keep EL/SP selection, restore only NZCV and DAIF, set IL.
+             * The next instruction fetch raises EC=0x0e before it executes. */
+            pstate = (pstate & ~(0x3c0u | (1u << 20))) | (saved & 0x3c0u) | (1u << 20);
+            regs->nzcv = saved & 0xf0000000u;
+            regs->pc = elr;
+            return;
+        }
         save_active_sp();
+        pstate = saved & kPstateMask;
         regs->nzcv = saved & 0xf0000000u;
-        daif = saved & 0x3c0u;
-        spsel = (saved & 1u) != 0;
         load_active_sp();
         regs->pc = elr;
     }
@@ -675,16 +733,16 @@ struct P2Engine::Impl {
             *value = spsr;
             return true;
         case 0xc208:
-            *value = spsel ? sp_el0 : regs->sp;
+            *value = sp_el0;
             return true;
         case 0xe208:
-            *value = spsel ? regs->sp : sp_el1;
+            *value = sp_el1;
             return true;
         case 0xc212:
-            *value = 4;
+            *value = static_cast<uint64_t>(current_el()) << 2;
             return true;
         case 0xda11:
-            *value = daif;
+            *value = daif_bits();
             return true;
         case 0x8012:
             *value = mdscr;
@@ -740,20 +798,20 @@ struct P2Engine::Impl {
             elr = value;
             return true;
         case 0xc200:
-            spsr = value;
+            spsr = value & kPstateMask;
             return true;
         case 0xc208:
             sp_el0 = value;
-            if (!spsel)
+            if (!uses_sp_elx())
                 regs->sp = value;
             return true;
         case 0xe208:
             sp_el1 = value;
-            if (spsel)
+            if (uses_sp_elx())
                 regs->sp = value;
             return true;
         case 0xda11:
-            daif = static_cast<uint32_t>(value) & 0x3c0;
+            pstate = (pstate & ~0x3c0u) | (static_cast<uint32_t>(value) & 0x3c0u);
             return true;
         case 0x8012:
             mdscr = value;
@@ -767,19 +825,19 @@ struct P2Engine::Impl {
         }
     }
 
-    bool pstate_write(uint32_t pstate, uint64_t immediate)
+    bool pstate_write(uint32_t code, uint64_t immediate)
     {
-        switch (pstate) {
+        switch (code) {
         case 0x05: /* SPSel */
             save_active_sp();
-            spsel = (immediate & 1) != 0;
+            pstate = (pstate & ~1u) | ((static_cast<uint32_t>(immediate) & 1u));
             load_active_sp();
             return true;
         case 0x1e: /* DAIFSet */
-            daif |= (static_cast<uint32_t>(immediate) & 0xf) << 6;
+            pstate |= (static_cast<uint32_t>(immediate) & 0xfu) << 6;
             return true;
         case 0x1f: /* DAIFClr */
-            daif &= ~((static_cast<uint32_t>(immediate) & 0xf) << 6);
+            pstate &= ~((static_cast<uint32_t>(immediate) & 0xfu) << 6);
             return true;
         default:
             return false;
@@ -802,6 +860,10 @@ struct P2Engine::Impl {
                 continue;
             }
             fault_streak = 0;
+            if ((pstate & (1u << 20)) != 0) {
+                deliver_illegal_state(cur_pc);
+                continue;
+            }
             const Insn insn = decode(cur_pc, word);
             if (insn.unsupported) {
                 if (error != nullptr) {
@@ -843,7 +905,7 @@ P2Engine::P2Engine(const HostOps *host, CpuRegs *regs) : impl_(std::make_unique<
     impl_->regs = regs;
     impl_->sp_el1 = regs->sp;
     impl_->sp_el0 = 0;
-    impl_->spsel = true;
+    impl_->pstate = 0x3c5;
     g_engine = this;
 }
 
@@ -1451,9 +1513,18 @@ bool P2Engine::Impl::execute(const Insn &insn, bool *pc_written)
     case Opcode::kIc:
         invalidate_tlb();
         return true;
-    case Opcode::kBrk:
-    case Opcode::kSvc:
+    case Opcode::kSvc: {
+        const uint32_t imm = static_cast<uint32_t>(is_imm(insn, 0) ? op(insn, 0).imm : 0) & 0xffffu;
+        take_exception(0x15, imm, cur_pc + 4, 0, false);
+        *pc_written = true;
         return true;
+    }
+    case Opcode::kBrk: {
+        const uint32_t imm = static_cast<uint32_t>(is_imm(insn, 0) ? op(insn, 0).imm : 0) & 0xffffu;
+        take_exception(0x3c, imm, cur_pc + 4, 0, false);
+        *pc_written = true;
+        return true;
+    }
 
     case Opcode::kUnsupported:
     default:

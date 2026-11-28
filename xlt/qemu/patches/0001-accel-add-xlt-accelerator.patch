@@ -176,9 +176,10 @@ diff --git a/configs/targets/aarch64-softmmu.mak b/configs/targets/aarch64-softm
 diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
 --- a/hw/arm/Kconfig
 +++ b/hw/arm/Kconfig
-@@ -0,0 +1,5 @@
+@@ -1,1 +1,6 @@
 +config XLT
 +    bool
 +    depends on ARM
 +    select PL011
 +
+ config ARM_VIRT

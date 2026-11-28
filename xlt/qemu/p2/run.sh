@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Verify P2.1 fixtures: TCG is the serial reference, xlt must match byte-for-byte.
+# Verify P2.1/P2.2 fixtures: TCG is the serial reference, xlt must match byte-for-byte.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,8 +16,10 @@ die() { echo "run.sh: $*" >&2; exit 1; }
 
 mmu="$repo/xlt/build/fixtures/p2/mmu.elf"
 semihost="$repo/xlt/build/fixtures/p2/semihost.elf"
+exc="$repo/xlt/build/fixtures/p2/exc.elf"
 [ -f "$mmu" ] || "$repo/xlt/tests/fixtures/p2/mmu/build.sh" >/dev/null
 [ -f "$semihost" ] || "$repo/xlt/tests/fixtures/p2/semihost/build.sh" >/dev/null
+[ -f "$exc" ] || "$repo/xlt/tests/fixtures/p2/exc/build.sh" >/dev/null
 
 # run_qemu <out> <err> <qemu> <machine> <accel> <elf> [extra...]
 run_qemu() {
@@ -61,4 +63,12 @@ semi_rc="$(run_qemu "$semi_tcg_out" "$semi_tcg_err" "$tcg" virt tcg "$semihost" 
 [ ! -s "$semi_tcg_out" ] || die "p2-semihost under TCG unexpectedly wrote stdout"
 check_xlt p2-semihost "$semihost" "$semi_tcg_err"
 
-echo "run.sh: PASS (P2.1 MMU/fault/ERET and semihosting parity)"
+# P2.2 exception fixture: EL0/EL1 SVC, lower-EL data abort, illegal ERET and DAIF.
+exc_tcg_out="$tmp/p2-exc.tcg"
+exc_tcg_err="$tmp/p2-exc.tcg.err"
+exc_rc="$(run_qemu "$exc_tcg_out" "$exc_tcg_err" "$tcg" virt tcg "$exc")"
+[ "$exc_rc" -eq 0 ] || die "p2-exc under TCG failed (rc=$exc_rc)"
+[ ! -s "$exc_tcg_err" ] || { cat "$exc_tcg_err" >&2; die "p2-exc under TCG wrote to stderr"; }
+check_xlt p2-exc "$exc" "$exc_tcg_out"
+
+echo "run.sh: PASS (P2.1 MMU/fault/ERET + semihosting and P2.2 exception parity)"
